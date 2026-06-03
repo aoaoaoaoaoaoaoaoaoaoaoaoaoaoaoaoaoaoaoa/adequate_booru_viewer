@@ -7,12 +7,13 @@ use roaring::RoaringBitmap;
 use std::{collections::HashSet, io::Cursor, mem::size_of, path::Path, sync::Arc};
 
 use crate::model::{
-    CLIP_DIM, Embedding, PostId, PostRecord, Query, SearchHit, Sort, Tag, decode_record,
-    encode_record,
+    CLIP_DIM, Embedding, PostId, PostRecord, Query, RatingClass, SearchHit, Sort, Tag,
+    decode_record, encode_record,
 };
 
 const POSTS: TableDefinition<'_, u64, &[u8]> = TableDefinition::new("posts");
 const TAG_POSTS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("tag_posts");
+const RATING_POSTS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("rating_posts");
 const SCORE_POSTS: TableDefinition<'_, u64, u32> = TableDefinition::new("score_posts");
 const FAV_POSTS: TableDefinition<'_, u64, u32> = TableDefinition::new("fav_posts");
 const JINA_IMAGE: TableDefinition<'_, u64, &[u8]> =
@@ -36,6 +37,28 @@ pub struct TagSuggestion {
     pub posts: u64,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct CacheStats {
+    pub posts: u64,
+    pub tags: u64,
+    pub embeddings: u64,
+    pub newest: Option<PostId>,
+    pub crawl_before: Option<PostId>,
+    pub ratings: Vec<(RatingClass, u64)>,
+}
+
+impl CacheStats {
+    pub fn rough_crawl_percent(&self) -> Option<f32> {
+        let newest = self.newest?.0;
+        let before = self.crawl_before?.0;
+        if newest == 0 || before > newest {
+            return None;
+        }
+        let covered = newest - before + 1;
+        Some(100.0 * covered as f32 / newest as f32)
+    }
+}
+
 #[derive(Clone)]
 pub struct Index {
     db: Arc<Database>,
@@ -54,6 +77,7 @@ impl Index {
         {
             let mut post_table = tx.open_table(POSTS).context("open posts")?;
             let mut tag_table = tx.open_table(TAG_POSTS).context("open tag_posts")?;
+            let mut rating_table = tx.open_table(RATING_POSTS).context("open rating_posts")?;
             let mut score_table = tx.open_table(SCORE_POSTS).context("open score_posts")?;
             let mut fav_table = tx.open_table(FAV_POSTS).context("open fav_posts")?;
 
@@ -71,6 +95,9 @@ impl Index {
                         .remove(sort_key_u32(old.favs, old.id))
                         .context("remove old favorite lane")?;
                     reap_dead_tags(&mut tag_table, &old, post)?;
+                    if let Some(rating) = old.rating.class() {
+                        bitmap_remove(&mut rating_table, rating.key(), old.id)?;
+                    }
                 }
 
                 let encoded = encode_record(post)?;
@@ -85,17 +112,10 @@ impl Index {
                     .context("upsert favorite lane")?;
 
                 for tag in &post.tags {
-                    let mut bitmap = tag_table
-                        .get(tag.as_str())
-                        .context("read tag bitmap")?
-                        .map(|guard| bitmap_decode(guard.value()))
-                        .transpose()?
-                        .unwrap_or_default();
-                    let _inserted = bitmap.insert(post.id.0);
-                    let bytes = bitmap_encode(&bitmap)?;
-                    let _old_bitmap = tag_table
-                        .insert(tag.as_str(), bytes.as_slice())
-                        .context("upsert tag bitmap")?;
+                    bitmap_insert(&mut tag_table, tag.as_str(), post.id)?;
+                }
+                if let Some(rating) = post.rating.class() {
+                    bitmap_insert(&mut rating_table, rating.key(), post.id)?;
                 }
             }
         }
@@ -171,6 +191,46 @@ impl Index {
         hits.sort_unstable_by(|a, b| b.posts.cmp(&a.posts).then_with(|| a.tag.cmp(&b.tag)));
         hits.truncate(limit);
         Ok(hits)
+    }
+
+    pub fn stats(&self) -> Result<CacheStats> {
+        let tx = self.db.begin_read().context("begin cache stats read")?;
+        let posts = tx.open_table(POSTS).context("open posts")?;
+        let tags = tx.open_table(TAG_POSTS).context("open tag_posts")?;
+        let rating_table = tx.open_table(RATING_POSTS).context("open rating_posts")?;
+        let embeddings = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
+        let newest = posts
+            .range(0_u64..=u64::MAX)
+            .context("range newest post id")?
+            .next_back()
+            .map(|row| {
+                let (id, _) = row.context("read newest post id")?;
+                narrow_meta_post_id(id.value())
+            })
+            .transpose()?;
+        let crawl_before = tx
+            .open_table(META)
+            .context("open meta")?
+            .get(DANBOORU_CRAWL_BEFORE)
+            .context("read Danbooru crawl cursor")?
+            .map(|guard| narrow_meta_post_id(guard.value()))
+            .transpose()?;
+        let ratings = RatingClass::ALL
+            .into_iter()
+            .map(|rating| {
+                let posts =
+                    read_rating_bitmap(&rating_table, rating)?.map_or(0, |bitmap| bitmap.len());
+                Ok((rating, posts))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(CacheStats {
+            posts: posts.len().context("count posts")?,
+            tags: tags.len().context("count tags")?,
+            embeddings: embeddings.len().context("count Jina image embeddings")?,
+            newest,
+            crawl_before,
+            ratings,
+        })
     }
 
     pub fn search(&self, query: &Query, sort: Sort, limit: usize) -> Result<SearchHit> {
@@ -279,14 +339,18 @@ impl Index {
     fn prime(&self) -> Result<()> {
         let tx = self.db.begin_write().context("begin schema prime")?;
         {
-            let _posts = tx.open_table(POSTS).context("prime posts")?;
+            let posts = tx.open_table(POSTS).context("prime posts")?;
             let _tags = tx.open_table(TAG_POSTS).context("prime tag_posts")?;
+            let mut ratings = tx.open_table(RATING_POSTS).context("prime rating_posts")?;
             let _score = tx.open_table(SCORE_POSTS).context("prime score_posts")?;
             let _favs = tx.open_table(FAV_POSTS).context("prime fav_posts")?;
             let _jina = tx
                 .open_table(JINA_IMAGE)
                 .context("prime Jina image table")?;
             let _meta = tx.open_table(META).context("prime meta")?;
+            if ratings.is_empty().context("measure rating_posts")? {
+                backfill_ratings(&posts, &mut ratings)?;
+            }
         }
         tx.commit().context("commit schema prime")
     }
@@ -297,11 +361,14 @@ impl Index {
     ) -> Result<Option<RoaringBitmap>> {
         let tags = query.tags();
         let excluded = query.excluded_tags();
-        if tags.is_empty() && excluded.is_empty() {
+        let ratings = query.ratings();
+        let excluded_ratings = query.excluded_ratings();
+        if query.is_empty() {
             return Ok(None);
         }
 
         let tag_table = tx.open_table(TAG_POSTS).context("open tag_posts")?;
+        let rating_table = tx.open_table(RATING_POSTS).context("open rating_posts")?;
         let mut positive = tags
             .iter()
             .map(|tag| read_bitmap(&tag_table, tag))
@@ -312,7 +379,9 @@ impl Index {
         positive.sort_by_key(|bitmap| bitmap.as_ref().map_or(0, RoaringBitmap::len));
 
         let mut iter = positive.into_iter().flatten();
-        let mut acc = if let Some(first) = iter.next() {
+        let mut acc = if let Some(rating_bitmap) = rating_union(&rating_table, ratings)? {
+            rating_bitmap
+        } else if let Some(first) = iter.next() {
             first
         } else {
             let posts = tx.open_table(POSTS).context("open posts")?;
@@ -323,6 +392,11 @@ impl Index {
         }
         for tag in excluded {
             if let Some(bitmap) = read_bitmap(&tag_table, tag)? {
+                acc -= bitmap;
+            }
+        }
+        for rating in excluded_ratings {
+            if let Some(bitmap) = read_rating_bitmap(&rating_table, *rating)? {
                 acc -= bitmap;
             }
         }
@@ -360,6 +434,61 @@ fn reap_dead_tags(
     Ok(())
 }
 
+fn bitmap_insert(table: &mut redb::Table<'_, &str, &[u8]>, key: &str, id: PostId) -> Result<()> {
+    let mut bitmap = table
+        .get(key)
+        .with_context(|| format!("read bitmap {key}"))?
+        .map(|guard| bitmap_decode(guard.value()))
+        .transpose()?
+        .unwrap_or_default();
+    let _inserted = bitmap.insert(id.0);
+    let bytes = bitmap_encode(&bitmap)?;
+    let _old = table
+        .insert(key, bytes.as_slice())
+        .with_context(|| format!("upsert bitmap {key}"))?;
+    Ok(())
+}
+
+fn bitmap_remove(table: &mut redb::Table<'_, &str, &[u8]>, key: &str, id: PostId) -> Result<()> {
+    let Some(mut bitmap) = table
+        .get(key)
+        .with_context(|| format!("read bitmap {key}"))?
+        .map(|guard| bitmap_decode(guard.value()))
+        .transpose()?
+    else {
+        return Ok(());
+    };
+    let _removed = bitmap.remove(id.0);
+    if bitmap.is_empty() {
+        let _old = table
+            .remove(key)
+            .with_context(|| format!("remove empty bitmap {key}"))?;
+    } else {
+        let bytes = bitmap_encode(&bitmap)?;
+        let _old = table
+            .insert(key, bytes.as_slice())
+            .with_context(|| format!("rewrite bitmap {key}"))?;
+    }
+    Ok(())
+}
+
+fn backfill_ratings(
+    posts: &impl redb::ReadableTable<u64, &'static [u8]>,
+    ratings: &mut redb::Table<'_, &str, &[u8]>,
+) -> Result<()> {
+    for row in posts
+        .range(0_u64..=u64::MAX)
+        .context("range posts for rating backfill")?
+    {
+        let (_, post) = row.context("read post for rating backfill")?;
+        let post = decode_record(post.value())?;
+        if let Some(rating) = post.rating.class() {
+            bitmap_insert(ratings, rating.key(), post.id)?;
+        }
+    }
+    Ok(())
+}
+
 fn read_bitmap(
     table: &impl redb::ReadableTable<&'static str, &'static [u8]>,
     tag: &Tag,
@@ -369,6 +498,37 @@ fn read_bitmap(
         .context("read bitmap")?
         .map(|guard| bitmap_decode(guard.value()))
         .transpose()
+}
+
+fn read_rating_bitmap(
+    table: &impl redb::ReadableTable<&'static str, &'static [u8]>,
+    rating: RatingClass,
+) -> Result<Option<RoaringBitmap>> {
+    table
+        .get(rating.key())
+        .context("read rating bitmap")?
+        .map(|guard| bitmap_decode(guard.value()))
+        .transpose()
+}
+
+fn rating_union(
+    table: &impl redb::ReadableTable<&'static str, &'static [u8]>,
+    ratings: &[RatingClass],
+) -> Result<Option<RoaringBitmap>> {
+    if ratings.is_empty() {
+        return Ok(None);
+    }
+    let mut acc = None::<RoaringBitmap>;
+    for rating in ratings {
+        let Some(bitmap) = read_rating_bitmap(table, *rating)? else {
+            continue;
+        };
+        match &mut acc {
+            Some(acc) => *acc |= bitmap,
+            None => acc = Some(bitmap),
+        }
+    }
+    Ok(Some(acc.unwrap_or_default()))
 }
 
 fn newest_ids(

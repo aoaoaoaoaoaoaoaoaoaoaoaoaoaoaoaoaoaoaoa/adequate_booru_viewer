@@ -11,9 +11,9 @@ use std::{
 
 use crate::{
     config::{Config, QueryConfig, SoftConfig, ViewConfig},
-    index::{Index, TagSuggestion},
+    index::{CacheStats, Index, TagSuggestion},
     media::{MediaCache, RgbaBlade},
-    model::{Embedding, PostId, PostRecord, Query, SearchHit, Sort, Tag, TagPolarity},
+    model::{Embedding, PostId, PostRecord, Query, RatingClass, SearchHit, Sort, Tag, TagPolarity},
     worker::{Command, Event, Worker},
     xdg::{Lair, compact_path},
 };
@@ -56,6 +56,7 @@ pub struct Bayonet {
     tile_scale: f32,
     tag_menu_open: bool,
     clip_inflight: HashSet<PostId>,
+    cache_status: String,
     warm_status: String,
     crawl_status: String,
     status: String,
@@ -100,6 +101,7 @@ impl Bayonet {
             tile_scale: config.view.tile_scale.clamp(MIN_TILE_SCALE, MAX_TILE_SCALE),
             tag_menu_open: false,
             clip_inflight: HashSet::new(),
+            cache_status: "cache measuring".to_owned(),
             warm_status: "query warm idle".to_owned(),
         };
         app.reap(true, AUTO_WARM_PAGES)?;
@@ -159,6 +161,7 @@ impl Bayonet {
         if warm {
             self.dispatch_warm(query, pages)?;
         }
+        self.update_cache_status();
         Ok(())
     }
 
@@ -238,6 +241,13 @@ impl Bayonet {
     fn strike(&mut self, warm: bool, pages: u32) {
         if let Err(err) = self.reap(warm, pages) {
             self.status = format!("{err:#}");
+        }
+    }
+
+    fn update_cache_status(&mut self) {
+        match self.index.stats() {
+            Ok(stats) => self.cache_status = cache_status(&stats),
+            Err(err) => self.cache_status = format!("cache stats fault: {err:#}"),
         }
     }
 
@@ -466,8 +476,8 @@ impl Bayonet {
             }
         });
         let _label = ui.label(format!(
-            "{}; {}; {}",
-            self.status, self.warm_status, self.crawl_status
+            "{}; {}; {}; {}",
+            self.status, self.cache_status, self.warm_status, self.crawl_status
         ));
     }
 
@@ -517,9 +527,9 @@ impl Bayonet {
             self.commit_tag_entry();
         }
         self.autocomplete(ui);
-        let _hint = ui.label("enter adds; prefix - to ban; × removes.");
+        let _hint = ui.label("enter adds; prefix - to ban; rating:q works; × removes.");
         let _separator = ui.separator();
-        if query.tags().is_empty() && query.excluded_tags().is_empty() {
+        if query.is_empty() {
             let _empty = ui.label("neutral");
         }
         for tag in query.tags() {
@@ -528,6 +538,14 @@ impl Bayonet {
         for tag in query.excluded_tags() {
             self.chip(ui, tag, TagPolarity::Negative);
         }
+        for rating in query.ratings() {
+            self.rating_chip(ui, *rating, TagPolarity::Positive);
+        }
+        for rating in query.excluded_ratings() {
+            self.rating_chip(ui, *rating, TagPolarity::Negative);
+        }
+        let _separator = ui.separator();
+        let _cache = ui.label(&self.cache_status);
     }
 
     fn chip(&mut self, ui: &mut egui::Ui, tag: &Tag, polarity: TagPolarity) {
@@ -543,9 +561,24 @@ impl Bayonet {
         });
     }
 
+    fn rating_chip(&mut self, ui: &mut egui::Ui, rating: RatingClass, polarity: TagPolarity) {
+        let label = match polarity {
+            TagPolarity::Positive => format!("+ {rating}"),
+            TagPolarity::Negative => format!("- {rating}"),
+        };
+        let _chip = ui.horizontal(|ui| {
+            if ui.small_button("×").clicked() {
+                let mut query = self.query();
+                query.remove_rating(rating);
+                self.install_query(query);
+            }
+            let _label = ui.label(label);
+        });
+    }
+
     fn commit_tag_entry(&mut self) {
         let entry = Query::parse(&self.tag_entry);
-        if entry.tags().is_empty() && entry.excluded_tags().is_empty() {
+        if entry.is_empty() {
             return;
         }
         let mut query = self.query();
@@ -554,6 +587,12 @@ impl Bayonet {
         }
         for tag in entry.excluded_tags() {
             query.set(tag.clone(), TagPolarity::Negative);
+        }
+        for rating in entry.ratings() {
+            query.set_rating(*rating, TagPolarity::Positive);
+        }
+        for rating in entry.excluded_ratings() {
+            query.set_rating(*rating, TagPolarity::Negative);
         }
         self.tag_entry.clear();
         self.install_query(query);
@@ -890,13 +929,30 @@ fn query_text(config: &QueryConfig) -> String {
 
 fn query_config(query: &Query) -> QueryConfig {
     QueryConfig {
-        include: query.tags().iter().map(ToString::to_string).collect(),
-        exclude: query
-            .excluded_tags()
-            .iter()
-            .map(ToString::to_string)
-            .collect(),
+        include: query.include_terms(),
+        exclude: query.exclude_terms(),
     }
+}
+
+fn cache_status(stats: &CacheStats) -> String {
+    let ratings = stats
+        .ratings
+        .iter()
+        .map(|(rating, posts)| format!("{}:{posts}", rating.key()))
+        .collect::<Vec<_>>()
+        .join("/");
+    let frontier = match (stats.crawl_before, stats.rough_crawl_percent()) {
+        (Some(before), Some(percent)) => format!("crawl≤#{before} ≈{percent:.1}% ID"),
+        (Some(before), None) => format!("crawl≤#{before}"),
+        (None, _) => "crawl unstarted".to_owned(),
+    };
+    let newest = stats
+        .newest
+        .map_or_else(|| "newest unknown".to_owned(), |id| format!("newest #{id}"));
+    format!(
+        "cache {} posts, {} tags, {} clip, ratings {ratings}, {newest}, {frontier}",
+        stats.posts, stats.tags, stats.embeddings
+    )
 }
 
 fn consume_wheel(ctx: &egui::Context) {

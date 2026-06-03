@@ -61,10 +61,64 @@ impl Sort {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum RatingClass {
+    General,
+    Sensitive,
+    Questionable,
+    Explicit,
+}
+
+impl RatingClass {
+    pub const ALL: [Self; 4] = [
+        Self::General,
+        Self::Sensitive,
+        Self::Questionable,
+        Self::Explicit,
+    ];
+
+    pub fn parse_metatag(raw: &str) -> Option<Self> {
+        let normalized = raw.trim().to_ascii_lowercase();
+        let body = normalized.strip_prefix("rating:")?;
+        Self::parse_code(body)
+    }
+
+    pub fn parse_code(raw: &str) -> Option<Self> {
+        match raw {
+            "g" | "general" => Some(Self::General),
+            "s" | "sensitive" | "safe" => Some(Self::Sensitive),
+            "q" | "questionable" => Some(Self::Questionable),
+            "e" | "explicit" => Some(Self::Explicit),
+            _ => None,
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::General => "g",
+            Self::Sensitive => "s",
+            Self::Questionable => "q",
+            Self::Explicit => "e",
+        }
+    }
+
+    pub fn term(self) -> String {
+        format!("rating:{}", self.key())
+    }
+}
+
+impl Display for RatingClass {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "rating:{}", self.key())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Query {
     include: Vec<Tag>,
     exclude: Vec<Tag>,
+    ratings: Vec<RatingClass>,
+    excluded_ratings: Vec<RatingClass>,
 }
 
 impl Query {
@@ -72,6 +126,8 @@ impl Query {
         let mut query = Self {
             include: Vec::new(),
             exclude: Vec::new(),
+            ratings: Vec::new(),
+            excluded_ratings: Vec::new(),
         };
         for token in raw.split_whitespace() {
             let (polarity, body) = match token.strip_prefix('-') {
@@ -81,7 +137,9 @@ impl Query {
                     token.strip_prefix('+').unwrap_or(token),
                 ),
             };
-            if let Some(tag) = Tag::forge(body) {
+            if let Some(rating) = RatingClass::parse_metatag(body) {
+                query.set_rating(rating, polarity);
+            } else if let Some(tag) = Tag::forge(body) {
                 query.set(tag, polarity);
             }
         }
@@ -94,6 +152,21 @@ impl Query {
 
     pub fn excluded_tags(&self) -> &[Tag] {
         &self.exclude
+    }
+
+    pub fn ratings(&self) -> &[RatingClass] {
+        &self.ratings
+    }
+
+    pub fn excluded_ratings(&self) -> &[RatingClass] {
+        &self.excluded_ratings
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.include.is_empty()
+            && self.exclude.is_empty()
+            && self.ratings.is_empty()
+            && self.excluded_ratings.is_empty()
     }
 
     pub fn key(&self) -> String {
@@ -113,9 +186,24 @@ impl Query {
         self.normalize();
     }
 
+    pub fn set_rating(&mut self, rating: RatingClass, polarity: TagPolarity) {
+        self.remove_rating(rating);
+        match polarity {
+            TagPolarity::Positive => self.ratings.push(rating),
+            TagPolarity::Negative => self.excluded_ratings.push(rating),
+        }
+        self.normalize();
+    }
+
     pub fn remove(&mut self, tag: &Tag) {
         self.include.retain(|candidate| candidate != tag);
         self.exclude.retain(|candidate| candidate != tag);
+    }
+
+    pub fn remove_rating(&mut self, rating: RatingClass) {
+        self.ratings.retain(|candidate| *candidate != rating);
+        self.excluded_ratings
+            .retain(|candidate| *candidate != rating);
     }
 
     pub fn polarity(&self, tag: &Tag) -> Option<TagPolarity> {
@@ -128,23 +216,44 @@ impl Query {
         }
     }
 
-    fn terms(&self) -> Vec<String> {
+    pub fn include_terms(&self) -> Vec<String> {
         self.include
             .iter()
             .map(Tag::as_str)
             .map(ToOwned::to_owned)
-            .chain(self.exclude.iter().map(|tag| format!("-{tag}")))
+            .chain(self.ratings.iter().map(|rating| rating.term()))
+            .collect()
+    }
+
+    pub fn exclude_terms(&self) -> Vec<String> {
+        self.exclude
+            .iter()
+            .map(Tag::as_str)
+            .map(ToOwned::to_owned)
+            .chain(self.excluded_ratings.iter().map(|rating| rating.term()))
+            .collect()
+    }
+
+    fn terms(&self) -> Vec<String> {
+        self.include_terms()
+            .into_iter()
+            .chain(
+                self.exclude_terms()
+                    .into_iter()
+                    .map(|term| format!("-{term}")),
+            )
             .collect()
     }
 
     pub fn remote_seed(&self, sort: Sort) -> String {
-        self.include
-            .iter()
-            .take(2)
-            .map(ToString::to_string)
-            .chain(std::iter::once(sort.danbooru_order().to_owned()))
-            .collect::<Vec<_>>()
-            .join(" ")
+        let mut terms = Vec::with_capacity(3);
+        if let Some(rating) = self.ratings.first() {
+            terms.push(rating.term());
+        }
+        let remaining = 2_usize.saturating_sub(terms.len());
+        terms.extend(self.include.iter().take(remaining).map(ToString::to_string));
+        terms.push(sort.danbooru_order().to_owned());
+        terms.join(" ")
     }
 
     fn normalize(&mut self) {
@@ -152,6 +261,10 @@ impl Query {
         self.include.dedup();
         self.exclude.sort();
         self.exclude.dedup();
+        self.ratings.sort();
+        self.ratings.dedup();
+        self.excluded_ratings.sort();
+        self.excluded_ratings.dedup();
     }
 }
 
@@ -178,6 +291,16 @@ impl Rating {
             "q" | "questionable" => Self::Questionable,
             "e" | "explicit" => Self::Explicit,
             other => Self::Unknown(other.to_owned()),
+        }
+    }
+
+    pub fn class(&self) -> Option<RatingClass> {
+        match self {
+            Self::General => Some(RatingClass::General),
+            Self::Sensitive => Some(RatingClass::Sensitive),
+            Self::Questionable => Some(RatingClass::Questionable),
+            Self::Explicit => Some(RatingClass::Explicit),
+            Self::Unknown(_) => None,
         }
     }
 }
@@ -321,4 +444,27 @@ pub fn narrow_post_id(id: u64) -> Result<PostId> {
         bail!("post id zero is invalid");
     }
     Ok(PostId(id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rating_metatags_parse_as_query_predicates() {
+        let query = Query::parse("rating:q -rating:e 1girl");
+        assert_eq!(query.ratings(), &[RatingClass::Questionable]);
+        assert_eq!(query.excluded_ratings(), &[RatingClass::Explicit]);
+        assert_eq!(
+            query.tags().iter().map(Tag::as_str).collect::<Vec<_>>(),
+            vec!["1girl"]
+        );
+        assert_eq!(query.to_text(), "1girl rating:q -rating:e");
+    }
+
+    #[test]
+    fn remote_seed_uses_only_one_rating_metatag() {
+        let query = Query::parse("rating:q rating:e solo 1girl");
+        assert_eq!(query.remote_seed(Sort::Score), "rating:q 1girl order:score");
+    }
 }
