@@ -2,6 +2,8 @@ use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 
+pub const CLIP_DIM: usize = 768;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct PostId(pub u32);
 
@@ -60,34 +62,82 @@ impl Sort {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Query {
-    tags: Vec<Tag>,
+    include: Vec<Tag>,
+    exclude: Vec<Tag>,
 }
 
 impl Query {
     pub fn parse(raw: &str) -> Self {
-        let mut tags = raw
-            .split_whitespace()
-            .filter_map(Tag::forge)
-            .collect::<Vec<_>>();
-        tags.sort();
-        tags.dedup();
-        Self { tags }
+        let mut query = Self {
+            include: Vec::new(),
+            exclude: Vec::new(),
+        };
+        for token in raw.split_whitespace() {
+            let (polarity, body) = match token.strip_prefix('-') {
+                Some(body) => (TagPolarity::Negative, body),
+                None => (
+                    TagPolarity::Positive,
+                    token.strip_prefix('+').unwrap_or(token),
+                ),
+            };
+            if let Some(tag) = Tag::forge(body) {
+                query.set(tag, polarity);
+            }
+        }
+        query
     }
 
     pub fn tags(&self) -> &[Tag] {
-        &self.tags
+        &self.include
+    }
+
+    pub fn excluded_tags(&self) -> &[Tag] {
+        &self.exclude
     }
 
     pub fn key(&self) -> String {
-        self.tags
+        self.terms().join(" ")
+    }
+
+    pub fn to_text(&self) -> String {
+        self.key()
+    }
+
+    pub fn set(&mut self, tag: Tag, polarity: TagPolarity) {
+        self.remove(&tag);
+        match polarity {
+            TagPolarity::Positive => self.include.push(tag),
+            TagPolarity::Negative => self.exclude.push(tag),
+        }
+        self.normalize();
+    }
+
+    pub fn remove(&mut self, tag: &Tag) {
+        self.include.retain(|candidate| candidate != tag);
+        self.exclude.retain(|candidate| candidate != tag);
+    }
+
+    pub fn polarity(&self, tag: &Tag) -> Option<TagPolarity> {
+        if self.include.binary_search(tag).is_ok() {
+            Some(TagPolarity::Positive)
+        } else if self.exclude.binary_search(tag).is_ok() {
+            Some(TagPolarity::Negative)
+        } else {
+            None
+        }
+    }
+
+    fn terms(&self) -> Vec<String> {
+        self.include
             .iter()
             .map(Tag::as_str)
-            .collect::<Vec<_>>()
-            .join(" ")
+            .map(ToOwned::to_owned)
+            .chain(self.exclude.iter().map(|tag| format!("-{tag}")))
+            .collect()
     }
 
     pub fn remote_seed(&self, sort: Sort) -> String {
-        self.tags
+        self.include
             .iter()
             .take(2)
             .map(ToString::to_string)
@@ -95,6 +145,19 @@ impl Query {
             .collect::<Vec<_>>()
             .join(" ")
     }
+
+    fn normalize(&mut self) {
+        self.include.sort();
+        self.include.dedup();
+        self.exclude.sort();
+        self.exclude.dedup();
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TagPolarity {
+    Positive,
+    Negative,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -141,12 +204,11 @@ impl PostRecord {
             .or(self.file_url.as_deref())
     }
 
-    pub fn haystack(&self) -> String {
-        self.tags
-            .iter()
-            .map(Tag::as_str)
-            .collect::<Vec<_>>()
-            .join(" ")
+    pub fn full_url(&self) -> Option<&str> {
+        self.large_url
+            .as_deref()
+            .or(self.file_url.as_deref())
+            .or(self.preview_url.as_deref())
     }
 }
 
@@ -154,6 +216,59 @@ impl PostRecord {
 pub struct SearchHit {
     pub posts: Vec<PostRecord>,
     pub candidates: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct Embedding {
+    values: Vec<f32>,
+}
+
+impl Embedding {
+    pub fn forge(values: Vec<f32>) -> Result<Self> {
+        if values.len() != CLIP_DIM {
+            bail!(
+                "expected {CLIP_DIM}-wide Jina CLIP embedding, got {}",
+                values.len()
+            );
+        }
+        let mut embedding = Self { values };
+        embedding.normalize()?;
+        Ok(embedding)
+    }
+
+    pub fn from_normalized(values: Vec<f32>) -> Result<Self> {
+        if values.len() != CLIP_DIM {
+            bail!(
+                "expected {CLIP_DIM}-wide Jina CLIP embedding, got {}",
+                values.len()
+            );
+        }
+        Ok(Self { values })
+    }
+
+    pub fn as_slice(&self) -> &[f32] {
+        &self.values
+    }
+
+    pub fn cosine(&self, other: &Self) -> f32 {
+        self.values
+            .iter()
+            .zip(other.values.iter())
+            .map(|(a, b)| a * b)
+            .sum::<f32>()
+            .clamp(-1.0, 1.0)
+    }
+
+    fn normalize(&mut self) -> Result<()> {
+        let norm = self.values.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if !norm.is_finite() || norm <= f32::EPSILON {
+            bail!("degenerate Jina CLIP embedding");
+        }
+        for x in &mut self.values {
+            *x /= norm;
+        }
+        Ok(())
+    }
 }
 
 pub fn encode_record(post: &PostRecord) -> Result<Vec<u8>> {

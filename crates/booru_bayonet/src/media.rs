@@ -37,18 +37,22 @@ impl MediaCache {
     }
 
     pub fn blade(&self, id: PostId, url: &str) -> Result<RgbaBlade> {
+        let bytes = self.bytes(id, url)?;
+        decode(id, &bytes)
+    }
+
+    pub fn bytes(&self, id: PostId, url: &str) -> Result<Vec<u8>> {
         let path = self.path_for(id, url);
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(bytes),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 let bytes = self.fetch(url)?;
                 std::fs::write(&path, &bytes)
                     .with_context(|| format!("write {}", path.display()))?;
-                bytes
+                Ok(bytes)
             }
-            Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
-        };
-        decode(id, &bytes)
+            Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+        }
     }
 
     fn fetch(&self, url: &str) -> Result<Vec<u8>> {
@@ -61,7 +65,8 @@ impl MediaCache {
     }
 
     fn path_for(&self, id: PostId, url: &str) -> PathBuf {
-        self.root.join(format!("{}.{}", id.0, extension(url)))
+        self.root
+            .join(format!("{}-{:016x}.{}", id.0, fnv1a(url), extension(url)))
     }
 }
 
@@ -90,6 +95,15 @@ fn extension(url: &str) -> &str {
     } else {
         "img"
     }
+}
+
+fn fnv1a(text: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in text.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 pub fn required_url(url: Option<&str>) -> Result<&str> {

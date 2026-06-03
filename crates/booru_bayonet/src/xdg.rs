@@ -31,8 +31,18 @@ impl Lair {
         self.cache.join("media")
     }
 
+    pub fn model_dir(&self) -> PathBuf {
+        self.data.join("models")
+    }
+
     fn mkdir(&self) -> Result<()> {
-        for path in [&self.config, &self.data, &self.cache, &self.media_dir()] {
+        for path in [
+            &self.config,
+            &self.data,
+            &self.cache,
+            &self.media_dir(),
+            &self.model_dir(),
+        ] {
             std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
         }
         Ok(())

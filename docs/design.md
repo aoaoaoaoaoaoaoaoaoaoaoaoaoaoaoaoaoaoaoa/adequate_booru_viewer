@@ -15,12 +15,20 @@ The durable database persists both directions:
 - forward: `post_id → PostRecord`
 - reverse: `tag → roaring(post_id)`
 - sort lanes: score and favorite indexes, with post-id ordering as the newest lane
+- semantic lane: `post_id → normalized jina-clip-v1 image embedding`
+- crawl cursor: latest Danbooru passive-crawl `page=b<post_id>` frontier
+
+Model weights live under `ProjectDirs::data_local_dir()/models`, not under the disposable media cache. Pulling ONNX weights is work; it should survive restart.
 
 ## Query Path
 
-Warm-cache filtering is a bitmap intersection over persisted `roaring` sets. Sorting is either an ordered lane walk for broad sets or a bounded local candidate sort for smaller intersections. UI query changes do not hit the network.
+Warm-cache filtering is bitmap algebra over persisted `roaring` sets: positive tags intersect, negative tags subtract. Sorting is either an ordered lane walk for broad sets or a bounded local candidate sort for smaller intersections. UI query changes do not hit the network.
+
+Soft CLIP sort is a rerank over a local candidate pool: `base_rank + α * cosine(text_embedding, image_embedding)`, with the base score normalized before mixing. Missing image embeddings are queued lazily and persisted once computed.
 
 Danbooru HTTP is only an anonymous read-only ingress. The worker calls `GET /posts.json`; no login, API key, write endpoint, vote endpoint, or mutation primitive exists in the code.
+
+A passive crawler walks Danbooru newest-to-oldest with `page=b<id>` and a durable cursor. It runs below the documented read-request ceiling so manual warm traffic has headroom.
 
 ## Multi-Tag Reality
 
@@ -29,6 +37,8 @@ Danbooru is the ingestion oracle, but not the interaction engine. Live anonymous
 ## Pure Rust UI
 
 The UI is `egui`/`eframe`, backed by native `winit`/`wgpu`. There is no JavaScript surface. Background threads perform network and decode work, then send decoded RGBA blades to the UI thread for texture upload.
+
+The main grid is image-only for scan speed. Filter state lives in a left chip panel. Thumbnails expose tag mutation on hover (`-` banishes, `+` requires, `×` removes). Clicking a thumbnail opens a scaled full-image frame with copy and right-click-close.
 
 ## Future Boorus
 
