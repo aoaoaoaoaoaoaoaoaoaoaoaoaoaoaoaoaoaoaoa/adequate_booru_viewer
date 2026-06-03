@@ -336,14 +336,20 @@ impl Index {
         let tx = self.db.begin_read().context("begin index read")?;
         let posts = tx.open_table(POSTS).context("open posts")?;
 
-        let candidate = Self::candidate_bitmap(&tx, query)?;
+        let candidate = Self::candidate_set(&tx, query)?;
+        let posts_len = posts.len().context("count posts")?;
         let candidates = candidate
             .as_ref()
-            .map_or_else(|| posts.len().unwrap_or_default(), RoaringBitmap::len);
+            .map_or(posts_len, |candidate| candidate.len(posts_len));
 
         let ids = match (&candidate, sort) {
             (None, Sort::Newest) => newest_ids(&posts, limit)?,
-            (Some(bitmap), Sort::Newest) => bitmap.iter().rev().take(limit).collect::<Vec<_>>(),
+            (Some(Candidate::Finite(bitmap)), Sort::Newest) => {
+                bitmap.iter().rev().take(limit).collect::<Vec<_>>()
+            }
+            (Some(candidate @ Candidate::Cofinite(_)), Sort::Newest) => {
+                newest_ids_filtered(&posts, candidate, limit)?
+            }
             (None, Sort::Score) => lane_ids(
                 &tx.open_table(SCORE_POSTS).context("open score_posts")?,
                 None,
@@ -354,17 +360,35 @@ impl Index {
                 None,
                 limit,
             )?,
-            (Some(bitmap), Sort::Score) if bitmap.len() > SMALL_SORT => lane_ids(
+            (Some(candidate @ Candidate::Finite(bitmap)), Sort::Score)
+                if bitmap.len() > SMALL_SORT =>
+            {
+                lane_ids(
+                    &tx.open_table(SCORE_POSTS).context("open score_posts")?,
+                    Some(candidate),
+                    limit,
+                )?
+            }
+            (Some(candidate @ Candidate::Finite(bitmap)), Sort::Favorites)
+                if bitmap.len() > SMALL_SORT =>
+            {
+                lane_ids(
+                    &tx.open_table(FAV_POSTS).context("open fav_posts")?,
+                    Some(candidate),
+                    limit,
+                )?
+            }
+            (Some(candidate @ Candidate::Cofinite(_)), Sort::Score) => lane_ids(
                 &tx.open_table(SCORE_POSTS).context("open score_posts")?,
-                Some(bitmap),
+                Some(candidate),
                 limit,
             )?,
-            (Some(bitmap), Sort::Favorites) if bitmap.len() > SMALL_SORT => lane_ids(
+            (Some(candidate @ Candidate::Cofinite(_)), Sort::Favorites) => lane_ids(
                 &tx.open_table(FAV_POSTS).context("open fav_posts")?,
-                Some(bitmap),
+                Some(candidate),
                 limit,
             )?,
-            (Some(bitmap), Sort::Score | Sort::Favorites) => {
+            (Some(Candidate::Finite(bitmap)), Sort::Score | Sort::Favorites) => {
                 local_sorted_ids(&posts, bitmap, sort, limit)?
             }
         };
@@ -451,10 +475,7 @@ impl Index {
         tx.commit().context("commit schema prime")
     }
 
-    fn candidate_bitmap(
-        tx: &redb::ReadTransaction,
-        query: &Query,
-    ) -> Result<Option<RoaringBitmap>> {
+    fn candidate_set(tx: &redb::ReadTransaction, query: &Query) -> Result<Option<Candidate>> {
         if query.is_empty() {
             return Ok(None);
         }
@@ -470,6 +491,46 @@ impl Index {
         }
         .eval(query.root())
         .map(Some)
+    }
+}
+
+#[derive(Clone, Debug)]
+enum Candidate {
+    Finite(RoaringBitmap),
+    Cofinite(RoaringBitmap),
+}
+
+impl Candidate {
+    fn len(&self, universe: u64) -> u64 {
+        match self {
+            Self::Finite(bitmap) => bitmap.len(),
+            Self::Cofinite(excluded) => universe.saturating_sub(excluded.len()),
+        }
+    }
+
+    fn contains(&self, id: u32) -> bool {
+        match self {
+            Self::Finite(bitmap) => bitmap.contains(id),
+            Self::Cofinite(excluded) => !excluded.contains(id),
+        }
+    }
+
+    fn complement(self) -> Self {
+        match self {
+            Self::Finite(bitmap) => Self::Cofinite(bitmap),
+            Self::Cofinite(excluded) => Self::Finite(excluded),
+        }
+    }
+
+    fn materialize(self, universe: &RoaringBitmap) -> RoaringBitmap {
+        match self {
+            Self::Finite(bitmap) => bitmap,
+            Self::Cofinite(excluded) => {
+                let mut bitmap = universe.clone();
+                bitmap -= excluded;
+                bitmap
+            }
+        }
     }
 }
 
@@ -491,52 +552,37 @@ where
     T: redb::ReadableTable<&'static str, &'static [u8]>,
     R: redb::ReadableTable<&'static str, &'static [u8]>,
 {
-    fn eval(&mut self, expr: &QueryExpr) -> Result<RoaringBitmap> {
+    fn eval(&mut self, expr: &QueryExpr) -> Result<Candidate> {
         match expr {
             QueryExpr::Atom { atom } => self.atom(atom),
-            QueryExpr::Not { child } => {
-                let mut acc = self.universe()?;
-                acc -= self.eval(child)?;
-                Ok(acc)
-            }
-            QueryExpr::Group { group } => {
-                let children = group
+            QueryExpr::Not { child } => self.eval(child).map(Candidate::complement),
+            QueryExpr::Group { group } => match group.op {
+                BoolOp::And => group
                     .children
                     .iter()
                     .map(|child| self.eval(child))
-                    .collect::<Result<Vec<_>>>()?;
-                match group.op {
-                    BoolOp::And => self.and(children),
-                    BoolOp::Or => Ok(union(children)),
-                    BoolOp::Xor => Ok(exactly_one(children)),
-                }
-            }
+                    .collect::<Result<Vec<_>>>()
+                    .map(conjunction),
+                BoolOp::Or => group
+                    .children
+                    .iter()
+                    .map(|child| self.eval(child))
+                    .collect::<Result<Vec<_>>>()
+                    .map(disjunction),
+                BoolOp::Xor => self.exactly_one(&group.children),
+            },
         }
     }
 
-    fn atom(&self, atom: &QueryAtom) -> Result<RoaringBitmap> {
+    fn atom(&self, atom: &QueryAtom) -> Result<Candidate> {
         match atom {
-            QueryAtom::Tag(tag) => read_bitmap(self.tags, tag).map(Option::unwrap_or_default),
-            QueryAtom::Rating(rating) => {
-                read_rating_bitmap(self.ratings, *rating).map(Option::unwrap_or_default)
-            }
+            QueryAtom::Tag(tag) => read_bitmap(self.tags, tag)
+                .map(Option::unwrap_or_default)
+                .map(Candidate::Finite),
+            QueryAtom::Rating(rating) => read_rating_bitmap(self.ratings, *rating)
+                .map(Option::unwrap_or_default)
+                .map(Candidate::Finite),
         }
-    }
-
-    fn and(&mut self, mut children: Vec<RoaringBitmap>) -> Result<RoaringBitmap> {
-        if children.is_empty() {
-            return self.universe();
-        }
-        children.sort_by_key(RoaringBitmap::len);
-        let mut iter = children.into_iter();
-        let mut acc = iter.next().context("AND child vanished")?;
-        for child in iter {
-            acc &= child;
-            if acc.is_empty() {
-                break;
-            }
-        }
-        Ok(acc)
     }
 
     fn universe(&mut self) -> Result<RoaringBitmap> {
@@ -546,6 +592,76 @@ where
         let universe = all_post_ids(self.posts)?;
         self.universe = Some(universe.clone());
         Ok(universe)
+    }
+
+    fn exactly_one(&mut self, children: &[QueryExpr]) -> Result<Candidate> {
+        let children = children
+            .iter()
+            .map(|child| self.eval(child))
+            .collect::<Result<Vec<_>>>()?;
+        if children
+            .iter()
+            .all(|child| matches!(child, Candidate::Finite(_)))
+        {
+            return Ok(Candidate::Finite(exactly_one(
+                children
+                    .into_iter()
+                    .filter_map(|child| match child {
+                        Candidate::Finite(bitmap) => Some(bitmap),
+                        Candidate::Cofinite(_) => None,
+                    })
+                    .collect(),
+            )));
+        }
+        let universe = self.universe()?;
+        Ok(Candidate::Finite(exactly_one(
+            children
+                .into_iter()
+                .map(|child| child.materialize(&universe))
+                .collect(),
+        )))
+    }
+}
+
+fn conjunction(children: Vec<Candidate>) -> Candidate {
+    let mut finite = None::<RoaringBitmap>;
+    let mut excluded = RoaringBitmap::new();
+    for child in children {
+        match child {
+            Candidate::Finite(bitmap) => match &mut finite {
+                Some(acc) => *acc &= bitmap,
+                None => finite = Some(bitmap),
+            },
+            Candidate::Cofinite(bitmap) => excluded |= bitmap,
+        }
+    }
+    match finite {
+        Some(mut bitmap) => {
+            bitmap -= excluded;
+            Candidate::Finite(bitmap)
+        }
+        None => Candidate::Cofinite(excluded),
+    }
+}
+
+fn disjunction(children: Vec<Candidate>) -> Candidate {
+    let mut finite = RoaringBitmap::new();
+    let mut cofinite = None::<RoaringBitmap>;
+    for child in children {
+        match child {
+            Candidate::Finite(bitmap) => finite |= bitmap,
+            Candidate::Cofinite(excluded) => match &mut cofinite {
+                Some(acc) => *acc &= excluded,
+                None => cofinite = Some(excluded),
+            },
+        }
+    }
+    match cofinite {
+        Some(mut excluded) => {
+            excluded -= finite;
+            Candidate::Cofinite(excluded)
+        }
+        None => Candidate::Finite(finite),
     }
 }
 
@@ -673,14 +789,6 @@ fn read_rating_bitmap(
         .transpose()
 }
 
-fn union(children: Vec<RoaringBitmap>) -> RoaringBitmap {
-    let mut acc = RoaringBitmap::new();
-    for child in children {
-        acc |= child;
-    }
-    acc
-}
-
 fn exactly_one(children: Vec<RoaringBitmap>) -> RoaringBitmap {
     let mut exactly = RoaringBitmap::new();
     let mut repeated = RoaringBitmap::new();
@@ -709,6 +817,29 @@ fn newest_ids(
         .collect()
 }
 
+fn newest_ids_filtered(
+    table: &impl redb::ReadableTable<u64, &'static [u8]>,
+    candidate: &Candidate,
+    limit: usize,
+) -> Result<Vec<u32>> {
+    let mut ids = Vec::with_capacity(limit);
+    for row in table
+        .range(0_u64..=u64::MAX)
+        .context("range filtered newest posts")?
+        .rev()
+    {
+        let (id, _) = row.context("read filtered newest row")?;
+        let id = u32::try_from(id.value()).context("post id exceeds roaring bitmap range")?;
+        if candidate.contains(id) {
+            ids.push(id);
+            if ids.len() == limit {
+                break;
+            }
+        }
+    }
+    Ok(ids)
+}
+
 fn all_post_ids(table: &impl redb::ReadableTable<u64, &'static [u8]>) -> Result<RoaringBitmap> {
     let mut bitmap = RoaringBitmap::new();
     for row in table.range(0_u64..=u64::MAX).context("range all posts")? {
@@ -721,7 +852,7 @@ fn all_post_ids(table: &impl redb::ReadableTable<u64, &'static [u8]>) -> Result<
 
 fn lane_ids(
     table: &impl redb::ReadableTable<u64, u32>,
-    candidate: Option<&RoaringBitmap>,
+    candidate: Option<&Candidate>,
     limit: usize,
 ) -> Result<Vec<u32>> {
     let mut ids = Vec::with_capacity(limit);
@@ -732,7 +863,7 @@ fn lane_ids(
     {
         let (_, id) = row.context("read sort row")?;
         let id = id.value();
-        if candidate.is_none_or(|bitmap| bitmap.contains(id)) {
+        if candidate.is_none_or(|candidate| candidate.contains(id)) {
             ids.push(id);
             if ids.len() == limit {
                 break;

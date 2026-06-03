@@ -7,6 +7,8 @@ use eframe::{
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    env, fs,
+    path::PathBuf,
 };
 
 use crate::{
@@ -64,10 +66,15 @@ pub struct Bayonet {
     warm_status: String,
     crawl_status: String,
     status: String,
+    startup_probe: Option<StartupProbe>,
 }
 
 impl Bayonet {
     pub fn new(_cc: &CreationContext<'_>) -> Result<Self> {
+        Self::open()
+    }
+
+    pub fn open() -> Result<Self> {
         let lair = Lair::claim()?;
         let config = Config::load(&lair.config_path())?;
         let index = Index::open(&lair.index_path())?;
@@ -108,10 +115,31 @@ impl Bayonet {
             clip_inflight: HashSet::new(),
             cache_status: "cache measuring".to_owned(),
             warm_status: "query warm idle".to_owned(),
+            startup_probe: StartupProbe::from_env(),
         };
         app.reap(true, AUTO_WARM_PAGES)?;
         app.worker.backfill_ratings(app.index.clone());
         Ok(app)
+    }
+
+    pub fn draw_startup_probe_frame(&mut self) {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1440.0, 920.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                self.zoom_tiles(ui.ctx());
+                self.drain(ui.ctx());
+                self.paint(ui);
+            },
+        );
+        let _primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
+        self.report_startup_probe();
     }
 
     fn reap(&mut self, warm: bool, pages: u32) -> Result<()> {
@@ -888,6 +916,19 @@ impl Bayonet {
             self.status = format!("{err:#}");
         }
     }
+
+    fn report_startup_probe(&mut self) {
+        let Some(probe) = &mut self.startup_probe else {
+            return;
+        };
+        if probe.reported {
+            return;
+        }
+        match probe.report() {
+            Ok(()) => {}
+            Err(err) => self.status = format!("{err:#}"),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -941,6 +982,30 @@ impl WarmKey {
 struct ActivePrefix {
     body: String,
     negative: bool,
+}
+
+struct StartupProbe {
+    path: PathBuf,
+    reported: bool,
+}
+
+impl StartupProbe {
+    fn from_env() -> Option<Self> {
+        env::var_os("BOORU_BAYONET_STARTUP_PROBE").map(|path| Self {
+            path: PathBuf::from(path),
+            reported: false,
+        })
+    }
+
+    fn report(&mut self) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+        fs::write(&self.path, b"gui-ready\n")
+            .with_context(|| format!("write {}", self.path.display()))?;
+        self.reported = true;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1190,6 +1255,13 @@ impl App for Bayonet {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.paint(ui);
+        self.report_startup_probe();
+    }
+}
+
+impl Bayonet {
+    fn paint(&mut self, ui: &mut egui::Ui) {
         self.tag_menu_open = false;
         let _edge = egui::Panel::top("edge").show_inside(ui, |ui| self.top(ui));
         let _left = egui::Panel::left("filter")

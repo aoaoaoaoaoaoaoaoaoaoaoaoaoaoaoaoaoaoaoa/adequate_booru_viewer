@@ -16,6 +16,13 @@ use eframe::egui::ViewportBuilder;
 type DynError = Box<dyn Error + Send + Sync>;
 
 fn main() -> eframe::Result {
+    if std::env::var_os("BOORU_BAYONET_STARTUP_PROBE_HEADLESS").is_some() {
+        let mut app =
+            Bayonet::open().map_err(|err| eframe::Error::AppCreation(DynError::from(err)))?;
+        app.draw_startup_probe_frame();
+        std::process::exit(0);
+    }
+
     let native = eframe::NativeOptions {
         viewport: ViewportBuilder::default().with_inner_size([1440.0, 920.0]),
         ..Default::default()
