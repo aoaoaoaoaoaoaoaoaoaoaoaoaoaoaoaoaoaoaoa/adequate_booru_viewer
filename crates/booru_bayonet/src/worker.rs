@@ -73,12 +73,16 @@ pub enum Event {
         stored: usize,
         faults: usize,
     },
+    RatingBackfilled {
+        posts: u64,
+    },
     Fault(String),
 }
 
 pub struct Worker {
     io_tx: Sender<Command>,
     clip_tx: Sender<Command>,
+    event_tx: Sender<Event>,
     rx: Receiver<Event>,
 }
 
@@ -98,10 +102,12 @@ impl Worker {
         let crawl_events = event_tx.clone();
         let crawl_gate = read_gate.clone();
         let _crawl = thread::spawn(move || crawl_loop(crawl_index, crawl_gate, crawl_events));
+        let worker_events = event_tx.clone();
         let _clip = thread::spawn(move || clip_loop(index, media, model_root, clip_rx, event_tx));
         Self {
             io_tx,
             clip_tx,
+            event_tx: worker_events,
             rx: event_rx,
         }
     }
@@ -121,6 +127,18 @@ impl Worker {
 
     pub fn drain(&self) -> TryIter<'_, Event> {
         self.rx.try_iter()
+    }
+
+    pub fn backfill_ratings(&self, index: Index) {
+        let events = self.event_tx.clone();
+        let _backfill = thread::spawn(move || {
+            let event = match index.backfill_ratings_if_needed() {
+                Ok(Some(posts)) => Event::RatingBackfilled { posts },
+                Ok(None) => return,
+                Err(err) => Event::Fault(format!("{err:#}")),
+            };
+            let _sent = events.send(event);
+        });
     }
 }
 

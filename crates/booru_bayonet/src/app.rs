@@ -105,6 +105,7 @@ impl Bayonet {
             warm_status: "query warm idle".to_owned(),
         };
         app.reap(true, AUTO_WARM_PAGES)?;
+        app.worker.backfill_ratings(app.index.clone());
         Ok(app)
     }
 
@@ -399,6 +400,14 @@ impl Bayonet {
                     } else {
                         self.status =
                             format!("embedded {stored} Jina CLIP images; {faults} faults");
+                    }
+                    ctx.request_repaint();
+                }
+                Event::RatingBackfilled { posts } => {
+                    self.update_cache_status();
+                    self.status = format!("backfilled rating lane over {posts} cached posts");
+                    if let Err(err) = self.reap(false, 0) {
+                        self.status = format!("{err:#}");
                     }
                     ctx.request_repaint();
                 }
@@ -941,6 +950,11 @@ fn cache_status(stats: &CacheStats) -> String {
         .map(|(rating, posts)| format!("{}:{posts}", rating.key()))
         .collect::<Vec<_>>()
         .join("/");
+    let rating_state = if stats.rating_indexed {
+        "ratings ready"
+    } else {
+        "ratings indexing"
+    };
     let frontier = match (stats.crawl_before, stats.rough_crawl_percent()) {
         (Some(before), Some(percent)) => format!("crawl≤#{before} ≈{percent:.1}% ID"),
         (Some(before), None) => format!("crawl≤#{before}"),
@@ -950,7 +964,7 @@ fn cache_status(stats: &CacheStats) -> String {
         .newest
         .map_or_else(|| "newest unknown".to_owned(), |id| format!("newest #{id}"));
     format!(
-        "cache {} posts, {} tags, {} clip, ratings {ratings}, {newest}, {frontier}",
+        "cache {} posts, {} tags, {} clip, {rating_state} {ratings}, {newest}, {frontier}",
         stats.posts, stats.tags, stats.embeddings
     )
 }

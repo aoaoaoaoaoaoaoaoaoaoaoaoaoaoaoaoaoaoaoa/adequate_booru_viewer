@@ -22,6 +22,7 @@ const META: TableDefinition<'_, &str, u64> = TableDefinition::new("meta");
 
 const SMALL_SORT: u64 = 50_000;
 const DANBOORU_CRAWL_BEFORE: &str = "danbooru.crawl.before";
+const RATING_BACKFILL_V1: &str = "rating.index.v1.backfilled";
 
 #[derive(Clone, Debug, Default)]
 pub struct SoftHit {
@@ -42,6 +43,7 @@ pub struct CacheStats {
     pub posts: u64,
     pub tags: u64,
     pub embeddings: u64,
+    pub rating_indexed: bool,
     pub newest: Option<PostId>,
     pub crawl_before: Option<PostId>,
     pub ratings: Vec<(RatingClass, u64)>,
@@ -199,6 +201,8 @@ impl Index {
         let tags = tx.open_table(TAG_POSTS).context("open tag_posts")?;
         let rating_table = tx.open_table(RATING_POSTS).context("open rating_posts")?;
         let embeddings = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
+        let meta = tx.open_table(META).context("open meta")?;
+        let posts_len = posts.len().context("count posts")?;
         let newest = posts
             .range(0_u64..=u64::MAX)
             .context("range newest post id")?
@@ -208,13 +212,15 @@ impl Index {
                 narrow_meta_post_id(id.value())
             })
             .transpose()?;
-        let crawl_before = tx
-            .open_table(META)
-            .context("open meta")?
+        let crawl_before = meta
             .get(DANBOORU_CRAWL_BEFORE)
             .context("read Danbooru crawl cursor")?
             .map(|guard| narrow_meta_post_id(guard.value()))
             .transpose()?;
+        let rating_indexed = meta
+            .get(RATING_BACKFILL_V1)
+            .context("read rating backfill marker")?
+            .is_some();
         let ratings = RatingClass::ALL
             .into_iter()
             .map(|rating| {
@@ -224,13 +230,55 @@ impl Index {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(CacheStats {
-            posts: posts.len().context("count posts")?,
+            posts: posts_len,
             tags: tags.len().context("count tags")?,
             embeddings: embeddings.len().context("count Jina image embeddings")?,
+            rating_indexed,
             newest,
             crawl_before,
             ratings,
         })
+    }
+
+    pub fn backfill_ratings_if_needed(&self) -> Result<Option<u64>> {
+        let (lanes, posts) = {
+            let tx = self.db.begin_read().context("begin rating backfill read")?;
+            let meta = tx.open_table(META).context("open meta")?;
+            if meta
+                .get(RATING_BACKFILL_V1)
+                .context("read rating backfill marker")?
+                .is_some()
+            {
+                return Ok(None);
+            }
+            let posts = tx.open_table(POSTS).context("open posts")?;
+            rating_lanes(&posts)?
+        };
+
+        let tx = self
+            .db
+            .begin_write()
+            .context("begin rating backfill write")?;
+        {
+            let mut ratings = tx.open_table(RATING_POSTS).context("open rating_posts")?;
+            let mut meta = tx.open_table(META).context("open meta")?;
+            for (rating, mut bitmap) in lanes {
+                if let Some(existing) = read_rating_bitmap(&ratings, rating)? {
+                    bitmap |= existing;
+                }
+                if !bitmap.is_empty() {
+                    let bytes = bitmap_encode(&bitmap)?;
+                    let _old = ratings
+                        .insert(rating.key(), bytes.as_slice())
+                        .with_context(|| format!("write {} rating backfill", rating.key()))?;
+                }
+            }
+            let _old = meta
+                .insert(RATING_BACKFILL_V1, posts)
+                .context("write rating backfill marker")?;
+        }
+        tx.commit().context("commit rating backfill")?;
+        Ok(Some(posts))
     }
 
     pub fn search(&self, query: &Query, sort: Sort, limit: usize) -> Result<SearchHit> {
@@ -339,18 +387,15 @@ impl Index {
     fn prime(&self) -> Result<()> {
         let tx = self.db.begin_write().context("begin schema prime")?;
         {
-            let posts = tx.open_table(POSTS).context("prime posts")?;
+            let _posts = tx.open_table(POSTS).context("prime posts")?;
             let _tags = tx.open_table(TAG_POSTS).context("prime tag_posts")?;
-            let mut ratings = tx.open_table(RATING_POSTS).context("prime rating_posts")?;
+            let _ratings = tx.open_table(RATING_POSTS).context("prime rating_posts")?;
             let _score = tx.open_table(SCORE_POSTS).context("prime score_posts")?;
             let _favs = tx.open_table(FAV_POSTS).context("prime fav_posts")?;
             let _jina = tx
                 .open_table(JINA_IMAGE)
                 .context("prime Jina image table")?;
             let _meta = tx.open_table(META).context("prime meta")?;
-            if ratings.is_empty().context("measure rating_posts")? {
-                backfill_ratings(&posts, &mut ratings)?;
-            }
         }
         tx.commit().context("commit schema prime")
     }
@@ -472,21 +517,28 @@ fn bitmap_remove(table: &mut redb::Table<'_, &str, &[u8]>, key: &str, id: PostId
     Ok(())
 }
 
-fn backfill_ratings(
+fn rating_lanes(
     posts: &impl redb::ReadableTable<u64, &'static [u8]>,
-    ratings: &mut redb::Table<'_, &str, &[u8]>,
-) -> Result<()> {
+) -> Result<([(RatingClass, RoaringBitmap); 4], u64)> {
+    let mut lanes = RatingClass::ALL.map(|rating| (rating, RoaringBitmap::new()));
+    let mut posts_seen = 0_u64;
     for row in posts
         .range(0_u64..=u64::MAX)
         .context("range posts for rating backfill")?
     {
         let (_, post) = row.context("read post for rating backfill")?;
         let post = decode_record(post.value())?;
+        posts_seen += 1;
         if let Some(rating) = post.rating.class() {
-            bitmap_insert(ratings, rating.key(), post.id)?;
+            for (lane, bitmap) in &mut lanes {
+                if *lane == rating {
+                    let _inserted = bitmap.insert(post.id.0);
+                    break;
+                }
+            }
         }
     }
-    Ok(())
+    Ok((lanes, posts_seen))
 }
 
 fn read_bitmap(
