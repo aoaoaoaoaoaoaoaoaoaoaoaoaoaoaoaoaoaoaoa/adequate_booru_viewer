@@ -579,23 +579,24 @@ impl Bayonet {
         let tile = self.tile_edge();
         let _tile = ui.vertical(|ui| {
             ui.set_width(tile);
-            let response = if let Some(texture) = self.thumb(post) {
-                ui.allocate_ui(egui::vec2(tile, tile), |ui| {
-                    let size = fit(texture.size_vec2(), egui::vec2(tile, tile));
-                    let image = egui::Image::new(texture)
-                        .fit_to_exact_size(size)
-                        .sense(egui::Sense::click());
-                    let _center = ui.centered_and_justified(|ui| ui.add(image));
-                })
-                .response
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(tile, tile), egui::Sense::click());
+            if let Some(texture) = self.thumb(post) {
+                let size = fit(texture.size_vec2(), rect.size());
+                let image = egui::Rect::from_center_size(rect.center(), size);
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                let _image = ui
+                    .painter()
+                    .image(texture.id(), image, uv, egui::Color32::WHITE);
             } else {
-                ui.allocate_ui(egui::vec2(tile, tile), |ui| {
-                    let _center = ui.centered_and_justified(|ui| {
-                        let _label = ui.label("loading");
-                    });
-                })
-                .response
-            };
+                let _loading = ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "loading",
+                    egui::TextStyle::Body.resolve(ui.style()),
+                    ui.visuals().text_color(),
+                );
+            }
             if response.clicked() {
                 self.open_full(post);
             }
