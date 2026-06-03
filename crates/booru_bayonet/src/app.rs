@@ -13,7 +13,10 @@ use crate::{
     config::{Config, QueryConfig, SoftConfig, ViewConfig},
     index::{CacheStats, Index, TagSuggestion},
     media::{MediaCache, RgbaBlade},
-    model::{Embedding, PostId, PostRecord, Query, RatingClass, SearchHit, Sort, Tag, TagPolarity},
+    model::{
+        BoolGroup, BoolOp, Embedding, PostId, PostRecord, Query, QueryAtom, QueryExpr, SearchHit,
+        Sort, Tag, TagPolarity,
+    },
     worker::{Command, Event, Worker},
     xdg::{Lair, compact_path},
 };
@@ -33,7 +36,8 @@ pub struct Bayonet {
     lair: Lair,
     index: Index,
     worker: Worker,
-    query_text: String,
+    query: Query,
+    active_group: Vec<usize>,
     tag_entry: String,
     soft_text: String,
     soft_alpha: f32,
@@ -69,16 +73,17 @@ impl Bayonet {
         let index = Index::open(&lair.index_path())?;
         let media = MediaCache::new(lair.media_dir())?;
         let worker = Worker::spawn(index.clone(), media, lair.model_dir());
-        let query_text = query_text(&config.query);
+        let query = config.query.query();
         let sort = config.view.sort;
-        let query = Query::parse(&query_text);
+        let active_group = query.clamp_group_path(&config.query.active_group);
         let mut app = Self {
             status: format!("index {}", compact_path(&lair.index_path())),
             crawl_status: "crawl waking".to_owned(),
             lair,
             index,
             worker,
-            query_text,
+            query: query.clone(),
+            active_group,
             tag_entry: String::new(),
             soft_text: config.soft.prompt.clone(),
             soft_alpha: config.soft.alpha.clamp(0.0, 2.0),
@@ -167,11 +172,17 @@ impl Bayonet {
     }
 
     fn query(&self) -> Query {
-        Query::parse(&self.query_text)
+        self.query.clone()
     }
 
     fn install_query(&mut self, query: Query) {
-        self.query_text = query.to_text();
+        self.install_query_at(query, self.active_group.clone());
+    }
+
+    fn install_query_at(&mut self, query: Query, active_group: Vec<usize>) {
+        self.active_group = query.clamp_group_path(&active_group);
+        self.query = query;
+        let query = self.query.clone();
         self.align_warm(&query);
         self.save_config();
         self.strike(true, AUTO_WARM_PAGES);
@@ -181,17 +192,22 @@ impl Bayonet {
         let Some(tag) = Tag::forge(raw) else {
             return;
         };
-        let mut query = self.query();
-        query.set(tag, polarity);
-        self.install_query(query);
+        self.add_atom(QueryAtom::Tag(tag), polarity);
+    }
+
+    fn add_atom(&mut self, atom: QueryAtom, polarity: TagPolarity) {
+        let mut query = self.query.clone();
+        if query.push_atom(&self.active_group, atom, polarity) {
+            self.install_query(query);
+        }
     }
 
     fn remove_tag(&mut self, raw: &str) {
         let Some(tag) = Tag::forge(raw) else {
             return;
         };
-        let mut query = self.query();
-        query.remove(&tag);
+        let mut query = self.query.clone();
+        query.remove_atom(&QueryAtom::Tag(tag));
         self.install_query(query);
     }
 
@@ -531,12 +547,16 @@ impl Bayonet {
         } else {
             TagPolarity::Positive
         };
-        self.set_tag(&suggestion.tag, polarity);
+        if let Some(tag) = Tag::forge(&suggestion.tag) {
+            self.add_atom(QueryAtom::Tag(tag), polarity);
+        }
         self.tag_entry.clear();
     }
 
     fn left_panel(&mut self, ui: &mut egui::Ui) {
-        let query = self.query();
+        let query = self.query.clone();
+        let active_group = self.active_group.clone();
+        let mut actions = Vec::new();
         let _heading = ui.heading("filter");
         let entry = ui.text_edit_singleline(&mut self.tag_entry);
         let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -544,75 +564,91 @@ impl Bayonet {
             self.commit_tag_entry();
         }
         self.autocomplete(ui);
-        let _hint = ui.label("enter adds; prefix - to ban; rating:q works; × removes.");
+        let _hint =
+            ui.label("enter targets the highlighted group; -foo inserts NOT foo; rating:q works.");
         let _separator = ui.separator();
         if query.is_empty() {
             let _empty = ui.label("neutral");
         }
-        for tag in query.tags() {
-            self.chip(ui, tag, TagPolarity::Positive);
-        }
-        for tag in query.excluded_tags() {
-            self.chip(ui, tag, TagPolarity::Negative);
-        }
-        for rating in query.ratings() {
-            self.rating_chip(ui, *rating, TagPolarity::Positive);
-        }
-        for rating in query.excluded_ratings() {
-            self.rating_chip(ui, *rating, TagPolarity::Negative);
-        }
+        render_query_tree(ui, query.root(), &active_group, &mut actions);
         let _separator = ui.separator();
+        let _active = ui.horizontal_wrapped(|ui| {
+            let _label = ui.label("active");
+            for op in BoolOp::ALL {
+                let selected = self
+                    .query
+                    .group(&self.active_group)
+                    .is_some_and(|group| group.op == op);
+                if ui.selectable_label(selected, op.label()).clicked() {
+                    actions.push(QueryAction::SetOp {
+                        path: self.active_group.clone(),
+                        op,
+                    });
+                }
+            }
+            if ui.button("add group").clicked() {
+                actions.push(QueryAction::AddGroup { op: BoolOp::And });
+            }
+            if ui.button("NOT active").clicked() {
+                actions.push(QueryAction::ToggleNot {
+                    path: self.active_group.clone(),
+                });
+            }
+        });
         let _cache = ui.label(&self.cache_status);
-    }
-
-    fn chip(&mut self, ui: &mut egui::Ui, tag: &Tag, polarity: TagPolarity) {
-        let label = match polarity {
-            TagPolarity::Positive => format!("+ {tag}"),
-            TagPolarity::Negative => format!("- {tag}"),
-        };
-        let _chip = ui.horizontal(|ui| {
-            if ui.small_button("×").clicked() {
-                self.remove_tag(tag.as_str());
-            }
-            let _label = ui.label(label);
-        });
-    }
-
-    fn rating_chip(&mut self, ui: &mut egui::Ui, rating: RatingClass, polarity: TagPolarity) {
-        let label = match polarity {
-            TagPolarity::Positive => format!("+ {rating}"),
-            TagPolarity::Negative => format!("- {rating}"),
-        };
-        let _chip = ui.horizontal(|ui| {
-            if ui.small_button("×").clicked() {
-                let mut query = self.query();
-                query.remove_rating(rating);
-                self.install_query(query);
-            }
-            let _label = ui.label(label);
-        });
+        self.apply_query_actions(actions);
     }
 
     fn commit_tag_entry(&mut self) {
-        let entry = Query::parse(&self.tag_entry);
-        if entry.is_empty() {
+        let terms = Query::parse_terms(&self.tag_entry);
+        if terms.is_empty() {
             return;
         }
-        let mut query = self.query();
-        for tag in entry.tags() {
-            query.set(tag.clone(), TagPolarity::Positive);
-        }
-        for tag in entry.excluded_tags() {
-            query.set(tag.clone(), TagPolarity::Negative);
-        }
-        for rating in entry.ratings() {
-            query.set_rating(*rating, TagPolarity::Positive);
-        }
-        for rating in entry.excluded_ratings() {
-            query.set_rating(*rating, TagPolarity::Negative);
+        let mut query = self.query.clone();
+        for term in terms {
+            let _inserted = query.push_atom(&self.active_group, term.atom, term.polarity);
         }
         self.tag_entry.clear();
         self.install_query(query);
+    }
+
+    fn apply_query_actions(&mut self, actions: Vec<QueryAction>) {
+        for action in actions {
+            self.apply_query_action(action);
+        }
+    }
+
+    fn apply_query_action(&mut self, action: QueryAction) {
+        match action {
+            QueryAction::Select { path } => {
+                self.active_group = self.query.clamp_group_path(&path);
+                self.save_config();
+            }
+            QueryAction::SetOp { path, op } => {
+                let mut query = self.query.clone();
+                if query.set_group_op(&path, op) {
+                    self.install_query(query);
+                }
+            }
+            QueryAction::ToggleNot { path } => {
+                let mut query = self.query.clone();
+                if query.toggle_not(&path) {
+                    self.install_query(query);
+                }
+            }
+            QueryAction::RemoveChild { parent, child } => {
+                let mut query = self.query.clone();
+                if query.remove_child(&parent, child) {
+                    self.install_query_at(query, parent);
+                }
+            }
+            QueryAction::AddGroup { op } => {
+                let mut query = self.query.clone();
+                if let Some(path) = query.push_group(&self.active_group, op) {
+                    self.install_query_at(query, path);
+                }
+            }
+        }
     }
 
     fn grid(&mut self, ui: &mut egui::Ui) {
@@ -833,7 +869,12 @@ impl Bayonet {
 
     fn save_config(&mut self) {
         let config = Config {
-            query: query_config(&self.query()),
+            query: QueryConfig {
+                tree: self.query.clone(),
+                active_group: self.active_group.clone(),
+                include: Vec::new(),
+                exclude: Vec::new(),
+            },
             view: ViewConfig {
                 sort: self.sort,
                 tile_scale: self.tile_scale,
@@ -902,6 +943,179 @@ struct ActivePrefix {
     negative: bool,
 }
 
+#[derive(Clone, Debug)]
+enum QueryAction {
+    Select { path: Vec<usize> },
+    SetOp { path: Vec<usize>, op: BoolOp },
+    ToggleNot { path: Vec<usize> },
+    RemoveChild { parent: Vec<usize>, child: usize },
+    AddGroup { op: BoolOp },
+}
+
+fn render_query_tree(
+    ui: &mut egui::Ui,
+    root: &QueryExpr,
+    active: &[usize],
+    actions: &mut Vec<QueryAction>,
+) {
+    let mut path = Vec::new();
+    render_query_expr(ui, root, &mut path, None, active, 0, actions);
+}
+
+fn render_query_expr(
+    ui: &mut egui::Ui,
+    expr: &QueryExpr,
+    path: &mut Vec<usize>,
+    parent: Option<(Vec<usize>, usize)>,
+    active: &[usize],
+    depth: usize,
+    actions: &mut Vec<QueryAction>,
+) {
+    let (negated, core) = expr.denote();
+    match core {
+        QueryExpr::Atom { atom } => render_atom(ui, atom, negated, parent, actions),
+        QueryExpr::Group { group } => {
+            render_group(ui, group, negated, path, parent, active, depth, actions);
+        }
+        QueryExpr::Not { child } => {
+            render_query_expr(ui, child, path, parent, active, depth, actions);
+        }
+    }
+}
+
+fn render_group(
+    ui: &mut egui::Ui,
+    group: &BoolGroup,
+    negated: bool,
+    path: &mut Vec<usize>,
+    parent: Option<(Vec<usize>, usize)>,
+    active: &[usize],
+    depth: usize,
+    actions: &mut Vec<QueryAction>,
+) {
+    let active_here = path.as_slice() == active;
+    let frame = egui::Frame::group(ui.style())
+        .fill(group_fill(depth))
+        .stroke(group_stroke(depth, active_here));
+    let _frame = frame.show(ui, |ui| {
+        let _header = ui.horizontal_wrapped(|ui| {
+            if ui
+                .selectable_label(active_here, group_title(path))
+                .clicked()
+            {
+                actions.push(QueryAction::Select { path: path.clone() });
+            }
+            if ui.selectable_label(negated, "NOT").clicked() {
+                actions.push(QueryAction::ToggleNot { path: path.clone() });
+            }
+            for op in BoolOp::ALL {
+                if ui.selectable_label(group.op == op, op.label()).clicked() {
+                    actions.push(QueryAction::SetOp {
+                        path: path.clone(),
+                        op,
+                    });
+                }
+            }
+            if let Some((parent, child)) = parent.as_ref()
+                && ui.small_button("×").clicked()
+            {
+                actions.push(QueryAction::RemoveChild {
+                    parent: parent.clone(),
+                    child: *child,
+                });
+            }
+        });
+        if group.children.is_empty() {
+            let _empty = ui.label("empty");
+        }
+        for (child, expr) in group.children.iter().enumerate() {
+            let parent_path = path.clone();
+            path.push(child);
+            render_query_expr(
+                ui,
+                expr,
+                path,
+                Some((parent_path, child)),
+                active,
+                depth + 1,
+                actions,
+            );
+            let _old = path.pop();
+        }
+    });
+}
+
+fn render_atom(
+    ui: &mut egui::Ui,
+    atom: &QueryAtom,
+    negated: bool,
+    parent: Option<(Vec<usize>, usize)>,
+    actions: &mut Vec<QueryAction>,
+) {
+    let text = if negated {
+        format!("¬ {atom}")
+    } else {
+        format!("+ {atom}")
+    };
+    let color = if negated {
+        egui::Color32::from_rgb(218, 150, 146)
+    } else {
+        egui::Color32::from_rgb(156, 204, 176)
+    };
+    let _row = ui.horizontal(|ui| {
+        if let Some((parent, child)) = parent
+            && ui.small_button("×").clicked()
+        {
+            actions.push(QueryAction::RemoveChild { parent, child });
+        }
+        let _label = ui.label(egui::RichText::new(text).color(color));
+    });
+}
+
+fn group_title(path: &[usize]) -> String {
+    if path.is_empty() {
+        "root".to_owned()
+    } else {
+        format!(
+            "g{}",
+            path.iter()
+                .map(|slot| (slot + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(".")
+        )
+    }
+}
+
+fn group_fill(depth: usize) -> egui::Color32 {
+    const PALETTE: [(u8, u8, u8); 6] = [
+        (86, 105, 143),
+        (107, 128, 104),
+        (135, 111, 83),
+        (116, 93, 132),
+        (84, 128, 133),
+        (137, 91, 98),
+    ];
+    let (r, g, b) = PALETTE[depth % PALETTE.len()];
+    egui::Color32::from_rgba_unmultiplied(r, g, b, 28)
+}
+
+fn group_stroke(depth: usize, active: bool) -> egui::Stroke {
+    const PALETTE: [(u8, u8, u8); 6] = [
+        (135, 161, 214),
+        (155, 188, 148),
+        (198, 164, 118),
+        (174, 145, 202),
+        (125, 190, 198),
+        (203, 136, 145),
+    ];
+    let (r, g, b) = PALETTE[depth % PALETTE.len()];
+    if active {
+        egui::Stroke::new(2.0, egui::Color32::from_rgb(r, g, b))
+    } else {
+        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(r, g, b, 96))
+    }
+}
+
 fn active_prefix(text: &str) -> Option<ActivePrefix> {
     if text.ends_with(char::is_whitespace) {
         return None;
@@ -931,23 +1145,6 @@ fn thumb_bucket(edge: f32) -> u8 {
         2
     } else {
         u8::from(edge > 190.0)
-    }
-}
-
-fn query_text(config: &QueryConfig) -> String {
-    config
-        .include
-        .iter()
-        .cloned()
-        .chain(config.exclude.iter().map(|tag| format!("-{tag}")))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn query_config(query: &Query) -> QueryConfig {
-    QueryConfig {
-        include: query.include_terms(),
-        exclude: query.exclude_terms(),
     }
 }
 

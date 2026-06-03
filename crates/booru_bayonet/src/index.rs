@@ -7,8 +7,8 @@ use roaring::RoaringBitmap;
 use std::{io::Cursor, mem::size_of, path::Path, sync::Arc};
 
 use crate::model::{
-    CLIP_DIM, Embedding, PostId, PostRecord, Query, RatingClass, SearchHit, Sort, Tag,
-    decode_record, encode_record,
+    BoolOp, CLIP_DIM, Embedding, PostId, PostRecord, Query, QueryAtom, QueryExpr, RatingClass,
+    SearchHit, Sort, Tag, decode_record, encode_record,
 };
 
 const POSTS: TableDefinition<'_, u64, &[u8]> = TableDefinition::new("posts");
@@ -455,48 +455,97 @@ impl Index {
         tx: &redb::ReadTransaction,
         query: &Query,
     ) -> Result<Option<RoaringBitmap>> {
-        let tags = query.tags();
-        let excluded = query.excluded_tags();
-        let ratings = query.ratings();
-        let excluded_ratings = query.excluded_ratings();
         if query.is_empty() {
             return Ok(None);
         }
 
         let tag_table = tx.open_table(TAG_POSTS).context("open tag_posts")?;
         let rating_table = tx.open_table(RATING_POSTS).context("open rating_posts")?;
-        let mut positive = tags
-            .iter()
-            .map(|tag| read_bitmap(&tag_table, tag))
-            .collect::<Result<Vec<_>>>()?;
-        if positive.iter().any(Option::is_none) {
-            return Ok(Some(RoaringBitmap::new()));
+        let posts = tx.open_table(POSTS).context("open posts")?;
+        BitmapEval {
+            posts: &posts,
+            tags: &tag_table,
+            ratings: &rating_table,
+            universe: None,
         }
-        positive.sort_by_key(|bitmap| bitmap.as_ref().map_or(0, RoaringBitmap::len));
+        .eval(query.root())
+        .map(Some)
+    }
+}
 
-        let mut iter = positive.into_iter().flatten();
-        let mut acc = if let Some(rating_bitmap) = rating_union(&rating_table, ratings)? {
-            rating_bitmap
-        } else if let Some(first) = iter.next() {
-            first
-        } else {
-            let posts = tx.open_table(POSTS).context("open posts")?;
-            all_post_ids(&posts)?
-        };
-        for bitmap in iter {
-            acc &= bitmap;
-        }
-        for tag in excluded {
-            if let Some(bitmap) = read_bitmap(&tag_table, tag)? {
-                acc -= bitmap;
+struct BitmapEval<'a, P, T, R>
+where
+    P: redb::ReadableTable<u64, &'static [u8]>,
+    T: redb::ReadableTable<&'static str, &'static [u8]>,
+    R: redb::ReadableTable<&'static str, &'static [u8]>,
+{
+    posts: &'a P,
+    tags: &'a T,
+    ratings: &'a R,
+    universe: Option<RoaringBitmap>,
+}
+
+impl<P, T, R> BitmapEval<'_, P, T, R>
+where
+    P: redb::ReadableTable<u64, &'static [u8]>,
+    T: redb::ReadableTable<&'static str, &'static [u8]>,
+    R: redb::ReadableTable<&'static str, &'static [u8]>,
+{
+    fn eval(&mut self, expr: &QueryExpr) -> Result<RoaringBitmap> {
+        match expr {
+            QueryExpr::Atom { atom } => self.atom(atom),
+            QueryExpr::Not { child } => {
+                let mut acc = self.universe()?;
+                acc -= self.eval(child)?;
+                Ok(acc)
+            }
+            QueryExpr::Group { group } => {
+                let children = group
+                    .children
+                    .iter()
+                    .map(|child| self.eval(child))
+                    .collect::<Result<Vec<_>>>()?;
+                match group.op {
+                    BoolOp::And => self.and(children),
+                    BoolOp::Or => Ok(union(children)),
+                    BoolOp::Xor => Ok(exactly_one(children)),
+                }
             }
         }
-        for rating in excluded_ratings {
-            if let Some(bitmap) = read_rating_bitmap(&rating_table, *rating)? {
-                acc -= bitmap;
+    }
+
+    fn atom(&self, atom: &QueryAtom) -> Result<RoaringBitmap> {
+        match atom {
+            QueryAtom::Tag(tag) => read_bitmap(self.tags, tag).map(Option::unwrap_or_default),
+            QueryAtom::Rating(rating) => {
+                read_rating_bitmap(self.ratings, *rating).map(Option::unwrap_or_default)
             }
         }
-        Ok(Some(acc))
+    }
+
+    fn and(&mut self, mut children: Vec<RoaringBitmap>) -> Result<RoaringBitmap> {
+        if children.is_empty() {
+            return self.universe();
+        }
+        children.sort_by_key(RoaringBitmap::len);
+        let mut iter = children.into_iter();
+        let mut acc = iter.next().context("AND child vanished")?;
+        for child in iter {
+            acc &= child;
+            if acc.is_empty() {
+                break;
+            }
+        }
+        Ok(acc)
+    }
+
+    fn universe(&mut self) -> Result<RoaringBitmap> {
+        if let Some(universe) = &self.universe {
+            return Ok(universe.clone());
+        }
+        let universe = all_post_ids(self.posts)?;
+        self.universe = Some(universe.clone());
+        Ok(universe)
     }
 }
 
@@ -624,24 +673,24 @@ fn read_rating_bitmap(
         .transpose()
 }
 
-fn rating_union(
-    table: &impl redb::ReadableTable<&'static str, &'static [u8]>,
-    ratings: &[RatingClass],
-) -> Result<Option<RoaringBitmap>> {
-    if ratings.is_empty() {
-        return Ok(None);
+fn union(children: Vec<RoaringBitmap>) -> RoaringBitmap {
+    let mut acc = RoaringBitmap::new();
+    for child in children {
+        acc |= child;
     }
-    let mut acc = None::<RoaringBitmap>;
-    for rating in ratings {
-        let Some(bitmap) = read_rating_bitmap(table, *rating)? else {
-            continue;
-        };
-        match &mut acc {
-            Some(acc) => *acc |= bitmap,
-            None => acc = Some(bitmap),
-        }
+    acc
+}
+
+fn exactly_one(children: Vec<RoaringBitmap>) -> RoaringBitmap {
+    let mut exactly = RoaringBitmap::new();
+    let mut repeated = RoaringBitmap::new();
+    for child in children {
+        let overlap = &exactly & &child;
+        repeated |= overlap;
+        exactly ^= child;
+        exactly -= &repeated;
     }
-    Ok(Some(acc.unwrap_or_default()))
+    exactly
 }
 
 fn newest_ids(
@@ -797,4 +846,83 @@ fn decode_embedding(bytes: &[u8]) -> Result<Embedding> {
         })
         .collect::<Result<Vec<_>>>()?;
     Embedding::from_normalized(values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Rating, TagPolarity};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn boolean_query_evaluator_cuts_with_roaring_algebra() -> Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "booru-bayonet-bool-{}.redb",
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        let _stale = std::fs::remove_file(&path);
+        let index = Index::open(&path)?;
+        index.absorb(&[
+            post(1, 10, Rating::General, &["solo", "bikini"])?,
+            post(2, 20, Rating::Questionable, &["solo", "nude"])?,
+            post(3, 30, Rating::Explicit, &["bikini", "nude"])?,
+            post(4, 40, Rating::Sensitive, &["solo"])?,
+            post(5, 50, Rating::General, &["bikini", "nude", "swimsuit"])?,
+            post(6, 60, Rating::General, &["swimsuit"])?,
+        ])?;
+
+        let mut query = Query::default();
+        assert!(query.push_atom(&[], atom("solo")?, TagPolarity::Positive));
+        let choice = query.push_group(&[], BoolOp::Or).context("push OR")?;
+        assert!(query.push_atom(&choice, atom("bikini")?, TagPolarity::Positive));
+        assert!(query.push_atom(&choice, atom("nude")?, TagPolarity::Positive));
+        assert!(query.push_atom(
+            &[],
+            QueryAtom::Rating(RatingClass::Explicit),
+            TagPolarity::Negative
+        ));
+        assert_eq!(ids(index.search(&query, Sort::Score, 10)?), [2, 1]);
+
+        let mut xor = Query::default();
+        let choice = xor.push_group(&[], BoolOp::Xor).context("push XOR")?;
+        assert!(xor.push_atom(&choice, atom("bikini")?, TagPolarity::Positive));
+        assert!(xor.push_atom(&choice, atom("nude")?, TagPolarity::Positive));
+        assert!(xor.push_atom(&choice, atom("swimsuit")?, TagPolarity::Positive));
+        assert_eq!(ids(index.search(&xor, Sort::Newest, 10)?), [6, 2, 1]);
+
+        drop(index);
+        let _removed = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    fn ids(hit: SearchHit) -> Vec<u32> {
+        hit.posts.into_iter().map(|post| post.id.0).collect()
+    }
+
+    fn atom(raw: &str) -> Result<QueryAtom> {
+        Tag::forge(raw)
+            .map(QueryAtom::Tag)
+            .context("forge test tag")
+    }
+
+    fn post(id: u32, score: i32, rating: Rating, tags: &[&str]) -> Result<PostRecord> {
+        Ok(PostRecord {
+            id: PostId(id),
+            rating,
+            score,
+            favs: 0,
+            width: 1,
+            height: 1,
+            created_at: String::new(),
+            tags: tags
+                .iter()
+                .map(|tag| Tag::forge(tag).context("forge post tag"))
+                .collect::<Result<Vec<_>>>()?,
+            preview_url: None,
+            thumb_360_url: None,
+            thumb_720_url: None,
+            large_url: None,
+            file_url: None,
+        })
+    }
 }

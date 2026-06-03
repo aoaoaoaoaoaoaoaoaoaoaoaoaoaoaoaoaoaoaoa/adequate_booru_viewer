@@ -2,7 +2,7 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
 
-use crate::model::Sort;
+use crate::model::{Query, Sort};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -39,8 +39,22 @@ impl Config {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QueryConfig {
+    pub tree: Query,
+    pub active_group: Vec<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub include: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub exclude: Vec<String>,
+}
+
+impl QueryConfig {
+    pub fn query(&self) -> Query {
+        if self.tree.is_empty() && (!self.include.is_empty() || !self.exclude.is_empty()) {
+            Query::parse(&legacy_query_text(self))
+        } else {
+            self.tree.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -72,5 +86,50 @@ impl Default for SoftConfig {
             prompt: String::new(),
             alpha: 0.0,
         }
+    }
+}
+
+fn legacy_query_text(config: &QueryConfig) -> String {
+    config
+        .include
+        .iter()
+        .cloned()
+        .chain(config.exclude.iter().map(|tag| format!("-{tag}")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{BoolOp, QueryAtom, Tag, TagPolarity};
+
+    #[test]
+    fn config_roundtrips_boolean_query_tree() -> Result<()> {
+        let mut query = Query::default();
+        assert!(query.push_atom(&[], tag("solo")?, TagPolarity::Positive));
+        let choice = query.push_group(&[], BoolOp::Or).context("push OR")?;
+        assert!(query.push_atom(&choice, tag("bikini")?, TagPolarity::Positive));
+        assert!(query.push_atom(&choice, tag("nude")?, TagPolarity::Positive));
+
+        let config = Config {
+            query: QueryConfig {
+                tree: query.clone(),
+                active_group: choice.clone(),
+                include: Vec::new(),
+                exclude: Vec::new(),
+            },
+            view: ViewConfig::default(),
+            soft: SoftConfig::default(),
+        };
+        let text = toml::to_string_pretty(&config)?;
+        let roundtrip = toml::from_str::<Config>(&text)?;
+        assert_eq!(roundtrip.query.query(), query);
+        assert_eq!(roundtrip.query.active_group, choice);
+        Ok(())
+    }
+
+    fn tag(raw: &str) -> Result<QueryAtom> {
+        Tag::forge(raw).map(QueryAtom::Tag).context("forge tag")
     }
 }
