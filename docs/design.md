@@ -8,7 +8,7 @@ The objection that long scraping work must survive restart is correct. The app t
 
 - durable index: `ProjectDirs::data_local_dir()/index.redb`
 - disposable media cache: `ProjectDirs::cache_dir()/media`
-- config: `ProjectDirs::config_dir()`
+- config snapshot: `ProjectDirs::config_dir()/config.toml`
 
 The durable database persists both directions:
 
@@ -17,6 +17,8 @@ The durable database persists both directions:
 - sort lanes: score and favorite indexes, with post-id ordering as the newest lane
 - semantic lane: `post_id → normalized jina-clip-v1 image embedding`
 - crawl cursor: latest Danbooru passive-crawl `page=b<post_id>` frontier
+
+`config.toml` is a serde/TOML snapshot of active state: `[query]` include/exclude chips, `[view]` sort and tile scale, and `[soft]` CLIP prompt/α. Startup restores it before the first local search.
 
 Model weights live under `ProjectDirs::data_local_dir()/models`, not under the disposable media cache. Pulling ONNX weights is work; it should survive restart.
 
@@ -28,7 +30,7 @@ Soft CLIP sort is a rerank over a local candidate pool: `base_rank + α * cosine
 
 Danbooru HTTP is only an anonymous read-only ingress. The worker calls `GET /posts.json`; no login, API key, write endpoint, vote endpoint, or mutation primitive exists in the code.
 
-A passive crawler walks Danbooru newest-to-oldest with `page=b<id>` and a durable cursor. It runs below the documented read-request ceiling so manual warm traffic has headroom.
+A passive crawler walks Danbooru newest-to-oldest with `page=b<id>` and a durable cursor. The active query warmer separately walks page 1, 2, 3, ... for the current query/sort until exhaustion or Danbooru's anonymous 1000-page search cap, then re-runs local search as pages are absorbed, so score/favorite sorts keep widening while the cache warms. Both paths share one 150 ms read gate, about 6.7 requests/sec against Danbooru's documented 10 requests/sec read ceiling.
 
 ## Multi-Tag Reality
 
@@ -40,7 +42,7 @@ The UI is `egui`/`eframe`, backed by native `winit`/`wgpu`. There is no JavaScri
 
 The main grid is image-only for scan speed. Filter state lives in a left chip panel. Thumbnails expose tag mutation on hover (`-` banishes, `+` requires, `×` removes). Clicking a thumbnail opens a scaled full-image frame with copy and right-click-close.
 
-`Ctrl` + mouse-wheel scales the grid from half-size to triple-size. Danbooru currently exposes media variants named `180x180`, `360x360`, `720x720`, `sample`, and `original`; the viewer still ingests the post-level preview/sample/original URLs, but the variant ladder should drive future adaptive thumbnail selection.
+`Ctrl` + mouse-wheel scales the grid from half-size to triple-size. Danbooru currently exposes media variants named `180x180`, `360x360`, `720x720`, `sample`, and `original`; the viewer stores the 180/360/720 URLs when present and chooses the thumbnail bucket from the current tile edge. The full-image frame uses sample/original fallbacks.
 
 ## Future Boorus
 

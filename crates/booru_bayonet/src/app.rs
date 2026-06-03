@@ -10,6 +10,7 @@ use std::{
 };
 
 use crate::{
+    config::{Config, QueryConfig, SoftConfig, ViewConfig},
     index::{Index, TagSuggestion},
     media::{MediaCache, RgbaBlade},
     model::{Embedding, PostId, PostRecord, Query, SearchHit, Sort, Tag, TagPolarity},
@@ -21,7 +22,9 @@ const RESULT_LIMIT: usize = 360;
 const SOFT_POOL: usize = 2_400;
 const SOFT_BACKLOG: usize = 128;
 const SUGGESTIONS: usize = 12;
-const BASE_TILE: f32 = 184.0;
+const AUTO_WARM_PAGES: u32 = 1;
+const DANBOORU_SEARCH_PAGE_LIMIT: u32 = 1_000;
+const BASE_TILE: f32 = 260.0;
 const MIN_TILE_SCALE: f32 = 0.5;
 const MAX_TILE_SCALE: f32 = 3.0;
 const GAP: f32 = 8.0;
@@ -39,8 +42,13 @@ pub struct Bayonet {
     soft_requested: Option<String>,
     sort: Sort,
     hit: SearchHit,
-    thumbs: HashMap<PostId, TextureHandle>,
-    thumb_inflight: HashSet<PostId>,
+    thumbs: HashMap<ThumbKey, TextureHandle>,
+    thumb_inflight: HashSet<ThumbKey>,
+    warm_key: WarmKey,
+    warm_next_page: u32,
+    warm_stride: u32,
+    warm_inflight: bool,
+    warm_exhausted: bool,
     full: HashMap<PostId, TextureHandle>,
     full_rgba: HashMap<PostId, RgbaBlade>,
     full_inflight: HashSet<PostId>,
@@ -48,6 +56,7 @@ pub struct Bayonet {
     tile_scale: f32,
     tag_menu_open: bool,
     clip_inflight: HashSet<PostId>,
+    warm_status: String,
     crawl_status: String,
     status: String,
 }
@@ -55,35 +64,45 @@ pub struct Bayonet {
 impl Bayonet {
     pub fn new(_cc: &CreationContext<'_>) -> Result<Self> {
         let lair = Lair::claim()?;
+        let config = Config::load(&lair.config_path())?;
         let index = Index::open(&lair.index_path())?;
         let media = MediaCache::new(lair.media_dir())?;
         let worker = Worker::spawn(index.clone(), media, lair.model_dir());
+        let query_text = query_text(&config.query);
+        let sort = config.view.sort;
+        let query = Query::parse(&query_text);
         let mut app = Self {
             status: format!("index {}", compact_path(&lair.index_path())),
             crawl_status: "crawl waking".to_owned(),
             lair,
             index,
             worker,
-            query_text: String::new(),
+            query_text,
             tag_entry: String::new(),
-            soft_text: String::new(),
-            soft_alpha: 0.0,
+            soft_text: config.soft.prompt.clone(),
+            soft_alpha: config.soft.alpha.clamp(0.0, 2.0),
             soft_prompt: None,
             soft_embedding: None,
             soft_requested: None,
-            sort: Sort::Score,
+            sort,
             hit: SearchHit::default(),
             thumbs: HashMap::new(),
             thumb_inflight: HashSet::new(),
+            warm_key: WarmKey::new(&query, sort),
+            warm_next_page: 1,
+            warm_stride: AUTO_WARM_PAGES,
+            warm_inflight: false,
+            warm_exhausted: false,
             full: HashMap::new(),
             full_rgba: HashMap::new(),
             full_inflight: HashSet::new(),
             zoom: None,
-            tile_scale: 1.0,
+            tile_scale: config.view.tile_scale.clamp(MIN_TILE_SCALE, MAX_TILE_SCALE),
             tag_menu_open: false,
             clip_inflight: HashSet::new(),
+            warm_status: "query warm idle".to_owned(),
         };
-        app.reap(false, 0)?;
+        app.reap(true, AUTO_WARM_PAGES)?;
         Ok(app)
     }
 
@@ -113,20 +132,32 @@ impl Bayonet {
             self.hit = hit.hit;
         } else {
             self.hit = self.index.search(&query, self.sort, RESULT_LIMIT)?;
-            self.status = format!(
-                "{} hits from {} candidates; {}",
-                self.hit.posts.len(),
-                self.hit.candidates,
-                compact_path(&self.lair.data)
-            );
-            self.request_soft_prompt();
+            let soft_armed = self.soft_prompt().is_some();
+            let queued = if soft_armed {
+                self.queue_clip(self.hit.posts.clone())
+            } else {
+                0
+            };
+            let requested = self.request_soft_prompt();
+            self.status = if soft_armed {
+                format!(
+                    "{} hits from {} candidates; clip text {}; queued {} visible images",
+                    self.hit.posts.len(),
+                    self.hit.candidates,
+                    if requested { "requested" } else { "pending" },
+                    queued
+                )
+            } else {
+                format!(
+                    "{} hits from {} candidates; {}",
+                    self.hit.posts.len(),
+                    self.hit.candidates,
+                    compact_path(&self.lair.data)
+                )
+            };
         }
         if warm {
-            self.worker.send(Command::Warm {
-                query,
-                sort: self.sort,
-                pages,
-            })?;
+            self.dispatch_warm(query, pages)?;
         }
         Ok(())
     }
@@ -137,7 +168,9 @@ impl Bayonet {
 
     fn install_query(&mut self, query: Query) {
         self.query_text = query.to_text();
-        self.strike(false, 0);
+        self.align_warm(&query);
+        self.save_config();
+        self.strike(true, AUTO_WARM_PAGES);
     }
 
     fn set_tag(&mut self, raw: &str, polarity: TagPolarity) {
@@ -170,20 +203,21 @@ impl Bayonet {
             .flatten()
     }
 
-    fn request_soft_prompt(&mut self) {
+    fn request_soft_prompt(&mut self) -> bool {
         let Some(prompt) = self.soft_prompt() else {
-            return;
+            return false;
         };
         if self.soft_prompt.as_deref() == Some(prompt.as_str())
             || self.soft_requested.as_deref() == Some(prompt.as_str())
         {
-            return;
+            return false;
         }
         self.soft_requested = Some(prompt.clone());
-        self.status = format!("embedding soft prompt `{prompt}`");
         if let Err(err) = self.worker.send(Command::SoftText { prompt }) {
             self.status = format!("{err:#}");
+            return false;
         }
+        true
     }
 
     fn queue_clip(&mut self, posts: Vec<PostRecord>) -> usize {
@@ -207,14 +241,107 @@ impl Bayonet {
         }
     }
 
+    fn align_warm(&mut self, query: &Query) {
+        let key = WarmKey::new(query, self.sort);
+        if self.warm_key == key {
+            return;
+        }
+        self.warm_key = key;
+        self.warm_next_page = 1;
+        self.warm_stride = AUTO_WARM_PAGES;
+        self.warm_inflight = false;
+        self.warm_exhausted = false;
+    }
+
+    fn dispatch_warm(&mut self, query: Query, pages: u32) -> Result<()> {
+        self.align_warm(&query);
+        if pages == 0 {
+            return Ok(());
+        }
+        self.warm_stride = self.warm_stride.max(pages);
+        if self.warm_inflight || self.warm_exhausted {
+            return Ok(());
+        }
+        let first_page = self.warm_next_page;
+        if first_page > DANBOORU_SEARCH_PAGE_LIMIT {
+            self.warm_exhausted = true;
+            self.warm_status = format!(
+                "query warm hit Danbooru page cap after {} p{}",
+                self.warm_key.label(),
+                DANBOORU_SEARCH_PAGE_LIMIT
+            );
+            return Ok(());
+        }
+        let pages = self
+            .warm_stride
+            .max(1)
+            .min(DANBOORU_SEARCH_PAGE_LIMIT - first_page + 1);
+        self.warm_inflight = true;
+        let last_page = first_page.saturating_add(pages.saturating_sub(1));
+        self.warm_status = format!(
+            "query warm {} p{}..p{}",
+            self.warm_key.label(),
+            first_page,
+            last_page
+        );
+        let send = self.worker.send(Command::Warm {
+            query,
+            sort: self.sort,
+            first_page,
+            pages,
+        });
+        if let Err(err) = send {
+            self.warm_inflight = false;
+            "query warm fault".clone_into(&mut self.warm_status);
+            return Err(err);
+        }
+        Ok(())
+    }
+
     fn drain(&mut self, ctx: &egui::Context) {
         let events = self.worker.drain().collect::<Vec<_>>();
         for event in events {
             match event {
-                Event::Warmed { query_key, posts } => {
-                    self.status = format!("absorbed {posts} posts for [{query_key}]");
+                Event::Warmed {
+                    query_key,
+                    sort,
+                    first_page,
+                    pages,
+                    posts,
+                    exhausted,
+                } => {
+                    let event_key = WarmKey {
+                        query: query_key,
+                        sort,
+                    };
+                    if self.warm_key == event_key {
+                        self.warm_inflight = false;
+                        self.warm_next_page =
+                            self.warm_next_page.max(first_page.saturating_add(pages));
+                        self.warm_exhausted = exhausted;
+                        self.warm_status = if exhausted {
+                            let last_page = first_page.saturating_add(pages.saturating_sub(1));
+                            format!(
+                                "query warm exhausted after {} p{}",
+                                event_key.label(),
+                                last_page
+                            )
+                        } else {
+                            format!(
+                                "query warm +{posts} {}; next p{}",
+                                event_key.label(),
+                                self.warm_next_page
+                            )
+                        };
+                    }
                     if let Err(err) = self.reap(false, 0) {
                         self.status = format!("{err:#}");
+                    }
+                    if self.warm_key == event_key && !self.warm_exhausted {
+                        let query = self.query();
+                        if let Err(err) = self.dispatch_warm(query, self.warm_stride) {
+                            self.status = format!("{err:#}");
+                        }
                     }
                     ctx.request_repaint();
                 }
@@ -223,10 +350,13 @@ impl Bayonet {
                         || "crawl reached empty page".to_owned(),
                         |before| format!("crawl +{posts}; before #{before}"),
                     );
+                    if let Err(err) = self.reap(false, 0) {
+                        self.status = format!("{err:#}");
+                    }
                     ctx.request_repaint();
                 }
-                Event::Blade(blade) => {
-                    self.install_blade(ctx, blade, BladeKind::Thumb);
+                Event::Blade { bucket, blade } => {
+                    self.install_blade(ctx, blade, BladeKind::Thumb(bucket));
                 }
                 Event::FullBlade(blade) => {
                     self.install_blade(ctx, blade, BladeKind::Full);
@@ -278,9 +408,13 @@ impl Bayonet {
             TextureOptions::LINEAR,
         );
         match kind {
-            BladeKind::Thumb => {
-                let _old = self.thumbs.insert(blade.id, texture);
-                let _was_inflight = self.thumb_inflight.remove(&blade.id);
+            BladeKind::Thumb(bucket) => {
+                let key = ThumbKey {
+                    id: blade.id,
+                    bucket,
+                };
+                let _old = self.thumbs.insert(key, texture);
+                let _was_inflight = self.thumb_inflight.remove(&key);
             }
             BladeKind::Full => {
                 let _old_texture = self.full.insert(blade.id, texture);
@@ -299,7 +433,8 @@ impl Bayonet {
                     .clicked()
                 {
                     self.sort = sort;
-                    self.strike(false, 0);
+                    self.save_config();
+                    self.strike(true, AUTO_WARM_PAGES);
                 }
             }
 
@@ -315,12 +450,14 @@ impl Bayonet {
             let _label = ui.label("soft");
             let prompt = ui.text_edit_singleline(&mut self.soft_text);
             if prompt.changed() {
+                self.save_config();
                 self.strike(false, 0);
             }
             let slider = egui::Slider::new(&mut self.soft_alpha, 0.0..=2.0)
                 .text("clip α")
                 .fixed_decimals(2);
             if ui.add(slider).changed() {
+                self.save_config();
                 self.strike(false, 0);
             }
             if ui.button("embed visible").clicked() {
@@ -328,7 +465,10 @@ impl Bayonet {
                 self.status = format!("queued {queued} visible images for Jina CLIP");
             }
         });
-        let _label = ui.label(format!("{}; {}", self.status, self.crawl_status));
+        let _label = ui.label(format!(
+            "{}; {}; {}",
+            self.status, self.warm_status, self.crawl_status
+        ));
     }
 
     fn autocomplete(&mut self, ui: &mut egui::Ui) {
@@ -440,10 +580,14 @@ impl Bayonet {
         let _tile = ui.vertical(|ui| {
             ui.set_width(tile);
             let response = if let Some(texture) = self.thumb(post) {
-                let image = egui::Image::new(texture)
-                    .max_size(egui::vec2(tile, tile))
-                    .sense(egui::Sense::click());
-                ui.add(image)
+                ui.allocate_ui(egui::vec2(tile, tile), |ui| {
+                    let size = fit(texture.size_vec2(), egui::vec2(tile, tile));
+                    let image = egui::Image::new(texture)
+                        .fit_to_exact_size(size)
+                        .sense(egui::Sense::click());
+                    let _center = ui.centered_and_justified(|ui| ui.add(image));
+                })
+                .response
             } else {
                 ui.allocate_ui(egui::vec2(tile, tile), |ui| {
                     let _center = ui.centered_and_justified(|ui| {
@@ -576,16 +720,22 @@ impl Bayonet {
     }
 
     fn thumb(&mut self, post: &PostRecord) -> Option<&TextureHandle> {
-        if !self.thumbs.contains_key(&post.id) && !self.thumb_inflight.contains(&post.id) {
-            let _now_inflight = self.thumb_inflight.insert(post.id);
+        let bucket = thumb_bucket(self.tile_edge());
+        let key = ThumbKey {
+            id: post.id,
+            bucket,
+        };
+        if !self.thumbs.contains_key(&key) && !self.thumb_inflight.contains(&key) {
+            let _now_inflight = self.thumb_inflight.insert(key);
             if let Err(err) = self.worker.send(Command::Blade {
                 id: post.id,
-                url: post.blade_url().map(ToOwned::to_owned),
+                bucket,
+                url: post.thumb_url(self.tile_edge()).map(ToOwned::to_owned),
             }) {
                 self.status = format!("{err:#}");
             }
         }
-        self.thumbs.get(&post.id)
+        self.thumbs.get(&key)
     }
 
     fn tile_edge(&self) -> f32 {
@@ -620,21 +770,72 @@ impl Bayonet {
         }
         self.tile_scale =
             (self.tile_scale * 1.12_f32.powf(steps)).clamp(MIN_TILE_SCALE, MAX_TILE_SCALE);
+        self.save_config();
         ctx.request_repaint();
+    }
+
+    fn save_config(&mut self) {
+        let config = Config {
+            query: query_config(&self.query()),
+            view: ViewConfig {
+                sort: self.sort,
+                tile_scale: self.tile_scale,
+            },
+            soft: SoftConfig {
+                prompt: self.soft_text.clone(),
+                alpha: self.soft_alpha,
+            },
+        };
+        if let Err(err) = config.save(&self.lair.config_path()) {
+            self.status = format!("{err:#}");
+        }
     }
 }
 
 #[derive(Clone, Copy)]
 enum BladeKind {
-    Thumb,
+    Thumb(u8),
     Full,
 }
 
 impl BladeKind {
     fn texture_prefix(self) -> &'static str {
         match self {
-            Self::Thumb => "post",
+            Self::Thumb(bucket) => match bucket {
+                0 => "post-180",
+                1 => "post-360",
+                _ => "post-720",
+            },
             Self::Full => "full",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ThumbKey {
+    id: PostId,
+    bucket: u8,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WarmKey {
+    query: String,
+    sort: Sort,
+}
+
+impl WarmKey {
+    fn new(query: &Query, sort: Sort) -> Self {
+        Self {
+            query: query.key(),
+            sort,
+        }
+    }
+
+    fn label(&self) -> String {
+        if self.query.is_empty() {
+            format!("{} ∅", self.sort.label())
+        } else {
+            format!("{} {}", self.sort.label(), self.query)
         }
     }
 }
@@ -666,6 +867,35 @@ fn fit(image: egui::Vec2, bounds: egui::Vec2) -> egui::Vec2 {
     }
     let scale = (bounds.x / image.x).min(bounds.y / image.y).min(1.0);
     image * scale
+}
+
+fn thumb_bucket(edge: f32) -> u8 {
+    if edge > 390.0 {
+        2
+    } else {
+        u8::from(edge > 190.0)
+    }
+}
+
+fn query_text(config: &QueryConfig) -> String {
+    config
+        .include
+        .iter()
+        .cloned()
+        .chain(config.exclude.iter().map(|tag| format!("-{tag}")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn query_config(query: &Query) -> QueryConfig {
+    QueryConfig {
+        include: query.tags().iter().map(ToString::to_string).collect(),
+        exclude: query
+            .excluded_tags()
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+    }
 }
 
 fn consume_wheel(ctx: &egui::Context) {

@@ -27,6 +27,10 @@ impl Lair {
         self.data.join("index.redb")
     }
 
+    pub fn config_path(&self) -> PathBuf {
+        self.config.join("config.toml")
+    }
+
     pub fn media_dir(&self) -> PathBuf {
         self.cache.join("media")
     }

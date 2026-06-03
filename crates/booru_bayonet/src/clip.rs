@@ -23,7 +23,9 @@ const REV: &str = "ceb3e44ca4d6eceaa4f3fb58b1c1a5748b3f29b6";
 const TEXT_MODEL: &str = "onnx/text_model_quantized.onnx";
 const VISION_MODEL: &str = "onnx/vision_model_quantized.onnx";
 const TOKENIZER: &str = "tokenizer.json";
-const TEXT_TOKENS: usize = 64;
+// The quantized Jina ONNX text export carries static sequence-axis constants at
+// 16. Feeding a longer tensor trips ORT broadcast checks inside attention.
+const TEXT_TOKENS: usize = 16;
 const IMAGE_SIZE: u32 = 224;
 const IMAGE_PIXELS: usize = IMAGE_SIZE as usize * IMAGE_SIZE as usize;
 const MODEL_BYTE_LIMIT: u64 = 600 * 1024 * 1024;

@@ -1,6 +1,7 @@
 mod app;
 mod booru;
 mod clip;
+mod config;
 mod index;
 mod media;
 mod model;

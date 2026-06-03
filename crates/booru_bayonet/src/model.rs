@@ -33,7 +33,8 @@ impl Display for Tag {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Sort {
     Newest,
     Score,
@@ -192,6 +193,10 @@ pub struct PostRecord {
     pub created_at: String,
     pub tags: Vec<Tag>,
     pub preview_url: Option<String>,
+    #[serde(default)]
+    pub thumb_360_url: Option<String>,
+    #[serde(default)]
+    pub thumb_720_url: Option<String>,
     pub large_url: Option<String>,
     pub file_url: Option<String>,
 }
@@ -200,8 +205,30 @@ impl PostRecord {
     pub fn blade_url(&self) -> Option<&str> {
         self.preview_url
             .as_deref()
+            .or(self.thumb_360_url.as_deref())
+            .or(self.thumb_720_url.as_deref())
             .or(self.large_url.as_deref())
             .or(self.file_url.as_deref())
+    }
+
+    pub fn thumb_url(&self, edge: f32) -> Option<&str> {
+        if edge > 390.0 {
+            self.thumb_720_url
+                .as_deref()
+                .or(self.thumb_360_url.as_deref())
+                .or(self.preview_url.as_deref())
+                .or(self.large_url.as_deref())
+                .or(self.file_url.as_deref())
+        } else if edge > 190.0 {
+            self.thumb_360_url
+                .as_deref()
+                .or(self.preview_url.as_deref())
+                .or(self.thumb_720_url.as_deref())
+                .or(self.large_url.as_deref())
+                .or(self.file_url.as_deref())
+        } else {
+            self.blade_url()
+        }
     }
 
     pub fn full_url(&self) -> Option<&str> {
@@ -209,6 +236,15 @@ impl PostRecord {
             .as_deref()
             .or(self.file_url.as_deref())
             .or(self.preview_url.as_deref())
+    }
+
+    pub fn clip_url(&self) -> Option<&str> {
+        self.thumb_720_url
+            .as_deref()
+            .or(self.large_url.as_deref())
+            .or(self.thumb_360_url.as_deref())
+            .or(self.preview_url.as_deref())
+            .or(self.file_url.as_deref())
     }
 }
 

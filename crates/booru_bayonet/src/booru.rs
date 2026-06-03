@@ -78,6 +78,21 @@ struct DanbooruPost {
     large_file_url: Option<String>,
     #[serde(default)]
     file_url: Option<String>,
+    #[serde(default)]
+    media_asset: Option<DanbooruMediaAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DanbooruMediaAsset {
+    #[serde(default)]
+    variants: Vec<DanbooruVariant>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DanbooruVariant {
+    #[serde(rename = "type")]
+    kind: String,
+    url: String,
 }
 
 impl TryFrom<DanbooruPost> for PostRecord {
@@ -91,6 +106,7 @@ impl TryFrom<DanbooruPost> for PostRecord {
             .collect::<Vec<_>>();
         tags.sort();
         tags.dedup();
+        let variants = Variants::from(post.media_asset.as_ref());
         Ok(Self {
             id: narrow_post_id(post.id)?,
             rating: Rating::parse(&post.rating),
@@ -100,9 +116,36 @@ impl TryFrom<DanbooruPost> for PostRecord {
             height: post.image_height,
             created_at: post.created_at,
             tags,
-            preview_url: post.preview_file_url,
+            preview_url: post.preview_file_url.or(variants.thumb_180),
+            thumb_360_url: variants.thumb_360,
+            thumb_720_url: variants.thumb_720,
             large_url: post.large_file_url,
             file_url: post.file_url,
         })
+    }
+}
+
+#[derive(Default)]
+struct Variants {
+    thumb_180: Option<String>,
+    thumb_360: Option<String>,
+    thumb_720: Option<String>,
+}
+
+impl From<Option<&DanbooruMediaAsset>> for Variants {
+    fn from(asset: Option<&DanbooruMediaAsset>) -> Self {
+        let mut out = Self::default();
+        let Some(asset) = asset else {
+            return out;
+        };
+        for variant in &asset.variants {
+            match variant.kind.as_str() {
+                "180x180" => out.thumb_180 = Some(variant.url.clone()),
+                "360x360" => out.thumb_360 = Some(variant.url.clone()),
+                "720x720" => out.thumb_720 = Some(variant.url.clone()),
+                _ => {}
+            }
+        }
+        out
     }
 }

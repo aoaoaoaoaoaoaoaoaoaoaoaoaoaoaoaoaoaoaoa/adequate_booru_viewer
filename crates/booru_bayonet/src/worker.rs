@@ -25,10 +25,12 @@ pub enum Command {
     Warm {
         query: Query,
         sort: Sort,
+        first_page: u32,
         pages: u32,
     },
     Blade {
         id: PostId,
+        bucket: u8,
         url: Option<String>,
     },
     FullBlade {
@@ -47,13 +49,20 @@ pub enum Command {
 pub enum Event {
     Warmed {
         query_key: String,
+        sort: Sort,
+        first_page: u32,
+        pages: u32,
         posts: usize,
+        exhausted: bool,
     },
     Crawled {
         posts: usize,
         before: Option<PostId>,
     },
-    Blade(RgbaBlade),
+    Blade {
+        bucket: u8,
+        blade: RgbaBlade,
+    },
     FullBlade(RgbaBlade),
     SoftText {
         prompt: String,
@@ -125,10 +134,15 @@ fn assault_loop(
     let booru = Danbooru::new();
     for command in commands {
         let outcome = match command {
-            Command::Warm { query, sort, pages } => warm(&booru, &index, &gate, query, sort, pages),
-            Command::Blade { id, url } => required_url(url.as_deref())
+            Command::Warm {
+                query,
+                sort,
+                first_page,
+                pages,
+            } => warm(&booru, &index, &gate, query, sort, first_page, pages),
+            Command::Blade { id, bucket, url } => required_url(url.as_deref())
                 .and_then(|url| media.blade(id, url))
-                .map(Event::Blade),
+                .map(|blade| Event::Blade { bucket, blade }),
             Command::FullBlade { id, url } => required_url(url.as_deref())
                 .and_then(|url| media.blade(id, url))
                 .map(Event::FullBlade),
@@ -212,18 +226,32 @@ fn warm(
     gate: &RateGate,
     query: Query,
     sort: Sort,
+    first_page: u32,
     pages: u32,
 ) -> Result<Event> {
     let mut absorbed = 0;
-    for page in 1..=pages.max(1) {
+    let pages = pages.max(1);
+    let mut fetched = 0;
+    let mut exhausted = false;
+    for offset in 0..pages {
+        let page = first_page + offset;
         gate.wait();
         let posts = booru.posts(&query, sort, page)?;
+        fetched += 1;
+        if posts.is_empty() {
+            exhausted = true;
+            break;
+        }
         absorbed += posts.len();
         index.absorb(&posts)?;
     }
     Ok(Event::Warmed {
         query_key: query.key(),
+        sort,
+        first_page,
+        pages: fetched,
         posts: absorbed,
+        exhausted,
     })
 }
 
@@ -311,7 +339,7 @@ fn embed_post(
     if index.has_embedding(post.id)? {
         return Ok(false);
     }
-    let url = required_url(post.blade_url())?;
+    let url = required_url(post.clip_url())?;
     let bytes = media.bytes(post.id, url)?;
     let embedding = clip.image(&bytes)?;
     index.put_embedding(post.id, &embedding)?;
