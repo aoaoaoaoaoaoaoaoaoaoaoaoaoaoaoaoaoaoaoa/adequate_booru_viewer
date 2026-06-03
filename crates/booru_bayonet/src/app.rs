@@ -21,7 +21,9 @@ const RESULT_LIMIT: usize = 360;
 const SOFT_POOL: usize = 2_400;
 const SOFT_BACKLOG: usize = 128;
 const SUGGESTIONS: usize = 12;
-const TILE: f32 = 184.0;
+const BASE_TILE: f32 = 184.0;
+const MIN_TILE_SCALE: f32 = 0.5;
+const MAX_TILE_SCALE: f32 = 3.0;
 const GAP: f32 = 8.0;
 
 pub struct Bayonet {
@@ -29,6 +31,7 @@ pub struct Bayonet {
     index: Index,
     worker: Worker,
     query_text: String,
+    tag_entry: String,
     soft_text: String,
     soft_alpha: f32,
     soft_prompt: Option<String>,
@@ -42,6 +45,8 @@ pub struct Bayonet {
     full_rgba: HashMap<PostId, RgbaBlade>,
     full_inflight: HashSet<PostId>,
     zoom: Option<PostRecord>,
+    tile_scale: f32,
+    tag_menu_open: bool,
     clip_inflight: HashSet<PostId>,
     crawl_status: String,
     status: String,
@@ -60,6 +65,7 @@ impl Bayonet {
             index,
             worker,
             query_text: String::new(),
+            tag_entry: String::new(),
             soft_text: String::new(),
             soft_alpha: 0.0,
             soft_prompt: None,
@@ -73,6 +79,8 @@ impl Bayonet {
             full_rgba: HashMap::new(),
             full_inflight: HashSet::new(),
             zoom: None,
+            tile_scale: 1.0,
+            tag_menu_open: false,
             clip_inflight: HashSet::new(),
         };
         app.reap(false, 0)?;
@@ -285,15 +293,6 @@ impl Bayonet {
 
     fn top(&mut self, ui: &mut egui::Ui) {
         let _bar = ui.horizontal(|ui| {
-            let query = ui.text_edit_singleline(&mut self.query_text);
-            if query.changed() {
-                self.strike(false, 0);
-            }
-            let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
-            if query.lost_focus() && enter {
-                self.strike(true, 1);
-            }
-
             for sort in Sort::ALL {
                 if ui
                     .selectable_label(self.sort == sort, sort.label())
@@ -310,8 +309,8 @@ impl Bayonet {
             if ui.button("ransack +1000").clicked() {
                 self.strike(true, 5);
             }
+            let _zoom = ui.label(format!("thumb {:.0}px", self.tile_edge()));
         });
-        self.autocomplete(ui);
         let _soft = ui.horizontal(|ui| {
             let _label = ui.label("soft");
             let prompt = ui.text_edit_singleline(&mut self.soft_text);
@@ -333,7 +332,7 @@ impl Bayonet {
     }
 
     fn autocomplete(&mut self, ui: &mut egui::Ui) {
-        let Some(prefix) = active_prefix(&self.query_text) else {
+        let Some(prefix) = active_prefix(&self.tag_entry) else {
             return;
         };
         let suggestions = match self.index.tag_suggestions(&prefix.body, SUGGESTIONS) {
@@ -360,33 +359,25 @@ impl Bayonet {
     }
 
     fn complete_active(&mut self, suggestion: &TagSuggestion, negative: bool) {
-        let replacement = if negative {
-            format!("-{}", suggestion.tag)
+        let polarity = if negative {
+            TagPolarity::Negative
         } else {
-            suggestion.tag.clone()
+            TagPolarity::Positive
         };
-        if self.query_text.trim().is_empty() {
-            self.query_text = replacement;
-        } else if self.query_text.ends_with(char::is_whitespace) {
-            self.query_text.push_str(&replacement);
-        } else if let Some((idx, _)) = self
-            .query_text
-            .char_indices()
-            .rev()
-            .find(|(_, c)| c.is_whitespace())
-        {
-            self.query_text.truncate(idx + 1);
-            self.query_text.push_str(&replacement);
-        } else {
-            self.query_text = replacement;
-        }
-        self.strike(false, 0);
+        self.set_tag(&suggestion.tag, polarity);
+        self.tag_entry.clear();
     }
 
     fn left_panel(&mut self, ui: &mut egui::Ui) {
         let query = self.query();
         let _heading = ui.heading("filter");
-        let _hint = ui.label("× removes; negative tags are bans.");
+        let entry = ui.text_edit_singleline(&mut self.tag_entry);
+        let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
+        if enter && (entry.has_focus() || entry.lost_focus()) {
+            self.commit_tag_entry();
+        }
+        self.autocomplete(ui);
+        let _hint = ui.label("enter adds; prefix - to ban; × removes.");
         let _separator = ui.separator();
         if query.tags().is_empty() && query.excluded_tags().is_empty() {
             let _empty = ui.label("neutral");
@@ -412,9 +403,26 @@ impl Bayonet {
         });
     }
 
+    fn commit_tag_entry(&mut self) {
+        let entry = Query::parse(&self.tag_entry);
+        if entry.tags().is_empty() && entry.excluded_tags().is_empty() {
+            return;
+        }
+        let mut query = self.query();
+        for tag in entry.tags() {
+            query.set(tag.clone(), TagPolarity::Positive);
+        }
+        for tag in entry.excluded_tags() {
+            query.set(tag.clone(), TagPolarity::Negative);
+        }
+        self.tag_entry.clear();
+        self.install_query(query);
+    }
+
     fn grid(&mut self, ui: &mut egui::Ui) {
-        let width = ui.available_width().max(TILE);
-        let cols = ((width + GAP) / (TILE + GAP)).floor().max(1.0) as usize;
+        let tile = self.tile_edge();
+        let width = ui.available_width().max(tile);
+        let cols = ((width + GAP) / (tile + GAP)).floor().max(1.0) as usize;
         let posts = self.hit.posts.clone();
         let _scroll = egui::ScrollArea::vertical().show(ui, |ui| {
             for row in posts.chunks(cols) {
@@ -428,15 +436,16 @@ impl Bayonet {
     }
 
     fn tile(&mut self, ui: &mut egui::Ui, post: &PostRecord) {
+        let tile = self.tile_edge();
         let _tile = ui.vertical(|ui| {
-            ui.set_width(TILE);
+            ui.set_width(tile);
             let response = if let Some(texture) = self.thumb(post) {
                 let image = egui::Image::new(texture)
-                    .max_size(egui::vec2(TILE, TILE))
+                    .max_size(egui::vec2(tile, tile))
                     .sense(egui::Sense::click());
                 ui.add(image)
             } else {
-                ui.allocate_ui(egui::vec2(TILE, TILE), |ui| {
+                ui.allocate_ui(egui::vec2(tile, tile), |ui| {
                     let _center = ui.centered_and_justified(|ui| {
                         let _label = ui.label("loading");
                     });
@@ -451,6 +460,7 @@ impl Bayonet {
     }
 
     fn tag_palette(&mut self, ui: &mut egui::Ui, post: &PostRecord) {
+        self.tag_menu_open = true;
         let query = self.query();
         let _heading = ui.label(format!(
             "#{}  score {}  fav {}",
@@ -478,6 +488,7 @@ impl Bayonet {
                     });
                 }
             });
+        consume_wheel(ui.ctx());
     }
 
     fn open_full(&mut self, post: &PostRecord) {
@@ -576,6 +587,41 @@ impl Bayonet {
         }
         self.thumbs.get(&post.id)
     }
+
+    fn tile_edge(&self) -> f32 {
+        BASE_TILE * self.tile_scale
+    }
+
+    fn zoom_tiles(&mut self, ctx: &egui::Context) {
+        if self.tag_menu_open {
+            return;
+        }
+        let steps = ctx.input(|input| {
+            input
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::MouseWheel {
+                        unit,
+                        delta,
+                        modifiers,
+                        ..
+                    } if modifiers.ctrl => Some(match unit {
+                        egui::MouseWheelUnit::Point => delta.y / 120.0,
+                        egui::MouseWheelUnit::Line => delta.y,
+                        egui::MouseWheelUnit::Page => delta.y * 4.0,
+                    }),
+                    _ => None,
+                })
+                .sum::<f32>()
+        });
+        if steps == 0.0 {
+            return;
+        }
+        self.tile_scale =
+            (self.tile_scale * 1.12_f32.powf(steps)).clamp(MIN_TILE_SCALE, MAX_TILE_SCALE);
+        ctx.request_repaint();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -622,12 +668,23 @@ fn fit(image: egui::Vec2, bounds: egui::Vec2) -> egui::Vec2 {
     image * scale
 }
 
+fn consume_wheel(ctx: &egui::Context) {
+    ctx.input_mut(|input| {
+        input
+            .events
+            .retain(|event| !matches!(event, egui::Event::MouseWheel { .. }));
+        input.smooth_scroll_delta = egui::Vec2::ZERO;
+    });
+}
+
 impl App for Bayonet {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.zoom_tiles(ctx);
         self.drain(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.tag_menu_open = false;
         let _edge = egui::Panel::top("edge").show_inside(ui, |ui| self.top(ui));
         let _left = egui::Panel::left("filter")
             .resizable(true)

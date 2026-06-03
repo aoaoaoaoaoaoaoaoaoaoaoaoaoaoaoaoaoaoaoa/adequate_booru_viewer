@@ -40,6 +40,8 @@ The UI is `egui`/`eframe`, backed by native `winit`/`wgpu`. There is no JavaScri
 
 The main grid is image-only for scan speed. Filter state lives in a left chip panel. Thumbnails expose tag mutation on hover (`-` banishes, `+` requires, `×` removes). Clicking a thumbnail opens a scaled full-image frame with copy and right-click-close.
 
+`Ctrl` + mouse-wheel scales the grid from half-size to triple-size. Danbooru currently exposes media variants named `180x180`, `360x360`, `720x720`, `sample`, and `original`; the viewer still ingests the post-level preview/sample/original URLs, but the variant ladder should drive future adaptive thumbnail selection.
+
 ## Future Boorus
 
 The seam is `Booru::posts(Query, Sort, page) -> Vec<PostRecord>`. Other boorus should map their wire format into the canonical `PostRecord`, then reuse the same index, sort lanes, media cache, and UI.
