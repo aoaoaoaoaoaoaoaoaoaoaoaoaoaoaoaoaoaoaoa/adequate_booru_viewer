@@ -411,6 +411,14 @@ impl Bayonet {
                     }
                     ctx.request_repaint();
                 }
+                Event::UnindexablePurged { tag, posts } => {
+                    self.update_cache_status();
+                    self.status = format!("purged {posts} `{tag}` posts from index");
+                    if let Err(err) = self.reap(false, 0) {
+                        self.status = format!("{err:#}");
+                    }
+                    ctx.request_repaint();
+                }
                 Event::Fault(fault) => {
                     self.status = fault;
                     ctx.request_repaint();

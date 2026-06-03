@@ -4,7 +4,7 @@ use redb::{
     TableDefinition,
 };
 use roaring::RoaringBitmap;
-use std::{collections::HashSet, io::Cursor, mem::size_of, path::Path, sync::Arc};
+use std::{io::Cursor, mem::size_of, path::Path, sync::Arc};
 
 use crate::model::{
     CLIP_DIM, Embedding, PostId, PostRecord, Query, RatingClass, SearchHit, Sort, Tag,
@@ -82,24 +82,32 @@ impl Index {
             let mut rating_table = tx.open_table(RATING_POSTS).context("open rating_posts")?;
             let mut score_table = tx.open_table(SCORE_POSTS).context("open score_posts")?;
             let mut fav_table = tx.open_table(FAV_POSTS).context("open fav_posts")?;
+            let mut jina_table = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
 
             for post in posts {
-                if let Some(old) = post_table
-                    .get(u64::from(post.id.0))
-                    .context("read old post")?
-                    .map(|guard| decode_record(guard.value()))
-                    .transpose()?
-                {
-                    let _old_score = score_table
-                        .remove(sort_key_i32(old.score, old.id))
-                        .context("remove old score lane")?;
-                    let _old_fav = fav_table
-                        .remove(sort_key_u32(old.favs, old.id))
-                        .context("remove old favorite lane")?;
-                    reap_dead_tags(&mut tag_table, &old, post)?;
-                    if let Some(rating) = old.rating.class() {
-                        bitmap_remove(&mut rating_table, rating.key(), old.id)?;
-                    }
+                let indexable = post.indexable();
+                let old = {
+                    post_table
+                        .get(u64::from(post.id.0))
+                        .context("read old post")?
+                        .map(|guard| decode_record(guard.value()))
+                        .transpose()?
+                };
+                if let Some(old) = old {
+                    remove_record(
+                        &mut post_table,
+                        &mut tag_table,
+                        &mut rating_table,
+                        &mut score_table,
+                        &mut fav_table,
+                        &mut jina_table,
+                        &old,
+                        !indexable,
+                    )?;
+                }
+
+                if !indexable {
+                    continue;
                 }
 
                 let encoded = encode_record(post)?;
@@ -281,6 +289,49 @@ impl Index {
         Ok(Some(posts))
     }
 
+    pub fn purge_unindexable(&self) -> Result<u64> {
+        let tx = self.db.begin_write().context("begin unindexable purge")?;
+        let mut purged = 0_u64;
+        {
+            let mut post_table = tx.open_table(POSTS).context("open posts")?;
+            let mut tag_table = tx.open_table(TAG_POSTS).context("open tag_posts")?;
+            let mut rating_table = tx.open_table(RATING_POSTS).context("open rating_posts")?;
+            let mut score_table = tx.open_table(SCORE_POSTS).context("open score_posts")?;
+            let mut fav_table = tx.open_table(FAV_POSTS).context("open fav_posts")?;
+            let mut jina_table = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
+            if let Some(blocked) = read_raw_bitmap(&tag_table, "animated")? {
+                for id in blocked {
+                    let post = {
+                        post_table
+                            .get(u64::from(id))
+                            .context("read unindexable post")?
+                            .map(|guard| decode_record(guard.value()))
+                            .transpose()?
+                    };
+                    let Some(post) = post else {
+                        continue;
+                    };
+                    if post.indexable() {
+                        continue;
+                    }
+                    remove_record(
+                        &mut post_table,
+                        &mut tag_table,
+                        &mut rating_table,
+                        &mut score_table,
+                        &mut fav_table,
+                        &mut jina_table,
+                        &post,
+                        true,
+                    )?;
+                    purged += 1;
+                }
+            }
+        }
+        tx.commit().context("commit unindexable purge")?;
+        Ok(purged)
+    }
+
     pub fn search(&self, query: &Query, sort: Sort, limit: usize) -> Result<SearchHit> {
         let tx = self.db.begin_read().context("begin index read")?;
         let posts = tx.open_table(POSTS).context("open posts")?;
@@ -449,32 +500,35 @@ impl Index {
     }
 }
 
-fn reap_dead_tags(
+fn remove_record(
+    post_table: &mut redb::Table<'_, u64, &[u8]>,
     tag_table: &mut redb::Table<'_, &str, &[u8]>,
-    old: &PostRecord,
-    new: &PostRecord,
+    rating_table: &mut redb::Table<'_, &str, &[u8]>,
+    score_table: &mut redb::Table<'_, u64, u32>,
+    fav_table: &mut redb::Table<'_, u64, u32>,
+    jina_table: &mut redb::Table<'_, u64, &[u8]>,
+    post: &PostRecord,
+    purge_embedding: bool,
 ) -> Result<()> {
-    let live = new.tags.iter().map(Tag::as_str).collect::<HashSet<_>>();
-    for tag in old.tags.iter().filter(|tag| !live.contains(tag.as_str())) {
-        let Some(mut bitmap) = tag_table
-            .get(tag.as_str())
-            .context("read stale tag bitmap")?
-            .map(|guard| bitmap_decode(guard.value()))
-            .transpose()?
-        else {
-            continue;
-        };
-        let _removed = bitmap.remove(old.id.0);
-        if bitmap.is_empty() {
-            let _old = tag_table
-                .remove(tag.as_str())
-                .context("remove empty stale tag bitmap")?;
-        } else {
-            let bytes = bitmap_encode(&bitmap)?;
-            let _old = tag_table
-                .insert(tag.as_str(), bytes.as_slice())
-                .context("rewrite stale tag bitmap")?;
-        }
+    let _old_post = post_table
+        .remove(u64::from(post.id.0))
+        .context("remove post record")?;
+    let _old_score = score_table
+        .remove(sort_key_i32(post.score, post.id))
+        .context("remove score lane")?;
+    let _old_fav = fav_table
+        .remove(sort_key_u32(post.favs, post.id))
+        .context("remove favorite lane")?;
+    for tag in &post.tags {
+        bitmap_remove(tag_table, tag.as_str(), post.id)?;
+    }
+    if let Some(rating) = post.rating.class() {
+        bitmap_remove(rating_table, rating.key(), post.id)?;
+    }
+    if purge_embedding {
+        let _old_embedding = jina_table
+            .remove(u64::from(post.id.0))
+            .context("remove Jina image embedding")?;
     }
     Ok(())
 }
@@ -545,8 +599,15 @@ fn read_bitmap(
     table: &impl redb::ReadableTable<&'static str, &'static [u8]>,
     tag: &Tag,
 ) -> Result<Option<RoaringBitmap>> {
+    read_raw_bitmap(table, tag.as_str())
+}
+
+fn read_raw_bitmap(
+    table: &impl redb::ReadableTable<&'static str, &'static [u8]>,
+    key: &str,
+) -> Result<Option<RoaringBitmap>> {
     table
-        .get(tag.as_str())
+        .get(key)
         .context("read bitmap")?
         .map(|guard| bitmap_decode(guard.value()))
         .transpose()

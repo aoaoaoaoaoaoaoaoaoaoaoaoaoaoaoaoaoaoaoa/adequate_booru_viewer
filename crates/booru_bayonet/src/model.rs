@@ -25,6 +25,10 @@ impl Tag {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn blocks_index(&self) -> bool {
+        self.0 == "animated"
+    }
 }
 
 impl Display for Tag {
@@ -325,6 +329,10 @@ pub struct PostRecord {
 }
 
 impl PostRecord {
+    pub fn indexable(&self) -> bool {
+        !self.tags.iter().any(Tag::blocks_index)
+    }
+
     pub fn blade_url(&self) -> Option<&str> {
         self.preview_url
             .as_deref()
@@ -466,5 +474,25 @@ mod tests {
     fn remote_seed_uses_only_one_rating_metatag() {
         let query = Query::parse("rating:q rating:e solo 1girl");
         assert_eq!(query.remote_seed(Sort::Score), "rating:q 1girl order:score");
+    }
+
+    #[test]
+    fn animated_posts_are_not_indexable() {
+        let post = PostRecord {
+            id: PostId(1),
+            rating: Rating::General,
+            score: 0,
+            favs: 0,
+            width: 1,
+            height: 1,
+            created_at: String::new(),
+            tags: vec![Tag("animated".to_owned())],
+            preview_url: None,
+            thumb_360_url: None,
+            thumb_720_url: None,
+            large_url: None,
+            file_url: None,
+        };
+        assert!(!post.indexable());
     }
 }

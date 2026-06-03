@@ -19,6 +19,8 @@ The durable database persists both directions:
 - semantic lane: `post_id → normalized jina-clip-v1 image embedding`
 - crawl cursor: latest Danbooru passive-crawl `page=b<post_id>` frontier
 
+Posts tagged `animated` are outside the reference-workbench contract. The ingestion path refuses to insert them, and background maintenance purges already-cached animated posts from the forward table, tag/rating/sort lanes, and CLIP embedding lane.
+
 `config.toml` is a serde/TOML snapshot of active state: `[query]` include/exclude chips, `[view]` sort and tile scale, and `[soft]` CLIP prompt/α. Startup restores it before the first local search.
 
 Model weights live under `ProjectDirs::data_local_dir()/models`, not under the disposable media cache. Pulling ONNX weights is work; it should survive restart.

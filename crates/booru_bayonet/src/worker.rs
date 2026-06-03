@@ -76,6 +76,10 @@ pub enum Event {
     RatingBackfilled {
         posts: u64,
     },
+    UnindexablePurged {
+        tag: &'static str,
+        posts: u64,
+    },
     Fault(String),
 }
 
@@ -132,6 +136,19 @@ impl Worker {
     pub fn backfill_ratings(&self, index: Index) {
         let events = self.event_tx.clone();
         let _backfill = thread::spawn(move || {
+            match index.purge_unindexable() {
+                Ok(0) => {}
+                Ok(posts) => {
+                    let _sent = events.send(Event::UnindexablePurged {
+                        tag: "animated",
+                        posts,
+                    });
+                }
+                Err(err) => {
+                    let _sent = events.send(Event::Fault(format!("{err:#}")));
+                    return;
+                }
+            }
             let event = match index.backfill_ratings_if_needed() {
                 Ok(Some(posts)) => Event::RatingBackfilled { posts },
                 Ok(None) => return,
