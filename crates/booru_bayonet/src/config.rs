@@ -41,19 +41,11 @@ impl Config {
 pub struct QueryConfig {
     pub tree: Query,
     pub active_group: Vec<usize>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub include: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub exclude: Vec<String>,
 }
 
 impl QueryConfig {
     pub fn query(&self) -> Query {
-        if self.tree.is_empty() && (!self.include.is_empty() || !self.exclude.is_empty()) {
-            Query::parse(&legacy_query_text(self))
-        } else {
-            self.tree.clone()
-        }
+        self.tree.clone()
     }
 }
 
@@ -89,16 +81,6 @@ impl Default for SoftConfig {
     }
 }
 
-fn legacy_query_text(config: &QueryConfig) -> String {
-    config
-        .include
-        .iter()
-        .cloned()
-        .chain(config.exclude.iter().map(|tag| format!("-{tag}")))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,8 +98,6 @@ mod tests {
             query: QueryConfig {
                 tree: query.clone(),
                 active_group: choice.clone(),
-                include: Vec::new(),
-                exclude: Vec::new(),
             },
             view: ViewConfig::default(),
             soft: SoftConfig::default(),

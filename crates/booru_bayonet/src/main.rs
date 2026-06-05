@@ -5,7 +5,9 @@ mod config;
 mod index;
 mod media;
 mod model;
+mod posting;
 mod trace;
+mod wire;
 mod worker;
 mod xdg;
 

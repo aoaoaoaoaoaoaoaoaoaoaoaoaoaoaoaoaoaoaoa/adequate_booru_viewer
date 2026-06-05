@@ -127,8 +127,6 @@ impl Bayonet {
         startup("app.state.built");
         app.reap(true, AUTO_WARM_PAGES)?;
         startup("app.initial.reap.done");
-        app.worker.backfill_ratings(app.index.clone());
-        startup("app.backfill.spawned");
         Ok(app)
     }
 
@@ -471,20 +469,16 @@ impl Bayonet {
                     }
                     ctx.request_repaint();
                 }
-                Event::RatingBackfilled { posts } => {
+                Event::FactsMerged {
+                    batches,
+                    bytes,
+                    groups,
+                } => {
                     self.update_cache_status();
-                    self.status = format!("backfilled rating lane over {posts} cached posts");
-                    if let Err(err) = self.reap(false, 0) {
-                        self.status = format!("{err:#}");
-                    }
-                    ctx.request_repaint();
-                }
-                Event::UnindexablePurged { tag, posts } => {
-                    self.update_cache_status();
-                    self.status = format!("purged {posts} `{tag}` posts from index");
-                    if let Err(err) = self.reap(false, 0) {
-                        self.status = format!("{err:#}");
-                    }
+                    self.warm_status = format!(
+                        "posting merge {batches} batches, {} KiB across {groups} predicates",
+                        bytes / 1024
+                    );
                     ctx.request_repaint();
                 }
                 Event::Fault(fault) => {
@@ -924,8 +918,6 @@ impl Bayonet {
             query: QueryConfig {
                 tree: self.query.clone(),
                 active_group: self.active_group.clone(),
-                include: Vec::new(),
-                exclude: Vec::new(),
             },
             view: ViewConfig {
                 sort: self.sort,
@@ -1244,11 +1236,6 @@ fn cache_status(stats: &CacheStats) -> String {
         .map(|(rating, posts)| format!("{}:{posts}", rating.key()))
         .collect::<Vec<_>>()
         .join("/");
-    let rating_state = if stats.rating_indexed {
-        "ratings ready"
-    } else {
-        "ratings indexing"
-    };
     let frontier = match (stats.crawl_before, stats.rough_crawl_percent()) {
         (Some(before), Some(percent)) => format!("crawl≤#{before} ≈{percent:.1}% ID"),
         (Some(before), None) => format!("crawl≤#{before}"),
@@ -1258,8 +1245,8 @@ fn cache_status(stats: &CacheStats) -> String {
         .newest
         .map_or_else(|| "newest unknown".to_owned(), |id| format!("newest #{id}"));
     format!(
-        "cache {} posts, {} tags, {} clip, {rating_state} {ratings}, {newest}, {frontier}",
-        stats.posts, stats.tags, stats.embeddings
+        "cache {} posts, {} tag chunks, {} clip, {} pending fact batches, ratings {ratings}, {newest}, {frontier}",
+        stats.posts, stats.tag_chunks, stats.embeddings, stats.pending_fact_batches
     )
 }
 

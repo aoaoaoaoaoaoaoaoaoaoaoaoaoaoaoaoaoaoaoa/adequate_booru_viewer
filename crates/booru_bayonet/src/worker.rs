@@ -10,7 +10,7 @@ use std::{
 use crate::{
     booru::{Booru as _, Danbooru},
     clip::ClipForge,
-    index::Index,
+    index::{FactMergeBudget, Index},
     media::{MediaCache, RgbaBlade, required_url},
     model::{Embedding, PostId, PostRecord, Query, Sort},
 };
@@ -19,6 +19,8 @@ const DANBOORU_READ_GAP: Duration = Duration::from_millis(150);
 const CRAWL_GAP: Duration = Duration::ZERO;
 const CRAWL_EMPTY_GAP: Duration = Duration::from_mins(1);
 const CRAWL_FAULT_GAP: Duration = Duration::from_secs(5);
+const MERGE_GAP: Duration = Duration::from_millis(250);
+const MERGE_IDLE_GAP: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 pub enum Command {
@@ -73,12 +75,10 @@ pub enum Event {
         stored: usize,
         faults: usize,
     },
-    RatingBackfilled {
-        posts: u64,
-    },
-    UnindexablePurged {
-        tag: &'static str,
-        posts: u64,
+    FactsMerged {
+        batches: usize,
+        bytes: usize,
+        groups: usize,
     },
     Fault(String),
 }
@@ -86,7 +86,6 @@ pub enum Event {
 pub struct Worker {
     io_tx: Sender<Command>,
     clip_tx: Sender<Command>,
-    event_tx: Sender<Event>,
     rx: Receiver<Event>,
 }
 
@@ -106,12 +105,13 @@ impl Worker {
         let crawl_events = event_tx.clone();
         let crawl_gate = read_gate.clone();
         let _crawl = thread::spawn(move || crawl_loop(crawl_index, crawl_gate, crawl_events));
-        let worker_events = event_tx.clone();
+        let merge_index = index.clone();
+        let merge_events = event_tx.clone();
+        let _merge = thread::spawn(move || merge_loop(merge_index, merge_events));
         let _clip = thread::spawn(move || clip_loop(index, media, model_root, clip_rx, event_tx));
         Self {
             io_tx,
             clip_tx,
-            event_tx: worker_events,
             rx: event_rx,
         }
     }
@@ -131,31 +131,6 @@ impl Worker {
 
     pub fn drain(&self) -> TryIter<'_, Event> {
         self.rx.try_iter()
-    }
-
-    pub fn backfill_ratings(&self, index: Index) {
-        let events = self.event_tx.clone();
-        let _backfill = thread::spawn(move || {
-            match index.purge_unindexable() {
-                Ok(0) => {}
-                Ok(posts) => {
-                    let _sent = events.send(Event::UnindexablePurged {
-                        tag: "animated",
-                        posts,
-                    });
-                }
-                Err(err) => {
-                    let _sent = events.send(Event::Fault(format!("{err:#}")));
-                    return;
-                }
-            }
-            let event = match index.backfill_ratings_if_needed() {
-                Ok(Some(posts)) => Event::RatingBackfilled { posts },
-                Ok(None) => return,
-                Err(err) => Event::Fault(format!("{err:#}")),
-            };
-            let _sent = events.send(event);
-        });
     }
 }
 
@@ -252,6 +227,27 @@ fn crawl_loop(index: Index, gate: RateGate, events: Sender<Event>) {
         if !gap.is_zero() {
             thread::sleep(gap);
         }
+    }
+}
+
+fn merge_loop(index: Index, events: Sender<Event>) {
+    loop {
+        let gap = match index.merge_pending_facts(FactMergeBudget::STEADY) {
+            Ok(merge) if merge.batches == 0 => MERGE_IDLE_GAP,
+            Ok(merge) => {
+                let _sent = events.send(Event::FactsMerged {
+                    batches: merge.batches,
+                    bytes: merge.bytes,
+                    groups: merge.groups,
+                });
+                MERGE_GAP
+            }
+            Err(err) => {
+                let _sent = events.send(Event::Fault(format!("{err:#}")));
+                CRAWL_FAULT_GAP
+            }
+        };
+        thread::sleep(gap);
     }
 }
 

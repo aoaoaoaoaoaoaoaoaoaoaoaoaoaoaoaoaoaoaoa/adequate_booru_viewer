@@ -5,7 +5,10 @@ use std::{
     fmt::{Display, Formatter},
 };
 
+use crate::wire;
+
 pub const CLIP_DIM: usize = 768;
+const POST_MAGIC: &[u8; 4] = b"BBP1";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct PostId(pub u32);
@@ -128,6 +131,7 @@ pub struct Query {
 }
 
 impl Query {
+    #[cfg(test)]
     pub fn parse(raw: &str) -> Self {
         Self {
             root: QueryExpr::Group {
@@ -773,12 +777,89 @@ impl Embedding {
     }
 }
 
-pub fn encode_record(post: &PostRecord) -> Result<Vec<u8>> {
-    serde_json::to_vec(post).context("serialize post record")
+pub fn encode_record(post: &PostRecord) -> Vec<u8> {
+    let mut sink = wire::Sink::with_magic(POST_MAGIC);
+    sink.u32(post.id.0);
+    encode_rating(&mut sink, &post.rating);
+    sink.i32(post.score);
+    sink.u32(post.favs);
+    sink.u32(post.width);
+    sink.u32(post.height);
+    sink.str(&post.created_at);
+    let mut tags = post.tags.iter().map(Tag::as_str).collect::<Vec<_>>();
+    tags.sort_unstable();
+    tags.dedup();
+    sink.var(tags.len() as u64);
+    for tag in tags {
+        sink.str(tag);
+    }
+    sink.opt_str(post.preview_url.as_deref());
+    sink.opt_str(post.thumb_360_url.as_deref());
+    sink.opt_str(post.thumb_720_url.as_deref());
+    sink.opt_str(post.large_url.as_deref());
+    sink.opt_str(post.file_url.as_deref());
+    sink.bytes()
 }
 
 pub fn decode_record(bytes: &[u8]) -> Result<PostRecord> {
-    serde_json::from_slice(bytes).context("deserialize post record")
+    let mut blade = wire::Blade::new(bytes, POST_MAGIC)?;
+    let id = PostId(blade.u32()?);
+    let rating = decode_rating(&mut blade)?;
+    let score = blade.i32()?;
+    let favs = blade.u32()?;
+    let width = blade.u32()?;
+    let height = blade.u32()?;
+    let created_at = blade.string()?;
+    let tag_count = usize::try_from(blade.var()?).context("tag count exceeds usize")?;
+    let mut tags = Vec::with_capacity(tag_count);
+    for _ in 0..tag_count {
+        let raw = blade.string()?;
+        let tag = Tag::forge(&raw).with_context(|| format!("decode empty post tag `{raw}`"))?;
+        tags.push(tag);
+    }
+    tags.sort();
+    tags.dedup();
+    let post = PostRecord {
+        id,
+        rating,
+        score,
+        favs,
+        width,
+        height,
+        created_at,
+        tags,
+        preview_url: blade.opt_string()?,
+        thumb_360_url: blade.opt_string()?,
+        thumb_720_url: blade.opt_string()?,
+        large_url: blade.opt_string()?,
+        file_url: blade.opt_string()?,
+    };
+    blade.done()?;
+    Ok(post)
+}
+
+fn encode_rating(sink: &mut wire::Sink, rating: &Rating) {
+    match rating {
+        Rating::General => sink.u8(0),
+        Rating::Sensitive => sink.u8(1),
+        Rating::Questionable => sink.u8(2),
+        Rating::Explicit => sink.u8(3),
+        Rating::Unknown(value) => {
+            sink.u8(4);
+            sink.str(value);
+        }
+    }
+}
+
+fn decode_rating(blade: &mut wire::Blade<'_>) -> Result<Rating> {
+    match blade.u8()? {
+        0 => Ok(Rating::General),
+        1 => Ok(Rating::Sensitive),
+        2 => Ok(Rating::Questionable),
+        3 => Ok(Rating::Explicit),
+        4 => blade.string().map(Rating::Unknown),
+        tag => bail!("invalid binary rating tag {tag}"),
+    }
 }
 
 pub fn narrow_post_id(id: u64) -> Result<PostId> {
@@ -862,5 +943,43 @@ mod tests {
             file_url: None,
         };
         assert!(!post.indexable());
+    }
+
+    #[test]
+    fn post_record_binary_codec_is_canonical() -> Result<()> {
+        let post = PostRecord {
+            id: PostId(42),
+            rating: Rating::Questionable,
+            score: -17,
+            favs: 99,
+            width: 1920,
+            height: 1080,
+            created_at: "2026-06-05T00:00:00Z".to_owned(),
+            tags: vec![
+                Tag::forge("zeta").context("zeta")?,
+                Tag::forge("alpha").context("alpha")?,
+                Tag::forge("alpha").context("alpha")?,
+            ],
+            preview_url: Some("https://example.test/180.jpg".to_owned()),
+            thumb_360_url: Some("https://example.test/360.jpg".to_owned()),
+            thumb_720_url: None,
+            large_url: Some("https://example.test/large.jpg".to_owned()),
+            file_url: None,
+        };
+        let encoded = encode_record(&post);
+        assert!(encoded.starts_with(POST_MAGIC));
+        let decoded = decode_record(&encoded)?;
+        assert_eq!(
+            decoded.tags,
+            vec![
+                Tag::forge("alpha").context("alpha")?,
+                Tag::forge("zeta").context("zeta")?
+            ]
+        );
+        assert_eq!(decoded.rating.class(), Some(RatingClass::Questionable));
+        assert_eq!(decoded.score, post.score);
+        assert_eq!(decoded.favs, post.favs);
+
+        Ok(())
     }
 }

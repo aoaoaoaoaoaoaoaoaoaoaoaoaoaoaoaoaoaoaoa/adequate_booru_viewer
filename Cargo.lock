@@ -513,7 +513,6 @@ dependencies = [
  "redb",
  "roaring",
  "serde",
- "serde_json",
  "tokenizers",
  "toml",
  "ureq",

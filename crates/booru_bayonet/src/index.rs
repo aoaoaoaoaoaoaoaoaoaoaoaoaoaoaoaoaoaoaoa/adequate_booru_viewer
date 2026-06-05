@@ -4,17 +4,19 @@ use redb::{
     TableDefinition, TableError,
 };
 use roaring::RoaringBitmap;
-use std::{io::Cursor, mem::size_of, path::Path, sync::Arc};
+use std::{collections::BTreeSet, mem::size_of, path::Path, sync::Arc};
 
 use crate::model::{
     BoolOp, CLIP_DIM, Embedding, PostId, PostRecord, Query, QueryAtom, QueryExpr, RatingClass,
     SearchHit, Sort, Tag, decode_record, encode_record,
 };
+use crate::posting::{self, Batch as FactBatch, Lane as PostingLane};
 use crate::trace::startup;
 
 const POSTS: TableDefinition<'_, u64, &[u8]> = TableDefinition::new("posts");
-const TAG_POSTS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("tag_posts");
-const RATING_POSTS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("rating_posts");
+const TAG_CHUNKS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("tag_chunks.v1");
+const RATING_CHUNKS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("rating_chunks.v1");
+const POSTING_FACTS: TableDefinition<'_, u64, &[u8]> = TableDefinition::new("posting_facts.v1");
 const SCORE_POSTS: TableDefinition<'_, u64, u32> = TableDefinition::new("score_posts");
 const FAV_POSTS: TableDefinition<'_, u64, u32> = TableDefinition::new("fav_posts");
 const JINA_IMAGE: TableDefinition<'_, u64, &[u8]> =
@@ -23,8 +25,29 @@ const META: TableDefinition<'_, &str, u64> = TableDefinition::new("meta");
 
 const SMALL_SORT: u64 = 50_000;
 const DANBOORU_CRAWL_BEFORE: &str = "danbooru.crawl.before";
-const RATING_BACKFILL_V1: &str = "rating.index.v1.backfilled";
 const QUICK_REPAIR_V1: &str = "redb.quick_repair.v1";
+const POSTING_FACT_NEXT_SEQ: &str = "posting_facts.v1.next_seq";
+const CHUNK_BITS: u32 = 16;
+
+#[derive(Clone, Copy, Debug)]
+pub struct FactMergeBudget {
+    pub batches: usize,
+    pub bytes: usize,
+}
+
+impl FactMergeBudget {
+    pub const STEADY: Self = Self {
+        batches: 128,
+        bytes: 16 * 1024 * 1024,
+    };
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FactMerge {
+    pub batches: usize,
+    pub bytes: usize,
+    pub groups: usize,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct SoftHit {
@@ -43,9 +66,9 @@ pub struct TagSuggestion {
 #[derive(Clone, Debug, Default)]
 pub struct CacheStats {
     pub posts: u64,
-    pub tags: u64,
+    pub tag_chunks: u64,
     pub embeddings: u64,
-    pub rating_indexed: bool,
+    pub pending_fact_batches: u64,
     pub newest: Option<PostId>,
     pub crawl_before: Option<PostId>,
     pub ratings: Vec<(RatingClass, u64)>,
@@ -83,11 +106,10 @@ impl Index {
         let tx = self.begin_quick_write("begin index write")?;
         {
             let mut post_table = tx.open_table(POSTS).context("open posts")?;
-            let mut tag_table = tx.open_table(TAG_POSTS).context("open tag_posts")?;
-            let mut rating_table = tx.open_table(RATING_POSTS).context("open rating_posts")?;
             let mut score_table = tx.open_table(SCORE_POSTS).context("open score_posts")?;
             let mut fav_table = tx.open_table(FAV_POSTS).context("open fav_posts")?;
             let mut jina_table = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
+            let mut facts = FactBatch::default();
 
             for post in posts {
                 let indexable = post.indexable();
@@ -98,24 +120,27 @@ impl Index {
                         .map(|guard| decode_record(guard.value()))
                         .transpose()?
                 };
-                if let Some(old) = old {
-                    remove_record(
+                if let Some(old) = old.as_ref() {
+                    stage_record_delta(&mut facts, Some(old), indexable.then_some(post));
+                    remove_record_core(
                         &mut post_table,
-                        &mut tag_table,
-                        &mut rating_table,
                         &mut score_table,
                         &mut fav_table,
                         &mut jina_table,
-                        &old,
+                        old,
                         !indexable,
                     )?;
+                }
+
+                if old.is_none() {
+                    stage_record_delta(&mut facts, None, indexable.then_some(post));
                 }
 
                 if !indexable {
                     continue;
                 }
 
-                let encoded = encode_record(post)?;
+                let encoded = encode_record(post);
                 let _old_post = post_table
                     .insert(u64::from(post.id.0), encoded.as_slice())
                     .context("upsert post")?;
@@ -125,13 +150,9 @@ impl Index {
                 let _old_fav = fav_table
                     .insert(sort_key_u32(post.favs, post.id), post.id.0)
                     .context("upsert favorite lane")?;
-
-                for tag in &post.tags {
-                    bitmap_insert(&mut tag_table, tag.as_str(), post.id)?;
-                }
-                if let Some(rating) = post.rating.class() {
-                    bitmap_insert(&mut rating_table, rating.key(), post.id)?;
-                }
+            }
+            if !facts.is_empty() {
+                append_facts(&tx, &facts)?;
             }
         }
         tx.commit().context("commit index write")
@@ -184,24 +205,29 @@ impl Index {
             return Ok(Vec::new());
         };
         let tx = self.db.begin_read().context("begin tag suggestion read")?;
-        let table = tx.open_table(TAG_POSTS).context("open tag_posts")?;
-        let mut hits = Vec::new();
-        for row in table
-            .range(prefix.as_str()..)
-            .context("range tag suggestions")?
-        {
-            let (tag, bytes) = row.context("read tag suggestion")?;
-            let tag = tag.value();
-            if !tag.starts_with(prefix.as_str()) {
+        let chunks = tx.open_table(TAG_CHUNKS).context("open tag chunks")?;
+        let facts = tx.open_table(POSTING_FACTS).context("open posting facts")?;
+        let pending = pending_facts(&facts)?;
+        let mut candidates = BTreeSet::new();
+        let candidate_cap = limit.saturating_mul(32).max(limit);
+        collect_chunked_tag_names(&chunks, &prefix, candidate_cap, &mut candidates)?;
+        for (key, _) in pending.groups() {
+            if key.lane == PostingLane::Tag && key.key.starts_with(&prefix) {
+                let _inserted = candidates.insert(key.key.clone());
+            }
+            if candidates.len() >= candidate_cap {
                 break;
             }
+        }
+        let mut hits = Vec::with_capacity(candidates.len());
+        for tag in candidates {
+            let Some(tag_atom) = Tag::forge(&tag) else {
+                continue;
+            };
             hits.push(TagSuggestion {
-                tag: tag.to_owned(),
-                posts: bitmap_decode(bytes.value())?.len(),
+                tag,
+                posts: read_tag_bitmap(&chunks, &pending, &tag_atom)?.len(),
             });
-            if hits.len() >= limit.saturating_mul(16).max(limit) {
-                break;
-            }
         }
         hits.sort_unstable_by(|a, b| b.posts.cmp(&a.posts).then_with(|| a.tag.cmp(&b.tag)));
         hits.truncate(limit);
@@ -213,8 +239,10 @@ impl Index {
         let tx = self.db.begin_read().context("begin cache stats read")?;
         startup("index.stats.tx");
         let posts = tx.open_table(POSTS).context("open posts")?;
-        let tags = tx.open_table(TAG_POSTS).context("open tag_posts")?;
-        let rating_table = tx.open_table(RATING_POSTS).context("open rating_posts")?;
+        let tag_chunks = tx.open_table(TAG_CHUNKS).context("open tag chunks")?;
+        let rating_chunks = tx.open_table(RATING_CHUNKS).context("open rating chunks")?;
+        let facts = tx.open_table(POSTING_FACTS).context("open posting facts")?;
+        let pending = pending_facts(&facts)?;
         let embeddings = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
         let meta = tx.open_table(META).context("open meta")?;
         startup("index.stats.tables");
@@ -236,110 +264,69 @@ impl Index {
             .map(|guard| narrow_meta_post_id(guard.value()))
             .transpose()?;
         startup("index.stats.crawl.before");
-        let rating_indexed = meta
-            .get(RATING_BACKFILL_V1)
-            .context("read rating backfill marker")?
-            .is_some();
-        startup("index.stats.rating.marker");
         let ratings = RatingClass::ALL
             .into_iter()
             .map(|rating| {
-                let posts =
-                    read_rating_bitmap(&rating_table, rating)?.map_or(0, |bitmap| bitmap.len());
+                let posts = read_rating_bitmap(&rating_chunks, &pending, rating)?.len();
                 Ok((rating, posts))
             })
             .collect::<Result<Vec<_>>>()?;
         startup("index.stats.rating.bitmaps");
         Ok(CacheStats {
             posts: posts_len,
-            tags: tags.len().context("count tags")?,
+            tag_chunks: tag_chunks.len().context("count tag chunks")?,
             embeddings: embeddings.len().context("count Jina image embeddings")?,
-            rating_indexed,
+            pending_fact_batches: facts.len().context("count posting fact batches")?,
             newest,
             crawl_before,
             ratings,
         })
     }
 
-    pub fn backfill_ratings_if_needed(&self) -> Result<Option<u64>> {
-        let (lanes, posts) = {
-            let tx = self.db.begin_read().context("begin rating backfill read")?;
-            let meta = tx.open_table(META).context("open meta")?;
-            if meta
-                .get(RATING_BACKFILL_V1)
-                .context("read rating backfill marker")?
-                .is_some()
-            {
-                return Ok(None);
-            }
-            let posts = tx.open_table(POSTS).context("open posts")?;
-            rating_lanes(&posts)?
+    pub fn merge_pending_facts(&self, budget: FactMergeBudget) -> Result<FactMerge> {
+        let tx = self.begin_quick_write("begin posting fact merge")?;
+        let pending = {
+            let facts = tx.open_table(POSTING_FACTS).context("open posting facts")?;
+            collect_pending_fact_rows(&facts, budget)?
         };
-
-        let tx = self.begin_quick_write("begin rating backfill write")?;
-        {
-            let mut ratings = tx.open_table(RATING_POSTS).context("open rating_posts")?;
-            let mut meta = tx.open_table(META).context("open meta")?;
-            for (rating, mut bitmap) in lanes {
-                if let Some(existing) = read_rating_bitmap(&ratings, rating)? {
-                    bitmap |= existing;
-                }
-                if !bitmap.is_empty() {
-                    let bytes = bitmap_encode(&bitmap)?;
-                    let _old = ratings
-                        .insert(rating.key(), bytes.as_slice())
-                        .with_context(|| format!("write {} rating backfill", rating.key()))?;
-                }
-            }
-            let _old = meta
-                .insert(RATING_BACKFILL_V1, posts)
-                .context("write rating backfill marker")?;
+        if pending.is_empty() {
+            return Ok(FactMerge::default());
         }
-        tx.commit().context("commit rating backfill")?;
-        Ok(Some(posts))
-    }
-
-    pub fn purge_unindexable(&self) -> Result<u64> {
-        let tx = self.begin_quick_write("begin unindexable purge")?;
-        let mut purged = 0_u64;
+        let mut batch = FactBatch::default();
+        let mut bytes = 0_usize;
+        for (_, encoded) in &pending {
+            bytes = bytes.saturating_add(encoded.len());
+            batch.assimilate(FactBatch::decode(encoded)?);
+        }
+        let groups = batch.groups().count();
         {
-            let mut post_table = tx.open_table(POSTS).context("open posts")?;
-            let mut tag_table = tx.open_table(TAG_POSTS).context("open tag_posts")?;
-            let mut rating_table = tx.open_table(RATING_POSTS).context("open rating_posts")?;
-            let mut score_table = tx.open_table(SCORE_POSTS).context("open score_posts")?;
-            let mut fav_table = tx.open_table(FAV_POSTS).context("open fav_posts")?;
-            let mut jina_table = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
-            if let Some(blocked) = read_raw_bitmap(&tag_table, "animated")? {
-                for id in blocked {
-                    let post = {
-                        post_table
-                            .get(u64::from(id))
-                            .context("read unindexable post")?
-                            .map(|guard| decode_record(guard.value()))
-                            .transpose()?
-                    };
-                    let Some(post) = post else {
-                        continue;
-                    };
-                    if post.indexable() {
-                        continue;
+            let mut tag_chunks = tx.open_table(TAG_CHUNKS).context("open tag chunks")?;
+            let mut rating_chunks = tx.open_table(RATING_CHUNKS).context("open rating chunks")?;
+            for (key, delta) in batch.groups() {
+                match key.lane {
+                    PostingLane::Tag => {
+                        apply_delta_chunks(&mut tag_chunks, &key.key, delta)?;
                     }
-                    remove_record(
-                        &mut post_table,
-                        &mut tag_table,
-                        &mut rating_table,
-                        &mut score_table,
-                        &mut fav_table,
-                        &mut jina_table,
-                        &post,
-                        true,
-                    )?;
-                    purged += 1;
+                    PostingLane::Rating => {
+                        apply_delta_chunks(&mut rating_chunks, &key.key, delta)?;
+                    }
                 }
             }
         }
-        tx.commit().context("commit unindexable purge")?;
-        Ok(purged)
+        {
+            let mut facts = tx.open_table(POSTING_FACTS).context("open posting facts")?;
+            for (seq, _) in &pending {
+                let _old = facts
+                    .remove(*seq)
+                    .with_context(|| format!("remove merged posting fact batch {seq}"))?;
+            }
+        }
+        tx.commit().context("commit posting fact merge")?;
+        Ok(FactMerge {
+            batches: pending.len(),
+            bytes,
+            groups,
+        })
     }
 
     pub fn search(&self, query: &Query, sort: Sort, limit: usize) -> Result<SearchHit> {
@@ -489,8 +476,13 @@ impl Index {
         let tx = self.begin_quick_write("begin schema prime")?;
         {
             let _posts = tx.open_table(POSTS).context("prime posts")?;
-            let _tags = tx.open_table(TAG_POSTS).context("prime tag_posts")?;
-            let _ratings = tx.open_table(RATING_POSTS).context("prime rating_posts")?;
+            let _tags = tx.open_table(TAG_CHUNKS).context("prime tag chunks")?;
+            let _ratings = tx
+                .open_table(RATING_CHUNKS)
+                .context("prime rating chunks")?;
+            let _facts = tx
+                .open_table(POSTING_FACTS)
+                .context("prime posting facts")?;
             let _score = tx.open_table(SCORE_POSTS).context("prime score_posts")?;
             let _favs = tx.open_table(FAV_POSTS).context("prime fav_posts")?;
             let _jina = tx
@@ -516,8 +508,9 @@ impl Index {
             };
         }
         open!(POSTS);
-        open!(TAG_POSTS);
-        open!(RATING_POSTS);
+        open!(TAG_CHUNKS);
+        open!(RATING_CHUNKS);
+        open!(POSTING_FACTS);
         open!(SCORE_POSTS);
         open!(FAV_POSTS);
         open!(JINA_IMAGE);
@@ -542,13 +535,16 @@ impl Index {
             return Ok(None);
         }
 
-        let tag_table = tx.open_table(TAG_POSTS).context("open tag_posts")?;
-        let rating_table = tx.open_table(RATING_POSTS).context("open rating_posts")?;
+        let tag_chunks = tx.open_table(TAG_CHUNKS).context("open tag chunks")?;
+        let rating_chunks = tx.open_table(RATING_CHUNKS).context("open rating chunks")?;
+        let facts = tx.open_table(POSTING_FACTS).context("open posting facts")?;
+        let pending = pending_facts(&facts)?;
         let posts = tx.open_table(POSTS).context("open posts")?;
         BitmapEval {
             posts: &posts,
-            tags: &tag_table,
-            ratings: &rating_table,
+            tags: &tag_chunks,
+            ratings: &rating_chunks,
+            pending: &pending,
             universe: None,
         }
         .eval(query.root())
@@ -602,23 +598,22 @@ impl Candidate {
     }
 }
 
-struct BitmapEval<'a, P, T, R>
+struct BitmapEval<'a, P, B>
 where
     P: redb::ReadableTable<u64, &'static [u8]>,
-    T: redb::ReadableTable<&'static str, &'static [u8]>,
-    R: redb::ReadableTable<&'static str, &'static [u8]>,
+    B: redb::ReadableTable<&'static str, &'static [u8]>,
 {
     posts: &'a P,
-    tags: &'a T,
-    ratings: &'a R,
+    tags: &'a B,
+    ratings: &'a B,
+    pending: &'a FactBatch,
     universe: Option<RoaringBitmap>,
 }
 
-impl<P, T, R> BitmapEval<'_, P, T, R>
+impl<P, B> BitmapEval<'_, P, B>
 where
     P: redb::ReadableTable<u64, &'static [u8]>,
-    T: redb::ReadableTable<&'static str, &'static [u8]>,
-    R: redb::ReadableTable<&'static str, &'static [u8]>,
+    B: redb::ReadableTable<&'static str, &'static [u8]>,
 {
     fn eval(&mut self, expr: &QueryExpr) -> Result<Candidate> {
         match expr {
@@ -644,12 +639,12 @@ where
 
     fn atom(&self, atom: &QueryAtom) -> Result<Candidate> {
         match atom {
-            QueryAtom::Tag(tag) => read_bitmap(self.tags, tag)
-                .map(Option::unwrap_or_default)
-                .map(Candidate::Finite),
-            QueryAtom::Rating(rating) => read_rating_bitmap(self.ratings, *rating)
-                .map(Option::unwrap_or_default)
-                .map(Candidate::Finite),
+            QueryAtom::Tag(tag) => {
+                read_tag_bitmap(self.tags, self.pending, tag).map(Candidate::Finite)
+            }
+            QueryAtom::Rating(rating) => {
+                read_rating_bitmap(self.ratings, self.pending, *rating).map(Candidate::Finite)
+            }
         }
     }
 
@@ -733,10 +728,8 @@ fn disjunction(children: Vec<Candidate>) -> Candidate {
     }
 }
 
-fn remove_record(
+fn remove_record_core(
     post_table: &mut redb::Table<'_, u64, &[u8]>,
-    tag_table: &mut redb::Table<'_, &str, &[u8]>,
-    rating_table: &mut redb::Table<'_, &str, &[u8]>,
     score_table: &mut redb::Table<'_, u64, u32>,
     fav_table: &mut redb::Table<'_, u64, u32>,
     jina_table: &mut redb::Table<'_, u64, &[u8]>,
@@ -752,12 +745,6 @@ fn remove_record(
     let _old_fav = fav_table
         .remove(sort_key_u32(post.favs, post.id))
         .context("remove favorite lane")?;
-    for tag in &post.tags {
-        bitmap_remove(tag_table, tag.as_str(), post.id)?;
-    }
-    if let Some(rating) = post.rating.class() {
-        bitmap_remove(rating_table, rating.key(), post.id)?;
-    }
     if purge_embedding {
         let _old_embedding = jina_table
             .remove(u64::from(post.id.0))
@@ -766,95 +753,238 @@ fn remove_record(
     Ok(())
 }
 
-fn bitmap_insert(table: &mut redb::Table<'_, &str, &[u8]>, key: &str, id: PostId) -> Result<()> {
-    let mut bitmap = table
-        .get(key)
-        .with_context(|| format!("read bitmap {key}"))?
-        .map(|guard| bitmap_decode(guard.value()))
-        .transpose()?
-        .unwrap_or_default();
-    let _inserted = bitmap.insert(id.0);
-    let bytes = bitmap_encode(&bitmap)?;
+fn stage_record_delta(facts: &mut FactBatch, old: Option<&PostRecord>, new: Option<&PostRecord>) {
+    let Some(record) = old.or(new) else {
+        return;
+    };
+    let id = record.id;
+    let old_tags = indexed_tags(old);
+    let new_tags = indexed_tags(new);
+    for tag in old_tags.difference(&new_tags) {
+        facts.del(PostingLane::Tag, tag, id);
+    }
+    for tag in new_tags.difference(&old_tags) {
+        facts.add(PostingLane::Tag, tag, id);
+    }
+
+    let old_rating = indexed_rating(old);
+    let new_rating = indexed_rating(new);
+    if old_rating != new_rating {
+        if let Some(rating) = old_rating {
+            facts.del(PostingLane::Rating, rating.key(), id);
+        }
+        if let Some(rating) = new_rating {
+            facts.add(PostingLane::Rating, rating.key(), id);
+        }
+    }
+}
+
+fn indexed_tags(post: Option<&PostRecord>) -> BTreeSet<String> {
+    post.filter(|post| post.indexable())
+        .map(|post| post.tags.iter().map(ToString::to_string).collect())
+        .unwrap_or_default()
+}
+
+fn indexed_rating(post: Option<&PostRecord>) -> Option<RatingClass> {
+    post.filter(|post| post.indexable())
+        .and_then(|post| post.rating.class())
+}
+
+fn append_facts(tx: &redb::WriteTransaction, facts: &FactBatch) -> Result<()> {
+    let mut table = tx.open_table(POSTING_FACTS).context("open posting facts")?;
+    let mut meta = tx.open_table(META).context("open meta")?;
+    let seq = meta
+        .get(POSTING_FACT_NEXT_SEQ)
+        .context("read posting fact sequence")?
+        .map_or(1, |seq| seq.value());
+    let bytes = facts.encode()?;
     let _old = table
-        .insert(key, bytes.as_slice())
-        .with_context(|| format!("upsert bitmap {key}"))?;
+        .insert(seq, bytes.as_slice())
+        .with_context(|| format!("append posting fact batch {seq}"))?;
+    let _old_seq = meta
+        .insert(POSTING_FACT_NEXT_SEQ, seq.saturating_add(1))
+        .context("advance posting fact sequence")?;
     Ok(())
 }
 
-fn bitmap_remove(table: &mut redb::Table<'_, &str, &[u8]>, key: &str, id: PostId) -> Result<()> {
-    let Some(mut bitmap) = table
-        .get(key)
-        .with_context(|| format!("read bitmap {key}"))?
-        .map(|guard| bitmap_decode(guard.value()))
-        .transpose()?
-    else {
-        return Ok(());
-    };
-    let _removed = bitmap.remove(id.0);
+fn pending_facts(table: &impl redb::ReadableTable<u64, &'static [u8]>) -> Result<FactBatch> {
+    let mut out = FactBatch::default();
+    for row in table
+        .range(0_u64..=u64::MAX)
+        .context("range pending posting facts")?
+    {
+        let (_, bytes) = row.context("read pending posting fact")?;
+        out.assimilate(FactBatch::decode(bytes.value())?);
+    }
+    Ok(out)
+}
+
+fn collect_pending_fact_rows(
+    table: &impl redb::ReadableTable<u64, &'static [u8]>,
+    budget: FactMergeBudget,
+) -> Result<Vec<(u64, Vec<u8>)>> {
+    let mut rows = Vec::new();
+    let mut bytes = 0_usize;
+    for row in table
+        .range(0_u64..=u64::MAX)
+        .context("range posting facts for merge")?
+    {
+        if rows.len() >= budget.batches.max(1) || bytes >= budget.bytes.max(1) {
+            break;
+        }
+        let (seq, encoded) = row.context("read posting fact merge row")?;
+        let encoded = encoded.value().to_vec();
+        bytes = bytes.saturating_add(encoded.len());
+        rows.push((seq.value(), encoded));
+    }
+    Ok(rows)
+}
+
+fn apply_delta_chunks(
+    table: &mut redb::Table<'_, &str, &[u8]>,
+    key: &str,
+    delta: &posting::Delta,
+) -> Result<()> {
+    let mut chunks = touched_chunks(&delta.add);
+    chunks.extend(touched_chunks(&delta.del));
+    for chunk in chunks {
+        let chunk_key = chunk_key(key, chunk);
+        let mut bitmap = read_chunk_row(table, &chunk_key)?.unwrap_or_default();
+        let incoming_add = restrict_chunk(&delta.add, chunk);
+        let incoming_del = restrict_chunk(&delta.del, chunk);
+        bitmap -= &incoming_del;
+        bitmap |= &incoming_add;
+        put_chunk(table, &chunk_key, &bitmap)?;
+    }
+    Ok(())
+}
+
+fn put_chunk(
+    table: &mut redb::Table<'_, &str, &[u8]>,
+    key: &str,
+    bitmap: &RoaringBitmap,
+) -> Result<()> {
     if bitmap.is_empty() {
         let _old = table
             .remove(key)
-            .with_context(|| format!("remove empty bitmap {key}"))?;
+            .with_context(|| format!("remove empty posting chunk {key:?}"))?;
     } else {
-        let bytes = bitmap_encode(&bitmap)?;
+        let bytes = posting::bitmap_encode(bitmap)?;
         let _old = table
             .insert(key, bytes.as_slice())
-            .with_context(|| format!("rewrite bitmap {key}"))?;
+            .with_context(|| format!("write posting chunk {key:?}"))?;
     }
     Ok(())
 }
 
-fn rating_lanes(
-    posts: &impl redb::ReadableTable<u64, &'static [u8]>,
-) -> Result<([(RatingClass, RoaringBitmap); 4], u64)> {
-    let mut lanes = RatingClass::ALL.map(|rating| (rating, RoaringBitmap::new()));
-    let mut posts_seen = 0_u64;
-    for row in posts
-        .range(0_u64..=u64::MAX)
-        .context("range posts for rating backfill")?
-    {
-        let (_, post) = row.context("read post for rating backfill")?;
-        let post = decode_record(post.value())?;
-        posts_seen += 1;
-        if let Some(rating) = post.rating.class() {
-            for (lane, bitmap) in &mut lanes {
-                if *lane == rating {
-                    let _inserted = bitmap.insert(post.id.0);
-                    break;
-                }
-            }
-        }
-    }
-    Ok((lanes, posts_seen))
+fn touched_chunks(bitmap: &RoaringBitmap) -> BTreeSet<u32> {
+    bitmap.iter().map(chunk_of).collect()
 }
 
-fn read_bitmap(
-    table: &impl redb::ReadableTable<&'static str, &'static [u8]>,
+fn restrict_chunk(bitmap: &RoaringBitmap, chunk: u32) -> RoaringBitmap {
+    let start = chunk << CHUNK_BITS;
+    let end = start.saturating_add((1 << CHUNK_BITS) - 1);
+    bitmap.range(start..=end).collect()
+}
+
+fn chunk_of(id: u32) -> u32 {
+    id >> CHUNK_BITS
+}
+
+fn chunk_key(key: &str, chunk: u32) -> String {
+    format!("{key}\0{chunk:08x}")
+}
+
+fn chunk_prefix(key: &str) -> String {
+    format!("{key}\0")
+}
+
+fn read_tag_bitmap(
+    chunks: &impl redb::ReadableTable<&'static str, &'static [u8]>,
+    pending: &FactBatch,
     tag: &Tag,
-) -> Result<Option<RoaringBitmap>> {
-    read_raw_bitmap(table, tag.as_str())
+) -> Result<RoaringBitmap> {
+    read_posting_bitmap(chunks, pending, PostingLane::Tag, tag.as_str())
 }
 
-fn read_raw_bitmap(
+fn read_rating_bitmap(
+    chunks: &impl redb::ReadableTable<&'static str, &'static [u8]>,
+    pending: &FactBatch,
+    rating: RatingClass,
+) -> Result<RoaringBitmap> {
+    read_posting_bitmap(chunks, pending, PostingLane::Rating, rating.key())
+}
+
+fn read_posting_bitmap(
+    chunks: &impl redb::ReadableTable<&'static str, &'static [u8]>,
+    pending: &FactBatch,
+    lane: PostingLane,
+    key: &str,
+) -> Result<RoaringBitmap> {
+    let mut bitmap = read_chunk_bitmap(chunks, key)?;
+    if let Some(delta) = pending.group(lane, key) {
+        bitmap -= &delta.del;
+        bitmap |= &delta.add;
+    }
+    Ok(bitmap)
+}
+
+fn read_chunk_row(
     table: &impl redb::ReadableTable<&'static str, &'static [u8]>,
     key: &str,
 ) -> Result<Option<RoaringBitmap>> {
     table
         .get(key)
         .context("read bitmap")?
-        .map(|guard| bitmap_decode(guard.value()))
+        .map(|guard| posting::bitmap_decode(guard.value()))
         .transpose()
 }
 
-fn read_rating_bitmap(
+fn read_chunk_bitmap(
     table: &impl redb::ReadableTable<&'static str, &'static [u8]>,
-    rating: RatingClass,
-) -> Result<Option<RoaringBitmap>> {
-    table
-        .get(rating.key())
-        .context("read rating bitmap")?
-        .map(|guard| bitmap_decode(guard.value()))
-        .transpose()
+    key: &str,
+) -> Result<RoaringBitmap> {
+    let mut out = RoaringBitmap::new();
+    let prefix = chunk_prefix(key);
+    for row in table
+        .range(prefix.as_str()..)
+        .with_context(|| format!("range chunked bitmap {key}"))?
+    {
+        let (chunk_key, bytes) = row.context("read chunked bitmap row")?;
+        if !chunk_key.value().starts_with(&prefix) {
+            break;
+        }
+        out |= posting::bitmap_decode(bytes.value())?;
+    }
+    Ok(out)
+}
+
+fn collect_chunked_tag_names(
+    table: &impl redb::ReadableTable<&'static str, &'static [u8]>,
+    prefix: &str,
+    cap: usize,
+    out: &mut BTreeSet<String>,
+) -> Result<()> {
+    for row in table
+        .range(prefix..)
+        .with_context(|| format!("range chunked tag names {prefix}"))?
+    {
+        let (key, _) = row.context("read chunked tag name")?;
+        let key = key.value();
+        if !key.starts_with(prefix) {
+            break;
+        }
+        let Some((tag, _chunk)) = key.split_once('\0') else {
+            continue;
+        };
+        if tag.starts_with(prefix) {
+            let _inserted = out.insert(tag.to_owned());
+        }
+        if out.len() >= cap {
+            break;
+        }
+    }
+    Ok(())
 }
 
 fn exactly_one(children: Vec<RoaringBitmap>) -> RoaringBitmap {
@@ -1009,18 +1139,6 @@ fn unsigned_log_rank(count: u32) -> f32 {
     ((1.0 + count as f32).ln() / 8.0).clamp(0.0, 1.0)
 }
 
-fn bitmap_encode(bitmap: &RoaringBitmap) -> Result<Vec<u8>> {
-    let mut bytes = Vec::with_capacity(bitmap.serialized_size());
-    bitmap
-        .serialize_into(&mut bytes)
-        .context("serialize bitmap")?;
-    Ok(bytes)
-}
-
-fn bitmap_decode(bytes: &[u8]) -> Result<RoaringBitmap> {
-    RoaringBitmap::deserialize_from(Cursor::new(bytes)).context("deserialize bitmap")
-}
-
 fn encode_embedding(embedding: &Embedding) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(CLIP_DIM * size_of::<f32>());
     for value in embedding.as_slice() {
@@ -1048,80 +1166,4 @@ fn decode_embedding(bytes: &[u8]) -> Result<Embedding> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::{Rating, TagPolarity};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[test]
-    fn boolean_query_evaluator_cuts_with_roaring_algebra() -> Result<()> {
-        let path = std::env::temp_dir().join(format!(
-            "booru-bayonet-bool-{}.redb",
-            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-        ));
-        let _stale = std::fs::remove_file(&path);
-        let index = Index::open(&path)?;
-        index.absorb(&[
-            post(1, 10, Rating::General, &["solo", "bikini"])?,
-            post(2, 20, Rating::Questionable, &["solo", "nude"])?,
-            post(3, 30, Rating::Explicit, &["bikini", "nude"])?,
-            post(4, 40, Rating::Sensitive, &["solo"])?,
-            post(5, 50, Rating::General, &["bikini", "nude", "swimsuit"])?,
-            post(6, 60, Rating::General, &["swimsuit"])?,
-        ])?;
-
-        let mut query = Query::default();
-        assert!(query.push_atom(&[], atom("solo")?, TagPolarity::Positive));
-        let choice = query.push_group(&[], BoolOp::Or).context("push OR")?;
-        assert!(query.push_atom(&choice, atom("bikini")?, TagPolarity::Positive));
-        assert!(query.push_atom(&choice, atom("nude")?, TagPolarity::Positive));
-        assert!(query.push_atom(
-            &[],
-            QueryAtom::Rating(RatingClass::Explicit),
-            TagPolarity::Negative
-        ));
-        assert_eq!(ids(index.search(&query, Sort::Score, 10)?), [2, 1]);
-
-        let mut xor = Query::default();
-        let choice = xor.push_group(&[], BoolOp::Xor).context("push XOR")?;
-        assert!(xor.push_atom(&choice, atom("bikini")?, TagPolarity::Positive));
-        assert!(xor.push_atom(&choice, atom("nude")?, TagPolarity::Positive));
-        assert!(xor.push_atom(&choice, atom("swimsuit")?, TagPolarity::Positive));
-        assert_eq!(ids(index.search(&xor, Sort::Newest, 10)?), [6, 2, 1]);
-
-        drop(index);
-        let _removed = std::fs::remove_file(&path);
-        Ok(())
-    }
-
-    fn ids(hit: SearchHit) -> Vec<u32> {
-        hit.posts.into_iter().map(|post| post.id.0).collect()
-    }
-
-    fn atom(raw: &str) -> Result<QueryAtom> {
-        Tag::forge(raw)
-            .map(QueryAtom::Tag)
-            .context("forge test tag")
-    }
-
-    fn post(id: u32, score: i32, rating: Rating, tags: &[&str]) -> Result<PostRecord> {
-        Ok(PostRecord {
-            id: PostId(id),
-            rating,
-            score,
-            favs: 0,
-            width: 1,
-            height: 1,
-            created_at: String::new(),
-            tags: tags
-                .iter()
-                .map(|tag| Tag::forge(tag).context("forge post tag"))
-                .collect::<Result<Vec<_>>>()?,
-            preview_url: None,
-            thumb_360_url: None,
-            thumb_720_url: None,
-            large_url: None,
-            file_url: None,
-        })
-    }
-}
+mod tests;
