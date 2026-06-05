@@ -19,6 +19,7 @@ use crate::{
         BoolGroup, BoolOp, Embedding, PostId, PostRecord, Query, QueryAtom, QueryExpr, SearchHit,
         Sort, Tag, TagPolarity,
     },
+    trace::startup,
     worker::{Command, Event, Worker},
     xdg::{Lair, compact_path},
 };
@@ -75,11 +76,17 @@ impl Bayonet {
     }
 
     pub fn open() -> Result<Self> {
+        startup("app.open.enter");
         let lair = Lair::claim()?;
+        startup("app.lair.claimed");
         let config = Config::load(&lair.config_path())?;
+        startup("app.config.loaded");
         let index = Index::open(&lair.index_path())?;
+        startup("app.index.opened");
         let media = MediaCache::new(lair.media_dir())?;
+        startup("app.media.opened");
         let worker = Worker::spawn(index.clone(), media, lair.model_dir());
+        startup("app.worker.spawned");
         let query = config.query.query();
         let sort = config.view.sort;
         let active_group = query.clamp_group_path(&config.query.active_group);
@@ -117,13 +124,18 @@ impl Bayonet {
             warm_status: "query warm idle".to_owned(),
             startup_probe: StartupProbe::from_env(),
         };
+        startup("app.state.built");
         app.reap(true, AUTO_WARM_PAGES)?;
+        startup("app.initial.reap.done");
         app.worker.backfill_ratings(app.index.clone());
+        startup("app.backfill.spawned");
         Ok(app)
     }
 
     pub fn draw_startup_probe_frame(&mut self) {
+        startup("app.draw.enter");
         let ctx = egui::Context::default();
+        startup("app.draw.ctx");
         let output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -138,14 +150,19 @@ impl Bayonet {
                 self.paint(ui);
             },
         );
+        startup("app.draw.ui.done");
         let _primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
+        startup("app.draw.tessellated");
         self.report_startup_probe();
+        startup("app.draw.probe.reported");
     }
 
     fn reap(&mut self, warm: bool, pages: u32) -> Result<()> {
+        startup("app.reap.enter");
         let query = self.query();
         let soft = self.soft_needle().cloned();
         if let Some(needle) = soft {
+            startup("app.reap.soft.search.enter");
             let hit = self.index.search_soft(
                 &query,
                 self.sort,
@@ -155,6 +172,7 @@ impl Bayonet {
                 SOFT_POOL,
                 SOFT_BACKLOG,
             )?;
+            startup("app.reap.soft.search.done");
             let queued = self.queue_clip(hit.missing);
             self.status = format!(
                 "{} hits from {} candidates; clip {}/{} embedded, queued {}; α {:.2}",
@@ -167,7 +185,9 @@ impl Bayonet {
             );
             self.hit = hit.hit;
         } else {
+            startup("app.reap.search.enter");
             self.hit = self.index.search(&query, self.sort, RESULT_LIMIT)?;
+            startup("app.reap.search.done");
             let soft_armed = self.soft_prompt().is_some();
             let queued = if soft_armed {
                 self.queue_clip(self.hit.posts.clone())
@@ -193,9 +213,13 @@ impl Bayonet {
             };
         }
         if warm {
+            startup("app.reap.warm.enter");
             self.dispatch_warm(query, pages)?;
+            startup("app.reap.warm.done");
         }
+        startup("app.reap.stats.enter");
         self.update_cache_status();
+        startup("app.reap.stats.done");
         Ok(())
     }
 

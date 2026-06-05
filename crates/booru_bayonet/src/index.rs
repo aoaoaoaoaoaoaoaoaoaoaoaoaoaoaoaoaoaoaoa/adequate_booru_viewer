@@ -1,7 +1,7 @@
 use anyhow::{Context as _, Result};
 use redb::{
     Database, ReadableDatabase as _, ReadableTable as _, ReadableTableMetadata as _,
-    TableDefinition,
+    TableDefinition, TableError,
 };
 use roaring::RoaringBitmap;
 use std::{io::Cursor, mem::size_of, path::Path, sync::Arc};
@@ -10,6 +10,7 @@ use crate::model::{
     BoolOp, CLIP_DIM, Embedding, PostId, PostRecord, Query, QueryAtom, QueryExpr, RatingClass,
     SearchHit, Sort, Tag, decode_record, encode_record,
 };
+use crate::trace::startup;
 
 const POSTS: TableDefinition<'_, u64, &[u8]> = TableDefinition::new("posts");
 const TAG_POSTS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("tag_posts");
@@ -23,6 +24,7 @@ const META: TableDefinition<'_, &str, u64> = TableDefinition::new("meta");
 const SMALL_SORT: u64 = 50_000;
 const DANBOORU_CRAWL_BEFORE: &str = "danbooru.crawl.before";
 const RATING_BACKFILL_V1: &str = "rating.index.v1.backfilled";
+const QUICK_REPAIR_V1: &str = "redb.quick_repair.v1";
 
 #[derive(Clone, Debug, Default)]
 pub struct SoftHit {
@@ -68,14 +70,17 @@ pub struct Index {
 
 impl Index {
     pub fn open(path: &Path) -> Result<Self> {
+        startup("index.open.enter");
         let db = Database::create(path).with_context(|| format!("open redb {}", path.display()))?;
+        startup("index.redb.create.done");
         let index = Self { db: Arc::new(db) };
         index.prime()?;
+        startup("index.prime.done");
         Ok(index)
     }
 
     pub fn absorb(&self, posts: &[PostRecord]) -> Result<()> {
-        let tx = self.db.begin_write().context("begin index write")?;
+        let tx = self.begin_quick_write("begin index write")?;
         {
             let mut post_table = tx.open_table(POSTS).context("open posts")?;
             let mut tag_table = tx.open_table(TAG_POSTS).context("open tag_posts")?;
@@ -133,7 +138,7 @@ impl Index {
     }
 
     pub fn put_embedding(&self, id: PostId, embedding: &Embedding) -> Result<()> {
-        let tx = self.db.begin_write().context("begin embedding write")?;
+        let tx = self.begin_quick_write("begin embedding write")?;
         {
             let mut table = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
             let bytes = encode_embedding(embedding);
@@ -164,7 +169,7 @@ impl Index {
     }
 
     pub fn set_crawl_before(&self, before: PostId) -> Result<()> {
-        let tx = self.db.begin_write().context("begin crawl cursor write")?;
+        let tx = self.begin_quick_write("begin crawl cursor write")?;
         {
             let mut table = tx.open_table(META).context("open meta")?;
             let _old = table
@@ -204,13 +209,17 @@ impl Index {
     }
 
     pub fn stats(&self) -> Result<CacheStats> {
+        startup("index.stats.enter");
         let tx = self.db.begin_read().context("begin cache stats read")?;
+        startup("index.stats.tx");
         let posts = tx.open_table(POSTS).context("open posts")?;
         let tags = tx.open_table(TAG_POSTS).context("open tag_posts")?;
         let rating_table = tx.open_table(RATING_POSTS).context("open rating_posts")?;
         let embeddings = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
         let meta = tx.open_table(META).context("open meta")?;
+        startup("index.stats.tables");
         let posts_len = posts.len().context("count posts")?;
+        startup("index.stats.posts.len");
         let newest = posts
             .range(0_u64..=u64::MAX)
             .context("range newest post id")?
@@ -220,15 +229,18 @@ impl Index {
                 narrow_meta_post_id(id.value())
             })
             .transpose()?;
+        startup("index.stats.newest");
         let crawl_before = meta
             .get(DANBOORU_CRAWL_BEFORE)
             .context("read Danbooru crawl cursor")?
             .map(|guard| narrow_meta_post_id(guard.value()))
             .transpose()?;
+        startup("index.stats.crawl.before");
         let rating_indexed = meta
             .get(RATING_BACKFILL_V1)
             .context("read rating backfill marker")?
             .is_some();
+        startup("index.stats.rating.marker");
         let ratings = RatingClass::ALL
             .into_iter()
             .map(|rating| {
@@ -237,6 +249,7 @@ impl Index {
                 Ok((rating, posts))
             })
             .collect::<Result<Vec<_>>>()?;
+        startup("index.stats.rating.bitmaps");
         Ok(CacheStats {
             posts: posts_len,
             tags: tags.len().context("count tags")?,
@@ -263,10 +276,7 @@ impl Index {
             rating_lanes(&posts)?
         };
 
-        let tx = self
-            .db
-            .begin_write()
-            .context("begin rating backfill write")?;
+        let tx = self.begin_quick_write("begin rating backfill write")?;
         {
             let mut ratings = tx.open_table(RATING_POSTS).context("open rating_posts")?;
             let mut meta = tx.open_table(META).context("open meta")?;
@@ -290,7 +300,7 @@ impl Index {
     }
 
     pub fn purge_unindexable(&self) -> Result<u64> {
-        let tx = self.db.begin_write().context("begin unindexable purge")?;
+        let tx = self.begin_quick_write("begin unindexable purge")?;
         let mut purged = 0_u64;
         {
             let mut post_table = tx.open_table(POSTS).context("open posts")?;
@@ -333,14 +343,18 @@ impl Index {
     }
 
     pub fn search(&self, query: &Query, sort: Sort, limit: usize) -> Result<SearchHit> {
+        startup("index.search.enter");
         let tx = self.db.begin_read().context("begin index read")?;
+        startup("index.search.tx");
         let posts = tx.open_table(POSTS).context("open posts")?;
 
         let candidate = Self::candidate_set(&tx, query)?;
+        startup("index.search.candidate");
         let posts_len = posts.len().context("count posts")?;
         let candidates = candidate
             .as_ref()
             .map_or(posts_len, |candidate| candidate.len(posts_len));
+        startup("index.search.candidates.len");
 
         let ids = match (&candidate, sort) {
             (None, Sort::Newest) => newest_ids(&posts, limit)?,
@@ -392,6 +406,7 @@ impl Index {
                 local_sorted_ids(&posts, bitmap, sort, limit)?
             }
         };
+        startup("index.search.ids");
 
         let mut hydrated = Vec::with_capacity(ids.len());
         for id in ids {
@@ -404,6 +419,7 @@ impl Index {
                 hydrated.push(post);
             }
         }
+        startup("index.search.posts.loaded");
         Ok(SearchHit {
             posts: hydrated,
             candidates,
@@ -420,14 +436,18 @@ impl Index {
         pool: usize,
         backlog: usize,
     ) -> Result<SoftHit> {
+        startup("index.soft.enter");
         let mut hit = self.search(query, sort, pool.max(limit))?;
+        startup("index.soft.base.search.done");
         let candidates = hit.candidates;
         let pool_len = hit.posts.len();
         let mut missing = Vec::with_capacity(backlog);
         let mut embedded = 0_usize;
         {
             let tx = self.db.begin_read().context("begin soft rank read")?;
+            startup("index.soft.tx");
             let embeddings = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
+            startup("index.soft.table");
             let mut scored = Vec::with_capacity(pool_len);
             for (rank, post) in hit.posts.drain(..).enumerate() {
                 let base = base_rank(&post, sort, rank, pool_len);
@@ -443,6 +463,7 @@ impl Index {
                 }
                 scored.push((base + alpha * sim.unwrap_or_default(), rank, post));
             }
+            startup("index.soft.embeddings.read");
             scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
             hit.posts = scored
                 .into_iter()
@@ -450,6 +471,7 @@ impl Index {
                 .map(|(_, _, post)| post)
                 .collect();
         }
+        startup("index.soft.done");
         hit.candidates = candidates;
         Ok(SoftHit {
             hit,
@@ -460,7 +482,11 @@ impl Index {
     }
 
     fn prime(&self) -> Result<()> {
-        let tx = self.db.begin_write().context("begin schema prime")?;
+        if self.schema_ready()? && self.quick_repair_marked()? {
+            startup("index.prime.schema.ready");
+            return Ok(());
+        }
+        let tx = self.begin_quick_write("begin schema prime")?;
         {
             let _posts = tx.open_table(POSTS).context("prime posts")?;
             let _tags = tx.open_table(TAG_POSTS).context("prime tag_posts")?;
@@ -470,9 +496,45 @@ impl Index {
             let _jina = tx
                 .open_table(JINA_IMAGE)
                 .context("prime Jina image table")?;
-            let _meta = tx.open_table(META).context("prime meta")?;
+            let mut meta = tx.open_table(META).context("prime meta")?;
+            let _old = meta
+                .insert(QUICK_REPAIR_V1, 1)
+                .context("write quick repair marker")?;
         }
         tx.commit().context("commit schema prime")
+    }
+
+    fn schema_ready(&self) -> Result<bool> {
+        let tx = self.db.begin_read().context("begin schema read")?;
+        macro_rules! open {
+            ($table:expr) => {
+                match tx.open_table($table) {
+                    Ok(table) => drop(table),
+                    Err(TableError::TableDoesNotExist(_)) => return Ok(false),
+                    Err(err) => return Err(err).context("open schema table"),
+                }
+            };
+        }
+        open!(POSTS);
+        open!(TAG_POSTS);
+        open!(RATING_POSTS);
+        open!(SCORE_POSTS);
+        open!(FAV_POSTS);
+        open!(JINA_IMAGE);
+        open!(META);
+        Ok(true)
+    }
+
+    fn quick_repair_marked(&self) -> Result<bool> {
+        let tx = self.db.begin_read().context("begin quick repair read")?;
+        let meta = match tx.open_table(META) {
+            Ok(meta) => meta,
+            Err(TableError::TableDoesNotExist(_)) => return Ok(false),
+            Err(err) => return Err(err).context("open meta for quick repair marker"),
+        };
+        meta.get(QUICK_REPAIR_V1)
+            .context("read quick repair marker")
+            .map(|guard| guard.is_some())
     }
 
     fn candidate_set(tx: &redb::ReadTransaction, query: &Query) -> Result<Option<Candidate>> {
@@ -491,6 +553,12 @@ impl Index {
         }
         .eval(query.root())
         .map(Some)
+    }
+
+    fn begin_quick_write(&self, context: &'static str) -> Result<redb::WriteTransaction> {
+        let mut tx = self.db.begin_write().context(context)?;
+        tx.set_quick_repair(true);
+        Ok(tx)
     }
 }
 
