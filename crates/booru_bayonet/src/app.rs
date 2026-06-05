@@ -12,7 +12,7 @@ use std::{
 };
 
 use crate::{
-    config::{Config, QueryConfig, SoftConfig, ViewConfig},
+    config::{Config, FilterConfig, FilterName, QueryConfig, SavedFilter, SoftConfig, ViewConfig},
     index::{CacheStats, Index, TagSuggestion},
     media::{MediaCache, RgbaBlade},
     model::{
@@ -42,6 +42,8 @@ pub struct Bayonet {
     query: Query,
     active_group: Vec<usize>,
     tag_entry: String,
+    filter_name_entry: String,
+    saved_filters: Vec<SavedFilter>,
     soft_text: String,
     soft_alpha: f32,
     soft_prompt: Option<String>,
@@ -99,6 +101,8 @@ impl Bayonet {
             query: query.clone(),
             active_group,
             tag_entry: String::new(),
+            filter_name_entry: String::new(),
+            saved_filters: sorted_filters(config.filters.saved.clone()),
             soft_text: config.soft.prompt.clone(),
             soft_alpha: config.soft.alpha.clamp(0.0, 2.0),
             soft_prompt: None,
@@ -259,6 +263,41 @@ impl Bayonet {
         let mut query = self.query.clone();
         query.remove_atom(&QueryAtom::Tag(tag));
         self.install_query(query);
+    }
+
+    fn save_current_filter(&mut self) {
+        let typed = FilterName::forge(&self.filter_name_entry);
+        let name = typed
+            .clone()
+            .unwrap_or_else(|| spare_filter_name(&self.query, &self.saved_filters));
+        let filter = SavedFilter::new(name.clone(), self.query.clone(), self.active_group.clone());
+        match self
+            .saved_filters
+            .binary_search_by(|probe| probe.name.cmp(&filter.name))
+        {
+            Ok(slot) => self.saved_filters[slot] = filter,
+            Err(slot) => self.saved_filters.insert(slot, filter),
+        }
+        self.filter_name_entry.clear();
+        self.status = format!("saved filter `{name}`");
+        self.save_config();
+    }
+
+    fn load_filter(&mut self, filter: SavedFilter) {
+        self.filter_name_entry = filter.name.to_string();
+        self.install_query_at(filter.tree, filter.active_group);
+    }
+
+    fn delete_filter(&mut self, name: &FilterName) {
+        let Ok(slot) = self
+            .saved_filters
+            .binary_search_by(|probe| probe.name.cmp(name))
+        else {
+            return;
+        };
+        let removed = self.saved_filters.remove(slot);
+        self.status = format!("deleted filter `{}`", removed.name);
+        self.save_config();
     }
 
     fn soft_prompt(&self) -> Option<String> {
@@ -641,8 +680,44 @@ impl Bayonet {
                 });
             }
         });
-        let _cache = ui.label(&self.cache_status);
         self.apply_query_actions(actions);
+        let _separator = ui.separator();
+        self.saved_filter_panel(ui);
+        let _cache = ui.label(&self.cache_status);
+    }
+
+    fn saved_filter_panel(&mut self, ui: &mut egui::Ui) {
+        let _heading = ui.heading("saved");
+        let mut actions = Vec::new();
+        let _save = ui.horizontal(|ui| {
+            let entry = ui.add(
+                egui::TextEdit::singleline(&mut self.filter_name_entry).hint_text("filter name"),
+            );
+            let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
+            if ui.button("save").clicked() || (entry.has_focus() && enter) {
+                actions.push(SavedFilterAction::Save);
+            }
+        });
+        if self.saved_filters.is_empty() {
+            let _empty = ui.label("none");
+        }
+        for filter in &self.saved_filters {
+            let _row = ui.horizontal_wrapped(|ui| {
+                if ui.small_button("×").clicked() {
+                    actions.push(SavedFilterAction::Delete(filter.name.clone()));
+                }
+                if ui.button(filter.name.as_str()).clicked() {
+                    actions.push(SavedFilterAction::Load(filter.clone()));
+                }
+            });
+        }
+        for action in actions {
+            match action {
+                SavedFilterAction::Save => self.save_current_filter(),
+                SavedFilterAction::Load(filter) => self.load_filter(filter),
+                SavedFilterAction::Delete(name) => self.delete_filter(&name),
+            }
+        }
     }
 
     fn commit_tag_entry(&mut self) {
@@ -919,6 +994,9 @@ impl Bayonet {
                 tree: self.query.clone(),
                 active_group: self.active_group.clone(),
             },
+            filters: FilterConfig {
+                saved: self.saved_filters.clone(),
+            },
             view: ViewConfig {
                 sort: self.sort,
                 tile_scale: self.tile_scale,
@@ -1031,6 +1109,13 @@ enum QueryAction {
     ToggleNot { path: Vec<usize> },
     RemoveChild { parent: Vec<usize>, child: usize },
     AddGroup { op: BoolOp },
+}
+
+#[derive(Clone, Debug)]
+enum SavedFilterAction {
+    Save,
+    Load(SavedFilter),
+    Delete(FilterName),
 }
 
 fn render_query_tree(
@@ -1227,6 +1312,54 @@ fn thumb_bucket(edge: f32) -> u8 {
     } else {
         u8::from(edge > 190.0)
     }
+}
+
+fn sorted_filters(mut filters: Vec<SavedFilter>) -> Vec<SavedFilter> {
+    filters.sort_by(|a, b| a.name.cmp(&b.name));
+    filters.dedup_by(|a, b| a.name == b.name);
+    filters
+}
+
+fn spare_filter_name(query: &Query, filters: &[SavedFilter]) -> FilterName {
+    let base = FilterName::forge(&filter_stem(query)).unwrap_or_else(FilterName::neutral);
+    if !filter_name_taken(&base, filters) {
+        return base;
+    }
+    let mut suffix = 2_u64;
+    loop {
+        let raw = format!("{} {suffix}", base.as_str());
+        if let Some(candidate) = FilterName::forge(&raw)
+            && !filter_name_taken(&candidate, filters)
+        {
+            return candidate;
+        }
+        suffix = suffix.saturating_add(1);
+    }
+}
+
+fn filter_stem(query: &Query) -> String {
+    let text = query.to_text();
+    let text = if text.is_empty() {
+        "neutral".to_owned()
+    } else {
+        text
+    };
+    clip_chars(&text, 48)
+}
+
+fn clip_chars(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let mut out = chars.by_ref().take(limit).collect::<String>();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
+}
+
+fn filter_name_taken(name: &FilterName, filters: &[SavedFilter]) -> bool {
+    filters
+        .binary_search_by(|filter| filter.name.cmp(name))
+        .is_ok()
 }
 
 fn cache_status(stats: &CacheStats) -> String {

@@ -1,6 +1,10 @@
 use anyhow::{Context as _, Result};
-use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::Arc};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+use std::{
+    fmt::{Display, Formatter},
+    path::Path,
+    sync::Arc,
+};
 
 use crate::model::{Query, Sort};
 
@@ -8,6 +12,7 @@ use crate::model::{Query, Sort};
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub query: QueryConfig,
+    pub filters: FilterConfig,
     pub view: ViewConfig,
     pub soft: SoftConfig,
 }
@@ -46,6 +51,74 @@ pub struct QueryConfig {
 impl QueryConfig {
     pub fn query(&self) -> Query {
         self.tree.clone()
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FilterConfig {
+    pub saved: Vec<SavedFilter>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavedFilter {
+    pub name: FilterName,
+    pub tree: Query,
+    pub active_group: Vec<usize>,
+}
+
+impl SavedFilter {
+    pub fn new(name: FilterName, tree: Query, active_group: Vec<usize>) -> Self {
+        let active_group = tree.clamp_group_path(&active_group);
+        Self {
+            name,
+            tree,
+            active_group,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct FilterName(String);
+
+impl FilterName {
+    pub fn forge(raw: &str) -> Option<Self> {
+        let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        (!name.is_empty()).then_some(Self(name))
+    }
+
+    pub fn neutral() -> Self {
+        Self("neutral".to_owned())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Display for FilterName {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Serialize for FilterName {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for FilterName {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::forge(&raw).ok_or_else(|| D::Error::custom("filter name is empty"))
     }
 }
 
@@ -99,6 +172,13 @@ mod tests {
                 tree: query.clone(),
                 active_group: choice.clone(),
             },
+            filters: FilterConfig {
+                saved: vec![SavedFilter::new(
+                    FilterName::forge("beach").context("filter name")?,
+                    query.clone(),
+                    choice.clone(),
+                )],
+            },
             view: ViewConfig::default(),
             soft: SoftConfig::default(),
         };
@@ -106,6 +186,16 @@ mod tests {
         let roundtrip = toml::from_str::<Config>(&text)?;
         assert_eq!(roundtrip.query.query(), query);
         assert_eq!(roundtrip.query.active_group, choice);
+        assert_eq!(roundtrip.filters.saved[0].name.as_str(), "beach");
+        assert_eq!(roundtrip.filters.saved[0].active_group, choice);
+        Ok(())
+    }
+
+    #[test]
+    fn filter_names_are_compacted_and_nonempty() -> Result<()> {
+        let name = FilterName::forge("  study   pose  ").context("valid filter name")?;
+        assert_eq!(name.as_str(), "study pose");
+        assert!(FilterName::forge(" \n\t ").is_none());
         Ok(())
     }
 
