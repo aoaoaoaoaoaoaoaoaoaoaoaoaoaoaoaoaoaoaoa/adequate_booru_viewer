@@ -16,11 +16,11 @@ use crate::{
     index::{CacheStats, Index, TagSuggestion},
     media::{MediaCache, RgbaBlade},
     model::{
-        BoolGroup, BoolOp, Embedding, PostId, PostRecord, Query, QueryAtom, QueryExpr, SearchHit,
-        Sort, Tag, TagPolarity,
+        BoolOp, Embedding, PostId, PostRecord, Query, QueryAtom, SearchHit, Sort, Tag, TagPolarity,
     },
+    query_ui::{QueryAction, render_query_tree},
     trace::startup,
-    worker::{Command, Event, Worker},
+    worker::{BladeEpoch, Command, Event, Worker},
     xdg::{Lair, compact_path},
 };
 
@@ -34,6 +34,7 @@ const BASE_TILE: f32 = 260.0;
 const MIN_TILE_SCALE: f32 = 0.5;
 const MAX_TILE_SCALE: f32 = 3.0;
 const GAP: f32 = 8.0;
+const VIEWER_CHROME: f32 = 40.0;
 
 pub struct Bayonet {
     lair: Lair,
@@ -53,6 +54,8 @@ pub struct Bayonet {
     hit: SearchHit,
     thumbs: HashMap<ThumbKey, TextureHandle>,
     thumb_inflight: HashSet<ThumbKey>,
+    thumb_faults: HashSet<ThumbKey>,
+    thumb_epoch: BladeEpoch,
     warm_key: WarmKey,
     warm_next_page: u32,
     warm_stride: u32,
@@ -61,7 +64,9 @@ pub struct Bayonet {
     full: HashMap<PostId, TextureHandle>,
     full_rgba: HashMap<PostId, RgbaBlade>,
     full_inflight: HashSet<PostId>,
+    full_faults: HashSet<PostId>,
     zoom: Option<PostRecord>,
+    zoom_gate: ZoomGate,
     tile_scale: f32,
     tag_menu_open: bool,
     clip_inflight: HashSet<PostId>,
@@ -112,6 +117,8 @@ impl Bayonet {
             hit: SearchHit::default(),
             thumbs: HashMap::new(),
             thumb_inflight: HashSet::new(),
+            thumb_faults: HashSet::new(),
+            thumb_epoch: BladeEpoch::ROOT,
             warm_key: WarmKey::new(&query, sort),
             warm_next_page: 1,
             warm_stride: AUTO_WARM_PAGES,
@@ -120,7 +127,9 @@ impl Bayonet {
             full: HashMap::new(),
             full_rgba: HashMap::new(),
             full_inflight: HashSet::new(),
+            full_faults: HashSet::new(),
             zoom: None,
+            zoom_gate: ZoomGate::Fresh,
             tile_scale: config.view.tile_scale.clamp(MIN_TILE_SCALE, MAX_TILE_SCALE),
             tag_menu_open: false,
             clip_inflight: HashSet::new(),
@@ -176,40 +185,42 @@ impl Bayonet {
             )?;
             startup("app.reap.soft.search.done");
             let queued = self.queue_clip(hit.missing);
+            let posts = hit.hit.posts.len();
+            let candidates = hit.hit.candidates;
+            let embedded = hit.embedded;
+            let pool = hit.pool;
+            self.install_hit(hit.hit);
             self.status = format!(
                 "{} hits from {} candidates; clip {}/{} embedded, queued {}; α {:.2}",
-                hit.hit.posts.len(),
-                hit.hit.candidates,
-                hit.embedded,
-                hit.pool,
-                queued,
-                self.soft_alpha
+                posts, candidates, embedded, pool, queued, self.soft_alpha
             );
-            self.hit = hit.hit;
         } else {
             startup("app.reap.search.enter");
-            self.hit = self.index.search(&query, self.sort, RESULT_LIMIT)?;
+            let hit = self.index.search(&query, self.sort, RESULT_LIMIT)?;
             startup("app.reap.search.done");
             let soft_armed = self.soft_prompt().is_some();
             let queued = if soft_armed {
-                self.queue_clip(self.hit.posts.clone())
+                self.queue_clip(hit.posts.clone())
             } else {
                 0
             };
+            let posts = hit.posts.len();
+            let candidates = hit.candidates;
+            self.install_hit(hit);
             let requested = self.request_soft_prompt();
             self.status = if soft_armed {
                 format!(
                     "{} hits from {} candidates; clip text {}; queued {} visible images",
-                    self.hit.posts.len(),
-                    self.hit.candidates,
+                    posts,
+                    candidates,
                     if requested { "requested" } else { "pending" },
                     queued
                 )
             } else {
                 format!(
                     "{} hits from {} candidates; {}",
-                    self.hit.posts.len(),
-                    self.hit.candidates,
+                    posts,
+                    candidates,
                     compact_path(&self.lair.data)
                 )
             };
@@ -236,10 +247,28 @@ impl Bayonet {
     fn install_query_at(&mut self, query: Query, active_group: Vec<usize>) {
         self.active_group = query.clamp_group_path(&active_group);
         self.query = query;
+        self.advance_thumb_epoch();
         let query = self.query.clone();
         self.align_warm(&query);
         self.save_config();
         self.strike(true, AUTO_WARM_PAGES);
+    }
+
+    fn install_hit(&mut self, hit: SearchHit) {
+        if posts_changed(&self.hit.posts, &hit.posts) {
+            self.advance_thumb_epoch();
+        }
+        self.hit = hit;
+    }
+
+    fn advance_thumb_epoch(&mut self) {
+        self.thumb_epoch = self.thumb_epoch.advance();
+        self.thumb_inflight.clear();
+        if let Err(err) = self.worker.send(Command::CullBlades {
+            epoch: self.thumb_epoch,
+        }) {
+            self.status = format!("{err:#}");
+        }
     }
 
     fn set_tag(&mut self, raw: &str, polarity: TagPolarity) {
@@ -474,8 +503,21 @@ impl Bayonet {
                 Event::Blade { bucket, blade } => {
                     self.install_blade(ctx, blade, BladeKind::Thumb(bucket));
                 }
+                Event::BladeFault { id, bucket, fault } => {
+                    let key = ThumbKey { id, bucket };
+                    let _was_inflight = self.thumb_inflight.remove(&key);
+                    let _faulted = self.thumb_faults.insert(key);
+                    self.status = fault;
+                    ctx.request_repaint();
+                }
                 Event::FullBlade(blade) => {
                     self.install_blade(ctx, blade, BladeKind::Full);
+                }
+                Event::FullBladeFault { id, fault } => {
+                    let _was_inflight = self.full_inflight.remove(&id);
+                    let _faulted = self.full_faults.insert(id);
+                    self.status = fault;
+                    ctx.request_repaint();
                 }
                 Event::SoftText { prompt, embedding } => {
                     if self.soft_requested.as_deref() == Some(prompt.as_str()) {
@@ -543,11 +585,13 @@ impl Bayonet {
                 };
                 let _old = self.thumbs.insert(key, texture);
                 let _was_inflight = self.thumb_inflight.remove(&key);
+                let _was_faulted = self.thumb_faults.remove(&key);
             }
             BladeKind::Full => {
                 let _old_texture = self.full.insert(blade.id, texture);
                 let _old_rgba = self.full_rgba.insert(blade.id, blade.clone());
                 let _was_inflight = self.full_inflight.remove(&blade.id);
+                let _was_faulted = self.full_faults.remove(&blade.id);
             }
         }
         ctx.request_repaint();
@@ -777,10 +821,14 @@ impl Bayonet {
         let width = ui.available_width().max(tile);
         let cols = ((width + GAP) / (tile + GAP)).floor().max(1.0) as usize;
         let posts = self.hit.posts.clone();
-        let _scroll = egui::ScrollArea::vertical().show(ui, |ui| {
-            for row in posts.chunks(cols) {
+        let rows = posts.len().div_ceil(cols);
+        let row_height = tile + GAP;
+        let _scroll = egui::ScrollArea::vertical().show_rows(ui, row_height, rows, |ui, range| {
+            for row in range {
+                let start = row * cols;
+                let end = (start + cols).min(posts.len());
                 let _row = ui.horizontal(|ui| {
-                    for post in row {
+                    for post in &posts[start..end] {
                         self.tile(ui, post);
                     }
                 });
@@ -794,21 +842,18 @@ impl Bayonet {
             ui.set_width(tile);
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(tile, tile), egui::Sense::click());
-            if let Some(texture) = self.thumb(post) {
-                let size = fit(texture.size_vec2(), rect.size());
-                let image = egui::Rect::from_center_size(rect.center(), size);
-                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                let _image = ui
-                    .painter()
-                    .image(texture.id(), image, uv, egui::Color32::WHITE);
-            } else {
-                let _loading = ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "loading",
-                    egui::TextStyle::Body.resolve(ui.style()),
-                    ui.visuals().text_color(),
-                );
+            match self.thumb(post) {
+                Some(ThumbLoad::Ready(texture)) => {
+                    let size = fit(texture.size_vec2(), rect.size());
+                    let image = egui::Rect::from_center_size(rect.center(), size);
+                    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                    let _image = ui
+                        .painter()
+                        .image(texture.id(), image, uv, egui::Color32::WHITE);
+                }
+                Some(ThumbLoad::Loading) => paint_tile_text(ui, rect, "loading"),
+                Some(ThumbLoad::Fault) => paint_tile_text(ui, rect, "fault"),
+                None => paint_tile_text(ui, rect, "no image"),
             }
             if response.clicked() {
                 self.open_full(post);
@@ -851,18 +896,30 @@ impl Bayonet {
 
     fn open_full(&mut self, post: &PostRecord) {
         self.zoom = Some(post.clone());
+        self.zoom_gate = ZoomGate::Fresh;
+        let _old_fault = self.full_faults.remove(&post.id);
         self.request_full(post);
     }
 
     fn request_full(&mut self, post: &PostRecord) {
-        if self.full.contains_key(&post.id) || self.full_inflight.contains(&post.id) {
+        if self.full.contains_key(&post.id)
+            || self.full_inflight.contains(&post.id)
+            || self.full_faults.contains(&post.id)
+        {
             return;
         }
+        let Some(url) = post.full_url().map(ToOwned::to_owned) else {
+            let _faulted = self.full_faults.insert(post.id);
+            self.status = format!("#{id} has no full image URL", id = post.id);
+            return;
+        };
         let _now_inflight = self.full_inflight.insert(post.id);
         if let Err(err) = self.worker.send(Command::FullBlade {
             id: post.id,
-            url: post.full_url().map(ToOwned::to_owned),
+            url: Some(url),
         }) {
+            let _was_inflight = self.full_inflight.remove(&post.id);
+            let _faulted = self.full_faults.insert(post.id);
             self.status = format!("{err:#}");
         }
     }
@@ -874,12 +931,15 @@ impl Bayonet {
         self.request_full(&post);
         let mut close = false;
         let screen = ctx.content_rect();
-        let _window = egui::Window::new(format!(
+        let image_box = full_image_box(&post, self.full.get(&post.id), screen.size());
+        let body = egui::vec2(image_box.x, image_box.y + VIEWER_CHROME);
+        let window = egui::Window::new(format!(
             "#{}  score {}  fav {}",
             post.id, post.score, post.favs
         ))
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .default_size(screen.size() * 0.9)
+        .default_size(body)
+        .collapsible(false)
         .resizable(true)
         .show(ctx, |ui| {
             let _buttons = ui.horizontal(|ui| {
@@ -891,23 +951,28 @@ impl Bayonet {
                 }
             });
             if let Some(texture) = self.full.get(&post.id) {
-                let size = fit(texture.size_vec2(), ui.available_size());
                 let response = ui.add(
                     egui::Image::new(texture)
-                        .fit_to_exact_size(size)
+                        .fit_to_exact_size(image_box)
                         .sense(egui::Sense::click()),
                 );
                 if response.secondary_clicked() {
                     close = true;
                 }
+            } else if self.full_faults.contains(&post.id) {
+                centered_box(ui, image_box, "full image failed");
             } else {
-                let _loading = ui.centered_and_justified(|ui| {
-                    let _label = ui.label("loading full image");
-                });
+                centered_box(ui, image_box, "loading full image");
             }
         });
-        if close {
+        let clicked_outside = window
+            .as_ref()
+            .is_some_and(|window| outside_click(ctx, window.response.rect));
+        if close || (self.zoom_gate == ZoomGate::Armed && clicked_outside) {
             self.zoom = None;
+            self.zoom_gate = ZoomGate::Fresh;
+        } else {
+            self.zoom_gate = ZoomGate::Armed;
         }
     }
 
@@ -933,23 +998,34 @@ impl Bayonet {
         }
     }
 
-    fn thumb(&mut self, post: &PostRecord) -> Option<&TextureHandle> {
+    fn thumb(&mut self, post: &PostRecord) -> Option<ThumbLoad<'_>> {
         let bucket = thumb_bucket(self.tile_edge());
         let key = ThumbKey {
             id: post.id,
             bucket,
         };
-        if !self.thumbs.contains_key(&key) && !self.thumb_inflight.contains(&key) {
+        if let Some(texture) = self.thumbs.get(&key) {
+            return Some(ThumbLoad::Ready(texture));
+        }
+        if self.thumb_faults.contains(&key) {
+            return Some(ThumbLoad::Fault);
+        }
+        if !self.thumb_inflight.contains(&key) {
+            let url = post.thumb_url(self.tile_edge()).map(ToOwned::to_owned)?;
             let _now_inflight = self.thumb_inflight.insert(key);
             if let Err(err) = self.worker.send(Command::Blade {
+                epoch: self.thumb_epoch,
                 id: post.id,
                 bucket,
-                url: post.thumb_url(self.tile_edge()).map(ToOwned::to_owned),
+                url: Some(url),
             }) {
+                let _was_inflight = self.thumb_inflight.remove(&key);
+                let _faulted = self.thumb_faults.insert(key);
                 self.status = format!("{err:#}");
+                return Some(ThumbLoad::Fault);
             }
         }
-        self.thumbs.get(&key)
+        Some(ThumbLoad::Loading)
     }
 
     fn tile_edge(&self) -> f32 {
@@ -984,6 +1060,7 @@ impl Bayonet {
         }
         self.tile_scale =
             (self.tile_scale * 1.12_f32.powf(steps)).clamp(MIN_TILE_SCALE, MAX_TILE_SCALE);
+        self.advance_thumb_epoch();
         self.save_config();
         ctx.request_repaint();
     }
@@ -1029,6 +1106,18 @@ impl Bayonet {
 enum BladeKind {
     Thumb(u8),
     Full,
+}
+
+enum ThumbLoad<'a> {
+    Ready(&'a TextureHandle),
+    Loading,
+    Fault,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ZoomGate {
+    Fresh,
+    Armed,
 }
 
 impl BladeKind {
@@ -1103,183 +1192,10 @@ impl StartupProbe {
 }
 
 #[derive(Clone, Debug)]
-enum QueryAction {
-    Select { path: Vec<usize> },
-    SetOp { path: Vec<usize>, op: BoolOp },
-    ToggleNot { path: Vec<usize> },
-    RemoveChild { parent: Vec<usize>, child: usize },
-    AddGroup { op: BoolOp },
-}
-
-#[derive(Clone, Debug)]
 enum SavedFilterAction {
     Save,
     Load(SavedFilter),
     Delete(FilterName),
-}
-
-fn render_query_tree(
-    ui: &mut egui::Ui,
-    root: &QueryExpr,
-    active: &[usize],
-    actions: &mut Vec<QueryAction>,
-) {
-    let mut path = Vec::new();
-    render_query_expr(ui, root, &mut path, None, active, 0, actions);
-}
-
-fn render_query_expr(
-    ui: &mut egui::Ui,
-    expr: &QueryExpr,
-    path: &mut Vec<usize>,
-    parent: Option<(Vec<usize>, usize)>,
-    active: &[usize],
-    depth: usize,
-    actions: &mut Vec<QueryAction>,
-) {
-    let (negated, core) = expr.denote();
-    match core {
-        QueryExpr::Atom { atom } => render_atom(ui, atom, negated, parent, actions),
-        QueryExpr::Group { group } => {
-            render_group(ui, group, negated, path, parent, active, depth, actions);
-        }
-        QueryExpr::Not { child } => {
-            render_query_expr(ui, child, path, parent, active, depth, actions);
-        }
-    }
-}
-
-fn render_group(
-    ui: &mut egui::Ui,
-    group: &BoolGroup,
-    negated: bool,
-    path: &mut Vec<usize>,
-    parent: Option<(Vec<usize>, usize)>,
-    active: &[usize],
-    depth: usize,
-    actions: &mut Vec<QueryAction>,
-) {
-    let active_here = path.as_slice() == active;
-    let frame = egui::Frame::group(ui.style())
-        .fill(group_fill(depth))
-        .stroke(group_stroke(depth, active_here));
-    let _frame = frame.show(ui, |ui| {
-        let _header = ui.horizontal_wrapped(|ui| {
-            if ui
-                .selectable_label(active_here, group_title(path))
-                .clicked()
-            {
-                actions.push(QueryAction::Select { path: path.clone() });
-            }
-            if ui.selectable_label(negated, "NOT").clicked() {
-                actions.push(QueryAction::ToggleNot { path: path.clone() });
-            }
-            for op in BoolOp::ALL {
-                if ui.selectable_label(group.op == op, op.label()).clicked() {
-                    actions.push(QueryAction::SetOp {
-                        path: path.clone(),
-                        op,
-                    });
-                }
-            }
-            if let Some((parent, child)) = parent.as_ref()
-                && ui.small_button("×").clicked()
-            {
-                actions.push(QueryAction::RemoveChild {
-                    parent: parent.clone(),
-                    child: *child,
-                });
-            }
-        });
-        if group.children.is_empty() {
-            let _empty = ui.label("empty");
-        }
-        for (child, expr) in group.children.iter().enumerate() {
-            let parent_path = path.clone();
-            path.push(child);
-            render_query_expr(
-                ui,
-                expr,
-                path,
-                Some((parent_path, child)),
-                active,
-                depth + 1,
-                actions,
-            );
-            let _old = path.pop();
-        }
-    });
-}
-
-fn render_atom(
-    ui: &mut egui::Ui,
-    atom: &QueryAtom,
-    negated: bool,
-    parent: Option<(Vec<usize>, usize)>,
-    actions: &mut Vec<QueryAction>,
-) {
-    let text = if negated {
-        format!("¬ {atom}")
-    } else {
-        format!("+ {atom}")
-    };
-    let color = if negated {
-        egui::Color32::from_rgb(218, 150, 146)
-    } else {
-        egui::Color32::from_rgb(156, 204, 176)
-    };
-    let _row = ui.horizontal(|ui| {
-        if let Some((parent, child)) = parent
-            && ui.small_button("×").clicked()
-        {
-            actions.push(QueryAction::RemoveChild { parent, child });
-        }
-        let _label = ui.label(egui::RichText::new(text).color(color));
-    });
-}
-
-fn group_title(path: &[usize]) -> String {
-    if path.is_empty() {
-        "root".to_owned()
-    } else {
-        format!(
-            "g{}",
-            path.iter()
-                .map(|slot| (slot + 1).to_string())
-                .collect::<Vec<_>>()
-                .join(".")
-        )
-    }
-}
-
-fn group_fill(depth: usize) -> egui::Color32 {
-    const PALETTE: [(u8, u8, u8); 6] = [
-        (86, 105, 143),
-        (107, 128, 104),
-        (135, 111, 83),
-        (116, 93, 132),
-        (84, 128, 133),
-        (137, 91, 98),
-    ];
-    let (r, g, b) = PALETTE[depth % PALETTE.len()];
-    egui::Color32::from_rgba_unmultiplied(r, g, b, 28)
-}
-
-fn group_stroke(depth: usize, active: bool) -> egui::Stroke {
-    const PALETTE: [(u8, u8, u8); 6] = [
-        (135, 161, 214),
-        (155, 188, 148),
-        (198, 164, 118),
-        (174, 145, 202),
-        (125, 190, 198),
-        (203, 136, 145),
-    ];
-    let (r, g, b) = PALETTE[depth % PALETTE.len()];
-    if active {
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(r, g, b))
-    } else {
-        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(r, g, b, 96))
-    }
 }
 
 fn active_prefix(text: &str) -> Option<ActivePrefix> {
@@ -1295,6 +1211,65 @@ fn active_prefix(text: &str) -> Option<ActivePrefix> {
     (!body.is_empty()).then(|| ActivePrefix {
         body: body.to_owned(),
         negative,
+    })
+}
+
+fn posts_changed(old: &[PostRecord], new: &[PostRecord]) -> bool {
+    old.len() != new.len()
+        || old
+            .iter()
+            .zip(new)
+            .any(|(old, new)| old.id != new.id || old.thumb_url(360.0) != new.thumb_url(360.0))
+}
+
+fn paint_tile_text(ui: &egui::Ui, rect: egui::Rect, text: &str) {
+    let _text = ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        egui::TextStyle::Body.resolve(ui.style()),
+        ui.visuals().text_color(),
+    );
+}
+
+fn full_image_box(
+    post: &PostRecord,
+    texture: Option<&TextureHandle>,
+    screen: egui::Vec2,
+) -> egui::Vec2 {
+    let image = texture.map_or_else(|| post_image_size(post), TextureHandle::size_vec2);
+    let bounds = egui::vec2(
+        (screen.x * 0.9).max(64.0),
+        (screen.y * 0.9 - VIEWER_CHROME).max(64.0),
+    );
+    fit(image, bounds)
+}
+
+fn post_image_size(post: &PostRecord) -> egui::Vec2 {
+    if post.width > 0 && post.height > 0 {
+        egui::vec2(post.width as f32, post.height as f32)
+    } else {
+        egui::vec2(720.0, 720.0)
+    }
+}
+
+fn centered_box(ui: &mut egui::Ui, size: egui::Vec2, text: &str) {
+    let _box = ui.allocate_ui_with_layout(
+        size,
+        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+        |ui| {
+            let _label = ui.label(text);
+        },
+    );
+}
+
+fn outside_click(ctx: &egui::Context, rect: egui::Rect) -> bool {
+    ctx.input(|input| {
+        input.pointer.any_click()
+            && input
+                .pointer
+                .interact_pos()
+                .is_some_and(|pos| !rect.contains(pos))
     })
 }
 

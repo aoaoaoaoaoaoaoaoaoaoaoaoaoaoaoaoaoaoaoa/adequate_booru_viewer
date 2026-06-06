@@ -6,6 +6,7 @@ mod index;
 mod media;
 mod model;
 mod posting;
+mod query_ui;
 mod trace;
 mod wire;
 mod worker;

@@ -1,6 +1,7 @@
 use anyhow::{Context as _, Result};
 use crossbeam_channel::{Receiver, Sender, TryIter, unbounded};
 use std::{
+    collections::VecDeque,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
@@ -22,6 +23,17 @@ const CRAWL_FAULT_GAP: Duration = Duration::from_secs(5);
 const MERGE_GAP: Duration = Duration::from_millis(250);
 const MERGE_IDLE_GAP: Duration = Duration::from_secs(2);
 
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub struct BladeEpoch(u64);
+
+impl BladeEpoch {
+    pub const ROOT: Self = Self(0);
+
+    pub fn advance(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
 #[derive(Debug)]
 pub enum Command {
     Warm {
@@ -31,9 +43,13 @@ pub enum Command {
         pages: u32,
     },
     Blade {
+        epoch: BladeEpoch,
         id: PostId,
         bucket: u8,
         url: Option<String>,
+    },
+    CullBlades {
+        epoch: BladeEpoch,
     },
     FullBlade {
         id: PostId,
@@ -65,7 +81,16 @@ pub enum Event {
         bucket: u8,
         blade: RgbaBlade,
     },
+    BladeFault {
+        id: PostId,
+        bucket: u8,
+        fault: String,
+    },
     FullBlade(RgbaBlade),
+    FullBladeFault {
+        id: PostId,
+        fault: String,
+    },
     SoftText {
         prompt: String,
         embedding: Embedding,
@@ -84,23 +109,26 @@ pub enum Event {
 }
 
 pub struct Worker {
-    io_tx: Sender<Command>,
+    warm_tx: Sender<WarmCommand>,
+    media_tx: Sender<MediaCommand>,
     clip_tx: Sender<Command>,
     rx: Receiver<Event>,
 }
 
 impl Worker {
     pub fn spawn(index: Index, media: MediaCache, model_root: PathBuf) -> Self {
-        let (io_tx, io_rx) = unbounded();
+        let (warm_tx, warm_rx) = unbounded();
+        let (media_tx, media_rx) = unbounded();
         let (clip_tx, clip_rx) = unbounded();
         let (event_tx, event_rx) = unbounded();
         let read_gate = RateGate::new(DANBOORU_READ_GAP);
-        let io_events = event_tx.clone();
-        let io_index = index.clone();
-        let io_media = media.clone();
-        let io_gate = read_gate.clone();
-        let _io =
-            thread::spawn(move || assault_loop(io_index, io_media, io_gate, io_rx, io_events));
+        let warm_events = event_tx.clone();
+        let warm_index = index.clone();
+        let warm_gate = read_gate.clone();
+        let _warm = thread::spawn(move || warm_loop(warm_index, warm_gate, warm_rx, warm_events));
+        let media_events = event_tx.clone();
+        let media_cache = media.clone();
+        let _media = thread::spawn(move || media_loop(media_cache, media_rx, media_events));
         let crawl_index = index.clone();
         let crawl_events = event_tx.clone();
         let crawl_gate = read_gate.clone();
@@ -110,7 +138,8 @@ impl Worker {
         let _merge = thread::spawn(move || merge_loop(merge_index, merge_events));
         let _clip = thread::spawn(move || clip_loop(index, media, model_root, clip_rx, event_tx));
         Self {
-            io_tx,
+            warm_tx,
+            media_tx,
             clip_tx,
             rx: event_rx,
         }
@@ -118,10 +147,42 @@ impl Worker {
 
     pub fn send(&self, command: Command) -> Result<()> {
         match command {
-            command
-            @ (Command::Warm { .. } | Command::Blade { .. } | Command::FullBlade { .. }) => {
-                self.io_tx.send(command).context("send I/O worker command")
-            }
+            Command::Warm {
+                query,
+                sort,
+                first_page,
+                pages,
+            } => self
+                .warm_tx
+                .send(WarmCommand::Warm {
+                    query,
+                    sort,
+                    first_page,
+                    pages,
+                })
+                .context("send warm worker command"),
+            Command::Blade {
+                epoch,
+                id,
+                bucket,
+                url,
+            } => self
+                .media_tx
+                .send(MediaCommand::Blade {
+                    epoch,
+                    id,
+                    bucket,
+                    url,
+                })
+                .context("send media worker command"),
+            Command::CullBlades { epoch } => self
+                .media_tx
+                .send(MediaCommand::Cull { epoch })
+                .context("send media worker command"),
+            Command::FullBlade { id, url } => self
+                .media_tx
+                .send(MediaCommand::FullBlade { id, url })
+                .context("send media worker command"),
             command @ (Command::SoftText { .. } | Command::EmbedPosts { .. }) => self
                 .clip_tx
                 .send(command)
@@ -134,31 +195,43 @@ impl Worker {
     }
 }
 
-fn assault_loop(
-    index: Index,
-    media: MediaCache,
-    gate: RateGate,
-    commands: Receiver<Command>,
-    events: Sender<Event>,
-) {
+#[derive(Debug)]
+enum WarmCommand {
+    Warm {
+        query: Query,
+        sort: Sort,
+        first_page: u32,
+        pages: u32,
+    },
+}
+
+#[derive(Debug)]
+enum MediaCommand {
+    Blade {
+        epoch: BladeEpoch,
+        id: PostId,
+        bucket: u8,
+        url: Option<String>,
+    },
+    Cull {
+        epoch: BladeEpoch,
+    },
+    FullBlade {
+        id: PostId,
+        url: Option<String>,
+    },
+}
+
+fn warm_loop(index: Index, gate: RateGate, commands: Receiver<WarmCommand>, events: Sender<Event>) {
     let booru = Danbooru::new();
     for command in commands {
         let outcome = match command {
-            Command::Warm {
+            WarmCommand::Warm {
                 query,
                 sort,
                 first_page,
                 pages,
             } => warm(&booru, &index, &gate, query, sort, first_page, pages),
-            Command::Blade { id, bucket, url } => required_url(url.as_deref())
-                .and_then(|url| media.blade(id, url))
-                .map(|blade| Event::Blade { bucket, blade }),
-            Command::FullBlade { id, url } => required_url(url.as_deref())
-                .and_then(|url| media.blade(id, url))
-                .map(Event::FullBlade),
-            Command::SoftText { .. } | Command::EmbedPosts { .. } => {
-                Ok(Event::Fault("CLIP command reached I/O worker".to_owned()))
-            }
         };
         match outcome {
             Ok(event) => {
@@ -167,6 +240,85 @@ fn assault_loop(
             Err(err) => {
                 let _sent = events.send(Event::Fault(format!("{err:#}")));
             }
+        }
+    }
+}
+
+fn media_loop(media: MediaCache, commands: Receiver<MediaCommand>, events: Sender<Event>) {
+    let mut pending = VecDeque::new();
+    let mut epoch = BladeEpoch::ROOT;
+    while let Some(command) = next_media_command(&commands, &mut pending, &mut epoch) {
+        let event = match command {
+            MediaCommand::Blade {
+                id, bucket, url, ..
+            } => match required_url(url.as_deref()).and_then(|url| media.blade(id, url)) {
+                Ok(blade) => Event::Blade { bucket, blade },
+                Err(err) => Event::BladeFault {
+                    id,
+                    bucket,
+                    fault: format!("{err:#}"),
+                },
+            },
+            MediaCommand::Cull { .. } => continue,
+            MediaCommand::FullBlade { id, url } => {
+                match required_url(url.as_deref()).and_then(|url| media.blade(id, url)) {
+                    Ok(blade) => Event::FullBlade(blade),
+                    Err(err) => Event::FullBladeFault {
+                        id,
+                        fault: format!("{err:#}"),
+                    },
+                }
+            }
+        };
+        let _sent = events.send(event);
+    }
+}
+
+fn next_media_command(
+    commands: &Receiver<MediaCommand>,
+    pending: &mut VecDeque<MediaCommand>,
+    epoch: &mut BladeEpoch,
+) -> Option<MediaCommand> {
+    loop {
+        if pending.is_empty() {
+            pending.push_back(commands.recv().ok()?);
+        }
+        pending.extend(commands.try_iter());
+        *epoch = pending
+            .iter()
+            .filter_map(MediaCommand::blade_epoch)
+            .max()
+            .unwrap_or(*epoch)
+            .max(*epoch);
+        pending.retain(|command| command.is_live(*epoch));
+        let full = pending
+            .iter()
+            .position(|command| matches!(command, MediaCommand::FullBlade { .. }));
+        if let Some(command) = full
+            .and_then(|slot| pending.remove(slot))
+            .or_else(|| pending.pop_front())
+        {
+            return Some(command);
+        }
+    }
+}
+
+impl MediaCommand {
+    fn blade_epoch(&self) -> Option<BladeEpoch> {
+        match self {
+            Self::Blade { epoch, .. } => Some(*epoch),
+            Self::Cull { epoch } => Some(*epoch),
+            Self::FullBlade { .. } => None,
+        }
+    }
+
+    fn is_live(&self, epoch: BladeEpoch) -> bool {
+        match self {
+            Self::Blade {
+                epoch: candidate, ..
+            } => *candidate >= epoch,
+            Self::Cull { .. } => false,
+            Self::FullBlade { .. } => true,
         }
     }
 }
@@ -188,7 +340,10 @@ fn clip_loop(
             Command::EmbedPosts { posts } => {
                 forge(&mut clip, &model_root).map(|clip| embed_posts(&index, &media, clip, posts))
             }
-            Command::Warm { .. } | Command::Blade { .. } | Command::FullBlade { .. } => {
+            Command::Warm { .. }
+            | Command::Blade { .. }
+            | Command::CullBlades { .. }
+            | Command::FullBlade { .. } => {
                 Ok(Event::Fault("I/O command reached CLIP worker".to_owned()))
             }
         };
@@ -375,4 +530,66 @@ fn embed_post(
     let embedding = clip.image(&bytes)?;
     index.put_embedding(post.id, &embedding)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_queue_culls_stale_thumbnail_epochs() -> Result<()> {
+        let (tx, rx) = unbounded();
+        let stale = BladeEpoch::ROOT.advance();
+        let live = stale.advance();
+        tx.send(MediaCommand::Blade {
+            epoch: stale,
+            id: PostId(1),
+            bucket: 1,
+            url: None,
+        })
+        .context("send stale blade")?;
+        tx.send(MediaCommand::Cull { epoch: live })
+            .context("send cull")?;
+        tx.send(MediaCommand::Blade {
+            epoch: live,
+            id: PostId(2),
+            bucket: 1,
+            url: None,
+        })
+        .context("send live blade")?;
+        let mut pending = VecDeque::new();
+        let mut epoch = BladeEpoch::ROOT;
+        let command = next_media_command(&rx, &mut pending, &mut epoch).context("media command")?;
+        let MediaCommand::Blade { id, .. } = command else {
+            anyhow::bail!("expected live blade after cull");
+        };
+        assert_eq!(id, PostId(2));
+        Ok(())
+    }
+
+    #[test]
+    fn media_queue_prioritizes_full_blades() -> Result<()> {
+        let (tx, rx) = unbounded();
+        let epoch = BladeEpoch::ROOT.advance();
+        tx.send(MediaCommand::Blade {
+            epoch,
+            id: PostId(1),
+            bucket: 1,
+            url: None,
+        })
+        .context("send blade")?;
+        tx.send(MediaCommand::FullBlade {
+            id: PostId(9),
+            url: None,
+        })
+        .context("send full blade")?;
+        let mut pending = VecDeque::new();
+        let mut epoch = BladeEpoch::ROOT;
+        let command = next_media_command(&rx, &mut pending, &mut epoch).context("media command")?;
+        let MediaCommand::FullBlade { id, .. } = command else {
+            anyhow::bail!("expected full blade priority");
+        };
+        assert_eq!(id, PostId(9));
+        Ok(())
+    }
 }
