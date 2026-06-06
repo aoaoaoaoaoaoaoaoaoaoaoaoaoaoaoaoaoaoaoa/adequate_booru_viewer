@@ -19,6 +19,9 @@ use crate::{
         BoolOp, Embedding, PostId, PostRecord, Query, QueryAtom, SearchHit, Sort, Tag, TagPolarity,
     },
     query_ui::{QueryAction, render_query_tree},
+    tag_menu::{
+        HEIGHT as TAG_MENU_HEIGHT, TagMenu, WIDTH as TAG_MENU_WIDTH, position as tag_menu_pos,
+    },
     trace::startup,
     worker::{BladeEpoch, Command, Event, Worker},
     xdg::{Lair, compact_path},
@@ -68,7 +71,8 @@ pub struct Bayonet {
     zoom: Option<PostRecord>,
     zoom_gate: ZoomGate,
     tile_scale: f32,
-    tag_menu_open: bool,
+    tag_menu: TagMenu,
+    tag_menu_rect: Option<egui::Rect>,
     clip_inflight: HashSet<PostId>,
     cache_status: String,
     warm_status: String,
@@ -131,7 +135,8 @@ impl Bayonet {
             zoom: None,
             zoom_gate: ZoomGate::Fresh,
             tile_scale: config.view.tile_scale.clamp(MIN_TILE_SCALE, MAX_TILE_SCALE),
-            tag_menu_open: false,
+            tag_menu: TagMenu::Closed,
+            tag_menu_rect: None,
             clip_inflight: HashSet::new(),
             cache_status: "cache measuring".to_owned(),
             warm_status: "query warm idle".to_owned(),
@@ -816,28 +821,31 @@ impl Bayonet {
         }
     }
 
-    fn grid(&mut self, ui: &mut egui::Ui) {
+    fn grid(&mut self, ui: &mut egui::Ui) -> bool {
         let tile = self.tile_edge();
         let width = ui.available_width().max(tile);
         let cols = ((width + GAP) / (tile + GAP)).floor().max(1.0) as usize;
         let posts = self.hit.posts.clone();
         let rows = posts.len().div_ceil(cols);
         let row_height = tile + GAP;
+        let mut tag_source = false;
         let _scroll = egui::ScrollArea::vertical().show_rows(ui, row_height, rows, |ui, range| {
             for row in range {
                 let start = row * cols;
                 let end = (start + cols).min(posts.len());
                 let _row = ui.horizontal(|ui| {
                     for post in &posts[start..end] {
-                        self.tile(ui, post);
+                        tag_source |= self.tile(ui, post);
                     }
                 });
             }
         });
+        tag_source
     }
 
-    fn tile(&mut self, ui: &mut egui::Ui, post: &PostRecord) {
+    fn tile(&mut self, ui: &mut egui::Ui, post: &PostRecord) -> bool {
         let tile = self.tile_edge();
+        let mut tag_source = false;
         let _tile = ui.vertical(|ui| {
             ui.set_width(tile);
             let (rect, response) =
@@ -858,12 +866,44 @@ impl Bayonet {
             if response.clicked() {
                 self.open_full(post);
             }
-            let _hover = response.on_hover_ui(|ui| self.tag_palette(ui, post));
+            if let Some(pos) = response.hover_pos() {
+                self.open_tag_menu(post, pos);
+                tag_source = true;
+            }
         });
+        tag_source
+    }
+
+    fn open_tag_menu(&mut self, post: &PostRecord, anchor: egui::Pos2) {
+        if self.tag_menu.post_id() == Some(post.id) {
+            return;
+        }
+        self.tag_menu = TagMenu::Open {
+            post: Box::new(post.clone()),
+            anchor,
+        };
+    }
+
+    fn tag_palette_overlay(&mut self, ctx: &egui::Context) {
+        let Some((post, anchor)) = self.tag_menu.view() else {
+            self.tag_menu_rect = None;
+            return;
+        };
+        let post = post.clone();
+        let pos = tag_menu_pos(anchor, ctx.content_rect());
+        let area = egui::Area::new(egui::Id::new("tag-palette"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                let _frame = egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width(TAG_MENU_WIDTH);
+                    self.tag_palette(ui, &post);
+                });
+            });
+        self.tag_menu_rect = Some(area.response.rect);
     }
 
     fn tag_palette(&mut self, ui: &mut egui::Ui, post: &PostRecord) {
-        self.tag_menu_open = true;
         let query = self.query();
         let _heading = ui.label(format!(
             "#{}  score {}  fav {}",
@@ -871,7 +911,7 @@ impl Bayonet {
         ));
         let _separator = ui.separator();
         let _scroll = egui::ScrollArea::vertical()
-            .max_height(360.0)
+            .max_height(TAG_MENU_HEIGHT)
             .show(ui, |ui| {
                 for tag in &post.tags {
                     let active = query.polarity(tag);
@@ -891,7 +931,32 @@ impl Bayonet {
                     });
                 }
             });
-        consume_wheel(ui.ctx());
+    }
+
+    fn absorb_tag_menu_wheel(&mut self, ctx: &egui::Context) {
+        if self.pointer_in_tag_menu(ctx) {
+            consume_wheel(ctx);
+        }
+    }
+
+    fn retain_tag_menu(&mut self, ctx: &egui::Context, tag_source: bool) {
+        if matches!(self.tag_menu, TagMenu::Closed) {
+            return;
+        }
+        let inside = self.pointer_in_tag_menu(ctx);
+        let outside_click = ctx.input(|input| input.pointer.any_click()) && !inside && !tag_source;
+        if outside_click || (!inside && !tag_source) {
+            self.tag_menu = TagMenu::Closed;
+            self.tag_menu_rect = None;
+        }
+    }
+
+    fn pointer_in_tag_menu(&self, ctx: &egui::Context) -> bool {
+        let Some(rect) = self.tag_menu_rect else {
+            return false;
+        };
+        ctx.pointer_latest_pos()
+            .is_some_and(|pos| rect.expand(2.0).contains(pos))
     }
 
     fn open_full(&mut self, post: &PostRecord) {
@@ -1033,7 +1098,7 @@ impl Bayonet {
     }
 
     fn zoom_tiles(&mut self, ctx: &egui::Context) {
-        if self.tag_menu_open {
+        if self.tag_menu.is_open() {
             return;
         }
         let steps = ctx.input(|input| {
@@ -1381,13 +1446,26 @@ impl App for Bayonet {
 
 impl Bayonet {
     fn paint(&mut self, ui: &mut egui::Ui) {
-        self.tag_menu_open = false;
+        let ctx = ui.ctx().clone();
         let _edge = egui::Panel::top("edge").show_inside(ui, |ui| self.top(ui));
         let _left = egui::Panel::left("filter")
             .resizable(true)
             .default_size(220.0)
             .show_inside(ui, |ui| self.left_panel(ui));
-        let _center = egui::CentralPanel::default().show_inside(ui, |ui| self.grid(ui));
-        self.full_frame(ui.ctx());
+        let prior = self.tag_menu.post_id();
+        self.tag_menu_rect = None;
+        self.tag_palette_overlay(&ctx);
+        self.absorb_tag_menu_wheel(&ctx);
+        let mut tag_source = false;
+        let _center = egui::CentralPanel::default().show_inside(ui, |ui| {
+            tag_source = self.grid(ui);
+        });
+        if self.tag_menu.post_id() != prior {
+            self.tag_menu_rect = None;
+            self.tag_palette_overlay(&ctx);
+            ctx.request_repaint();
+        }
+        self.retain_tag_menu(&ctx, tag_source);
+        self.full_frame(&ctx);
     }
 }
