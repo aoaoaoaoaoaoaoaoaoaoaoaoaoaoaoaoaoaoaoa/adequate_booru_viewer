@@ -828,24 +828,24 @@ impl Bayonet {
         let posts = self.hit.posts.clone();
         let rows = posts.len().div_ceil(cols);
         let row_height = tile + GAP;
-        let mut tag_source = false;
+        let mut menu_opened = false;
         let _scroll = egui::ScrollArea::vertical().show_rows(ui, row_height, rows, |ui, range| {
             for row in range {
                 let start = row * cols;
                 let end = (start + cols).min(posts.len());
                 let _row = ui.horizontal(|ui| {
                     for post in &posts[start..end] {
-                        tag_source |= self.tile(ui, post);
+                        menu_opened |= self.tile(ui, post);
                     }
                 });
             }
         });
-        tag_source
+        menu_opened
     }
 
     fn tile(&mut self, ui: &mut egui::Ui, post: &PostRecord) -> bool {
         let tile = self.tile_edge();
-        let mut tag_source = false;
+        let mut menu_opened = false;
         let _tile = ui.vertical(|ui| {
             ui.set_width(tile);
             let (rect, response) =
@@ -863,21 +863,20 @@ impl Bayonet {
                 Some(ThumbLoad::Fault) => paint_tile_text(ui, rect, "fault"),
                 None => paint_tile_text(ui, rect, "no image"),
             }
-            if response.clicked() {
+            if response.clicked() && !self.tag_menu.is_open() {
                 self.open_full(post);
             }
-            if let Some(pos) = response.hover_pos() {
+            if response.secondary_clicked()
+                && let Some(pos) = response.interact_pointer_pos()
+            {
                 self.open_tag_menu(post, pos);
-                tag_source = true;
+                menu_opened = true;
             }
         });
-        tag_source
+        menu_opened
     }
 
     fn open_tag_menu(&mut self, post: &PostRecord, anchor: egui::Pos2) {
-        if self.tag_menu.post_id() == Some(post.id) {
-            return;
-        }
         self.tag_menu = TagMenu::Open {
             post: Box::new(post.clone()),
             anchor,
@@ -939,13 +938,14 @@ impl Bayonet {
         }
     }
 
-    fn retain_tag_menu(&mut self, ctx: &egui::Context, tag_source: bool) {
+    fn retain_tag_menu(&mut self, ctx: &egui::Context, menu_opened: bool) {
         if matches!(self.tag_menu, TagMenu::Closed) {
             return;
         }
         let inside = self.pointer_in_tag_menu(ctx);
-        let outside_click = ctx.input(|input| input.pointer.any_click()) && !inside && !tag_source;
-        if outside_click || (!inside && !tag_source) {
+        let outside_click =
+            ctx.input(|input| input.pointer.primary_clicked()) && !inside && !menu_opened;
+        if outside_click {
             self.tag_menu = TagMenu::Closed;
             self.tag_menu_rect = None;
         }
@@ -1456,16 +1456,16 @@ impl Bayonet {
         self.tag_menu_rect = None;
         self.tag_palette_overlay(&ctx);
         self.absorb_tag_menu_wheel(&ctx);
-        let mut tag_source = false;
+        let mut menu_opened = false;
         let _center = egui::CentralPanel::default().show_inside(ui, |ui| {
-            tag_source = self.grid(ui);
+            menu_opened = self.grid(ui);
         });
         if self.tag_menu.post_id() != prior {
             self.tag_menu_rect = None;
             self.tag_palette_overlay(&ctx);
             ctx.request_repaint();
         }
-        self.retain_tag_menu(&ctx, tag_source);
+        self.retain_tag_menu(&ctx, menu_opened);
         self.full_frame(&ctx);
     }
 }
