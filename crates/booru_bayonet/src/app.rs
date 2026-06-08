@@ -23,14 +23,19 @@ use crate::{
         HEIGHT as TAG_MENU_HEIGHT, TagMenu, WIDTH as TAG_MENU_WIDTH, position as tag_menu_pos,
     },
     trace::startup,
-    worker::{BladeEpoch, Command, Event, Worker},
+    worker::{BladeEpoch, Command, Event, RefreshHit, SoftRefresh, Worker},
     xdg::{Lair, compact_path},
 };
+
+mod refresh;
+
+use refresh::AsyncPulse;
 
 const RESULT_LIMIT: usize = 360;
 const SOFT_POOL: usize = 2_400;
 const SOFT_BACKLOG: usize = 128;
 const SUGGESTIONS: usize = 12;
+const EVENT_BUDGET: usize = 12;
 const AUTO_WARM_PAGES: u32 = 1;
 const DANBOORU_SEARCH_PAGE_LIMIT: u32 = 1_000;
 const BASE_TILE: f32 = 260.0;
@@ -54,6 +59,10 @@ pub struct Bayonet {
     soft_embedding: Option<Embedding>,
     soft_requested: Option<String>,
     sort: Sort,
+    refresh_serial: u64,
+    refresh_pulse: AsyncPulse,
+    stats_serial: u64,
+    stats_pulse: AsyncPulse,
     hit: SearchHit,
     thumbs: HashMap<ThumbKey, TextureHandle>,
     thumb_inflight: HashSet<ThumbKey>,
@@ -118,6 +127,10 @@ impl Bayonet {
             soft_embedding: None,
             soft_requested: None,
             sort,
+            refresh_serial: 0,
+            refresh_pulse: AsyncPulse::Idle,
+            stats_serial: 0,
+            stats_pulse: AsyncPulse::Idle,
             hit: SearchHit::default(),
             thumbs: HashMap::new(),
             thumb_inflight: HashSet::new(),
@@ -143,7 +156,7 @@ impl Bayonet {
             startup_probe: StartupProbe::from_env(),
         };
         startup("app.state.built");
-        app.reap(true, AUTO_WARM_PAGES)?;
+        app.strike(true, AUTO_WARM_PAGES);
         startup("app.initial.reap.done");
         Ok(app)
     }
@@ -171,74 +184,6 @@ impl Bayonet {
         startup("app.draw.tessellated");
         self.report_startup_probe();
         startup("app.draw.probe.reported");
-    }
-
-    fn reap(&mut self, warm: bool, pages: u32) -> Result<()> {
-        startup("app.reap.enter");
-        let query = self.query();
-        let soft = self.soft_needle().cloned();
-        if let Some(needle) = soft {
-            startup("app.reap.soft.search.enter");
-            let hit = self.index.search_soft(
-                &query,
-                self.sort,
-                &needle,
-                self.soft_alpha,
-                RESULT_LIMIT,
-                SOFT_POOL,
-                SOFT_BACKLOG,
-            )?;
-            startup("app.reap.soft.search.done");
-            let queued = self.queue_clip(hit.missing);
-            let posts = hit.hit.posts.len();
-            let candidates = hit.hit.candidates;
-            let embedded = hit.embedded;
-            let pool = hit.pool;
-            self.install_hit(hit.hit);
-            self.status = format!(
-                "{} hits from {} candidates; clip {}/{} embedded, queued {}; α {:.2}",
-                posts, candidates, embedded, pool, queued, self.soft_alpha
-            );
-        } else {
-            startup("app.reap.search.enter");
-            let hit = self.index.search(&query, self.sort, RESULT_LIMIT)?;
-            startup("app.reap.search.done");
-            let soft_armed = self.soft_prompt().is_some();
-            let queued = if soft_armed {
-                self.queue_clip(hit.posts.clone())
-            } else {
-                0
-            };
-            let posts = hit.posts.len();
-            let candidates = hit.candidates;
-            self.install_hit(hit);
-            let requested = self.request_soft_prompt();
-            self.status = if soft_armed {
-                format!(
-                    "{} hits from {} candidates; clip text {}; queued {} visible images",
-                    posts,
-                    candidates,
-                    if requested { "requested" } else { "pending" },
-                    queued
-                )
-            } else {
-                format!(
-                    "{} hits from {} candidates; {}",
-                    posts,
-                    candidates,
-                    compact_path(&self.lair.data)
-                )
-            };
-        }
-        if warm {
-            startup("app.reap.warm.enter");
-            self.dispatch_warm(query, pages)?;
-            startup("app.reap.warm.done");
-        }
-        startup("app.reap.stats.enter");
-        self.update_cache_status();
-        startup("app.reap.stats.done");
-        Ok(())
     }
 
     fn query(&self) -> Query {
@@ -378,19 +323,6 @@ impl Bayonet {
         queued
     }
 
-    fn strike(&mut self, warm: bool, pages: u32) {
-        if let Err(err) = self.reap(warm, pages) {
-            self.status = format!("{err:#}");
-        }
-    }
-
-    fn update_cache_status(&mut self) {
-        match self.index.stats() {
-            Ok(stats) => self.cache_status = cache_status(&stats),
-            Err(err) => self.cache_status = format!("cache stats fault: {err:#}"),
-        }
-    }
-
     fn align_warm(&mut self, query: &Query) {
         let key = WarmKey::new(query, self.sort);
         if self.warm_key == key {
@@ -449,9 +381,29 @@ impl Bayonet {
     }
 
     fn drain(&mut self, ctx: &egui::Context) {
-        let events = self.worker.drain().collect::<Vec<_>>();
-        for event in events {
+        let mut saturated = false;
+        let events = self.worker.drain().take(EVENT_BUDGET).collect::<Vec<_>>();
+        for (slot, event) in events.into_iter().enumerate() {
+            saturated |= slot + 1 == EVENT_BUDGET;
             match event {
+                Event::Refreshed { serial, hit } => {
+                    self.finish_refresh(serial, Some(hit), ctx);
+                }
+                Event::RefreshFault { serial, fault } => {
+                    if self.refresh_pulse.inflight_serial() == Some(serial) {
+                        self.status = fault;
+                    }
+                    self.finish_refresh(serial, None, ctx);
+                }
+                Event::Stats { serial, stats } => {
+                    self.finish_stats(serial, Some(stats), ctx);
+                }
+                Event::StatsFault { serial, fault } => {
+                    if self.stats_pulse.inflight_serial() == Some(serial) {
+                        self.cache_status = format!("cache stats fault: {fault}");
+                    }
+                    self.finish_stats(serial, None, ctx);
+                }
                 Event::Warmed {
                     query_key,
                     sort,
@@ -484,9 +436,8 @@ impl Bayonet {
                             )
                         };
                     }
-                    if let Err(err) = self.reap(false, 0) {
-                        self.status = format!("{err:#}");
-                    }
+                    self.request_refresh();
+                    self.request_stats();
                     if self.warm_key == event_key && !self.warm_exhausted {
                         let query = self.query();
                         if let Err(err) = self.dispatch_warm(query, self.warm_stride) {
@@ -500,9 +451,8 @@ impl Bayonet {
                         || "crawl reached empty page".to_owned(),
                         |before| format!("crawl +{posts}; before #{before}"),
                     );
-                    if let Err(err) = self.reap(false, 0) {
-                        self.status = format!("{err:#}");
-                    }
+                    self.request_refresh();
+                    self.request_stats();
                     ctx.request_repaint();
                 }
                 Event::Blade { bucket, blade } => {
@@ -531,9 +481,7 @@ impl Bayonet {
                     if self.soft_prompt().as_deref() == Some(prompt.as_str()) {
                         self.soft_prompt = Some(prompt);
                         self.soft_embedding = Some(embedding);
-                        if let Err(err) = self.reap(false, 0) {
-                            self.status = format!("{err:#}");
-                        }
+                        self.request_refresh();
                     }
                     ctx.request_repaint();
                 }
@@ -545,9 +493,9 @@ impl Bayonet {
                     for id in ids {
                         let _was_inflight = self.clip_inflight.remove(&id);
                     }
-                    if let Err(err) = self.reap(false, 0) {
-                        self.status = format!("{err:#}");
-                    } else if faults == 0 {
+                    self.request_refresh();
+                    self.request_stats();
+                    if faults == 0 {
                         self.status = format!("embedded {stored} Jina CLIP images");
                     } else {
                         self.status =
@@ -560,7 +508,7 @@ impl Bayonet {
                     bytes,
                     groups,
                 } => {
-                    self.update_cache_status();
+                    self.request_stats();
                     self.warm_status = format!(
                         "posting merge {batches} batches, {} KiB across {groups} predicates",
                         bytes / 1024
@@ -572,6 +520,9 @@ impl Bayonet {
                     ctx.request_repaint();
                 }
             }
+        }
+        if saturated {
+            ctx.request_repaint();
         }
     }
 
@@ -1400,27 +1351,6 @@ fn filter_name_taken(name: &FilterName, filters: &[SavedFilter]) -> bool {
     filters
         .binary_search_by(|filter| filter.name.cmp(name))
         .is_ok()
-}
-
-fn cache_status(stats: &CacheStats) -> String {
-    let ratings = stats
-        .ratings
-        .iter()
-        .map(|(rating, posts)| format!("{}:{posts}", rating.key()))
-        .collect::<Vec<_>>()
-        .join("/");
-    let frontier = match (stats.crawl_before, stats.rough_crawl_percent()) {
-        (Some(before), Some(percent)) => format!("crawl≤#{before} ≈{percent:.1}% ID"),
-        (Some(before), None) => format!("crawl≤#{before}"),
-        (None, _) => "crawl unstarted".to_owned(),
-    };
-    let newest = stats
-        .newest
-        .map_or_else(|| "newest unknown".to_owned(), |id| format!("newest #{id}"));
-    format!(
-        "cache {} posts, {} tag chunks, {} clip, {} pending fact batches, ratings {ratings}, {newest}, {frontier}",
-        stats.posts, stats.tag_chunks, stats.embeddings, stats.pending_fact_batches
-    )
 }
 
 fn consume_wheel(ctx: &egui::Context) {

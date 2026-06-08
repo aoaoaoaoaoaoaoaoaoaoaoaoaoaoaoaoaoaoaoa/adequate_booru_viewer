@@ -11,9 +11,9 @@ use std::{
 use crate::{
     booru::{Booru as _, Danbooru},
     clip::ClipForge,
-    index::{FactMergeBudget, Index},
+    index::{CacheStats, FactMergeBudget, Index, SoftHit},
     media::{MediaCache, RgbaBlade, required_url},
-    model::{Embedding, PostId, PostRecord, Query, Sort},
+    model::{Embedding, PostId, PostRecord, Query, SearchHit, Sort},
 };
 
 const DANBOORU_READ_GAP: Duration = Duration::from_millis(150);
@@ -42,6 +42,16 @@ pub enum Command {
         first_page: u32,
         pages: u32,
     },
+    Refresh {
+        serial: u64,
+        query: Query,
+        sort: Sort,
+        limit: usize,
+        soft: Option<SoftRefresh>,
+    },
+    Stats {
+        serial: u64,
+    },
     Blade {
         epoch: BladeEpoch,
         id: PostId,
@@ -65,6 +75,22 @@ pub enum Command {
 
 #[derive(Debug)]
 pub enum Event {
+    Refreshed {
+        serial: u64,
+        hit: RefreshHit,
+    },
+    RefreshFault {
+        serial: u64,
+        fault: String,
+    },
+    Stats {
+        serial: u64,
+        stats: CacheStats,
+    },
+    StatsFault {
+        serial: u64,
+        fault: String,
+    },
     Warmed {
         query_key: String,
         sort: Sort,
@@ -108,7 +134,23 @@ pub enum Event {
     Fault(String),
 }
 
+#[derive(Clone, Debug)]
+pub struct SoftRefresh {
+    pub needle: Embedding,
+    pub alpha: f32,
+    pub limit: usize,
+    pub pool: usize,
+    pub backlog: usize,
+}
+
+#[derive(Clone, Debug)]
+pub enum RefreshHit {
+    Hard(SearchHit),
+    Soft(SoftHit),
+}
+
 pub struct Worker {
+    refresh_tx: Sender<RefreshCommand>,
     warm_tx: Sender<WarmCommand>,
     media_tx: Sender<MediaCommand>,
     clip_tx: Sender<Command>,
@@ -117,10 +159,15 @@ pub struct Worker {
 
 impl Worker {
     pub fn spawn(index: Index, media: MediaCache, model_root: PathBuf) -> Self {
+        let (refresh_tx, refresh_rx) = unbounded();
         let (warm_tx, warm_rx) = unbounded();
         let (media_tx, media_rx) = unbounded();
         let (clip_tx, clip_rx) = unbounded();
         let (event_tx, event_rx) = unbounded();
+        let refresh_events = event_tx.clone();
+        let refresh_index = index.clone();
+        let _refresh =
+            thread::spawn(move || refresh_loop(refresh_index, refresh_rx, refresh_events));
         let read_gate = RateGate::new(DANBOORU_READ_GAP);
         let warm_events = event_tx.clone();
         let warm_index = index.clone();
@@ -138,6 +185,7 @@ impl Worker {
         let _merge = thread::spawn(move || merge_loop(merge_index, merge_events));
         let _clip = thread::spawn(move || clip_loop(index, media, model_root, clip_rx, event_tx));
         Self {
+            refresh_tx,
             warm_tx,
             media_tx,
             clip_tx,
@@ -147,6 +195,26 @@ impl Worker {
 
     pub fn send(&self, command: Command) -> Result<()> {
         match command {
+            Command::Refresh {
+                serial,
+                query,
+                sort,
+                limit,
+                soft,
+            } => self
+                .refresh_tx
+                .send(RefreshCommand::Search {
+                    serial,
+                    query,
+                    sort,
+                    limit,
+                    soft,
+                })
+                .context("send refresh worker command"),
+            Command::Stats { serial } => self
+                .refresh_tx
+                .send(RefreshCommand::Stats { serial })
+                .context("send stats worker command"),
             Command::Warm {
                 query,
                 sort,
@@ -196,6 +264,20 @@ impl Worker {
 }
 
 #[derive(Debug)]
+enum RefreshCommand {
+    Search {
+        serial: u64,
+        query: Query,
+        sort: Sort,
+        limit: usize,
+        soft: Option<SoftRefresh>,
+    },
+    Stats {
+        serial: u64,
+    },
+}
+
+#[derive(Debug)]
 enum WarmCommand {
     Warm {
         query: Query,
@@ -220,6 +302,75 @@ enum MediaCommand {
         id: PostId,
         url: Option<String>,
     },
+}
+
+fn refresh_loop(index: Index, commands: Receiver<RefreshCommand>, events: Sender<Event>) {
+    while let Ok(first) = commands.recv() {
+        let mut search = None;
+        let mut stats = None;
+        collect_refresh(first, &mut search, &mut stats);
+        for command in commands.try_iter() {
+            collect_refresh(command, &mut search, &mut stats);
+        }
+        if let Some((serial, query, sort, limit, soft)) = search {
+            let event = match refresh(&index, &query, sort, limit, soft) {
+                Ok(hit) => Event::Refreshed { serial, hit },
+                Err(err) => Event::RefreshFault {
+                    serial,
+                    fault: format!("{err:#}"),
+                },
+            };
+            let _sent = events.send(event);
+        }
+        if let Some(serial) = stats {
+            let event = match index.stats() {
+                Ok(stats) => Event::Stats { serial, stats },
+                Err(err) => Event::StatsFault {
+                    serial,
+                    fault: format!("{err:#}"),
+                },
+            };
+            let _sent = events.send(event);
+        }
+    }
+}
+
+type PendingSearch = Option<(u64, Query, Sort, usize, Option<SoftRefresh>)>;
+
+fn collect_refresh(command: RefreshCommand, search: &mut PendingSearch, stats: &mut Option<u64>) {
+    match command {
+        RefreshCommand::Search {
+            serial,
+            query,
+            sort,
+            limit,
+            soft,
+        } => *search = Some((serial, query, sort, limit, soft)),
+        RefreshCommand::Stats { serial } => *stats = Some(serial),
+    }
+}
+
+fn refresh(
+    index: &Index,
+    query: &Query,
+    sort: Sort,
+    limit: usize,
+    soft: Option<SoftRefresh>,
+) -> Result<RefreshHit> {
+    match soft {
+        Some(soft) => index
+            .search_soft(
+                query,
+                sort,
+                &soft.needle,
+                soft.alpha,
+                soft.limit,
+                soft.pool,
+                soft.backlog,
+            )
+            .map(RefreshHit::Soft),
+        None => index.search(query, sort, limit).map(RefreshHit::Hard),
+    }
 }
 
 fn warm_loop(index: Index, gate: RateGate, commands: Receiver<WarmCommand>, events: Sender<Event>) {
@@ -341,6 +492,8 @@ fn clip_loop(
                 forge(&mut clip, &model_root).map(|clip| embed_posts(&index, &media, clip, posts))
             }
             Command::Warm { .. }
+            | Command::Refresh { .. }
+            | Command::Stats { .. }
             | Command::Blade { .. }
             | Command::CullBlades { .. }
             | Command::FullBlade { .. } => {
