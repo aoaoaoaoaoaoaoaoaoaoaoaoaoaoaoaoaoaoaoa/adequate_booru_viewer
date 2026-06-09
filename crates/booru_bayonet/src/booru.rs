@@ -1,9 +1,14 @@
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 use ureq::Agent;
 
-use crate::model::{PostId, PostRecord, Query, Rating, Sort, Tag, narrow_post_id};
+use crate::model::{
+    PostId, PostRecord, Query, Rating, Sort, Tag, TagHint, TagKind, narrow_post_id,
+};
 
 const POST_LIMIT: &str = "200";
 
@@ -73,6 +78,16 @@ struct DanbooruPost {
     #[serde(default)]
     tag_string: String,
     #[serde(default)]
+    tag_string_general: String,
+    #[serde(default)]
+    tag_string_artist: String,
+    #[serde(default)]
+    tag_string_copyright: String,
+    #[serde(default)]
+    tag_string_character: String,
+    #[serde(default)]
+    tag_string_meta: String,
+    #[serde(default)]
     preview_file_url: Option<String>,
     #[serde(default)]
     large_file_url: Option<String>,
@@ -99,13 +114,7 @@ impl TryFrom<DanbooruPost> for PostRecord {
     type Error = anyhow::Error;
 
     fn try_from(post: DanbooruPost) -> Result<Self> {
-        let mut tags = post
-            .tag_string
-            .split_whitespace()
-            .filter_map(Tag::forge)
-            .collect::<Vec<_>>();
-        tags.sort();
-        tags.dedup();
+        let (tags, tag_hints) = tag_inventory(&post);
         let variants = Variants::from(post.media_asset.as_ref());
         Ok(Self {
             id: narrow_post_id(post.id)?,
@@ -116,6 +125,7 @@ impl TryFrom<DanbooruPost> for PostRecord {
             height: post.image_height,
             created_at: post.created_at,
             tags,
+            tag_hints,
             preview_url: post.preview_file_url.or(variants.thumb_180),
             thumb_360_url: variants.thumb_360,
             thumb_720_url: variants.thumb_720,
@@ -123,6 +133,32 @@ impl TryFrom<DanbooruPost> for PostRecord {
             file_url: post.file_url,
         })
     }
+}
+
+fn tag_inventory(post: &DanbooruPost) -> (Vec<Tag>, Vec<TagHint>) {
+    let mut tags = BTreeSet::new();
+    let mut hints = BTreeMap::new();
+    for (kind, lane) in [
+        (TagKind::General, post.tag_string_general.as_str()),
+        (TagKind::Artist, post.tag_string_artist.as_str()),
+        (TagKind::Copyright, post.tag_string_copyright.as_str()),
+        (TagKind::Character, post.tag_string_character.as_str()),
+        (TagKind::Meta, post.tag_string_meta.as_str()),
+    ] {
+        for tag in lane.split_whitespace().filter_map(Tag::forge) {
+            let _inserted = tags.insert(tag.clone());
+            let _old = hints.insert(tag, kind);
+        }
+    }
+    for tag in post.tag_string.split_whitespace().filter_map(Tag::forge) {
+        let _inserted = tags.insert(tag.clone());
+        let _kind = hints.entry(tag).or_insert(TagKind::General);
+    }
+    let tag_hints = hints
+        .into_iter()
+        .map(|(tag, kind)| TagHint::new(tag, kind))
+        .collect();
+    (tags.into_iter().collect(), tag_hints)
 }
 
 #[derive(Default)]

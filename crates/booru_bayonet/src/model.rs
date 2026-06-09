@@ -43,6 +43,71 @@ impl Display for Tag {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TagKind {
+    #[default]
+    General,
+    Artist,
+    Copyright,
+    Character,
+    Meta,
+}
+
+impl TagKind {
+    pub const ALL: [Self; 5] = [
+        Self::General,
+        Self::Artist,
+        Self::Copyright,
+        Self::Character,
+        Self::Meta,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::General => "regular",
+            Self::Artist => "artist",
+            Self::Copyright => "copyright",
+            Self::Character => "character",
+            Self::Meta => "meta",
+        }
+    }
+
+    pub fn code(self) -> u8 {
+        match self {
+            Self::General => 0,
+            Self::Artist => 1,
+            Self::Copyright => 3,
+            Self::Character => 4,
+            Self::Meta => 5,
+        }
+    }
+
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::General),
+            1 => Some(Self::Artist),
+            3 => Some(Self::Copyright),
+            4 => Some(Self::Character),
+            5 => Some(Self::Meta),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TagHint {
+    pub tag: Tag,
+    pub kind: TagKind,
+}
+
+impl TagHint {
+    pub fn new(tag: Tag, kind: TagKind) -> Self {
+        Self { tag, kind }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Sort {
@@ -200,6 +265,7 @@ impl Query {
             return false;
         };
         group.op = op;
+        self.sort_atoms();
         true
     }
 
@@ -227,6 +293,7 @@ impl Query {
         group
             .children
             .push(QueryTerm { atom, polarity }.into_expr());
+        self.sort_atoms();
         true
     }
 
@@ -238,11 +305,13 @@ impl Query {
             return false;
         }
         let _removed = group.children.remove(child);
+        self.sort_atoms();
         true
     }
 
     pub fn remove_atom(&mut self, atom: &QueryAtom) {
         self.root.remove_atom(atom);
+        self.sort_atoms();
     }
 
     pub fn toggle_not(&mut self, path: &[usize]) -> bool {
@@ -250,7 +319,12 @@ impl Query {
             return false;
         };
         expr.toggle_not();
+        self.sort_atoms();
         true
+    }
+
+    pub fn sort_atoms(&mut self) {
+        self.root.sort_atoms();
     }
 
     pub fn clamp_group_path(&self, path: &[usize]) -> Vec<usize> {
@@ -446,6 +520,19 @@ impl QueryExpr {
         }
     }
 
+    fn sort_atoms(&mut self) {
+        match self {
+            Self::Atom { .. } => {}
+            Self::Not { child } => child.sort_atoms(),
+            Self::Group { group } => {
+                for child in &mut group.children {
+                    child.sort_atoms();
+                }
+                group.sort_atoms();
+            }
+        }
+    }
+
     fn required_positive_atoms(&self, negated: bool) -> BTreeSet<QueryAtom> {
         match self {
             Self::Atom { atom } if !negated => BTreeSet::from([atom.clone()]),
@@ -524,6 +611,25 @@ impl Default for BoolGroup {
     }
 }
 
+impl BoolGroup {
+    fn sort_atoms(&mut self) {
+        let mut terms = self
+            .children
+            .iter()
+            .filter_map(QueryExpr::term)
+            .collect::<Vec<_>>();
+        terms.sort_by(QueryTerm::cmp);
+        let mut terms = terms.into_iter();
+        for child in &mut self.children {
+            if child.term().is_some()
+                && let Some(term) = terms.next()
+            {
+                *child = term.into_expr();
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BoolOp {
@@ -593,6 +699,13 @@ pub struct QueryTerm {
 }
 
 impl QueryTerm {
+    fn cmp(a: &Self, b: &Self) -> std::cmp::Ordering {
+        a.atom
+            .term()
+            .cmp(&b.atom.term())
+            .then_with(|| a.polarity.sort_key().cmp(&b.polarity.sort_key()))
+    }
+
     fn into_expr(self) -> QueryExpr {
         let atom = QueryExpr::Atom { atom: self.atom };
         match self.polarity {
@@ -615,6 +728,15 @@ impl QueryTerm {
 pub enum TagPolarity {
     Positive,
     Negative,
+}
+
+impl TagPolarity {
+    fn sort_key(self) -> u8 {
+        match self {
+            Self::Positive => 0,
+            Self::Negative => 1,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -658,6 +780,8 @@ pub struct PostRecord {
     pub height: u32,
     pub created_at: String,
     pub tags: Vec<Tag>,
+    #[serde(default)]
+    pub tag_hints: Vec<TagHint>,
     pub preview_url: Option<String>,
     #[serde(default)]
     pub thumb_360_url: Option<String>,
@@ -670,6 +794,13 @@ pub struct PostRecord {
 impl PostRecord {
     pub fn indexable(&self) -> bool {
         !self.tags.iter().any(Tag::blocks_index)
+    }
+
+    pub fn tag_kind(&self, tag: &Tag) -> TagKind {
+        self.tag_hints
+            .iter()
+            .find(|hint| &hint.tag == tag)
+            .map_or(TagKind::General, |hint| hint.kind)
     }
 
     pub fn blade_url(&self) -> Option<&str> {
@@ -828,6 +959,7 @@ pub fn decode_record(bytes: &[u8]) -> Result<PostRecord> {
         height,
         created_at,
         tags,
+        tag_hints: Vec::new(),
         preview_url: blade.opt_string()?,
         thumb_360_url: blade.opt_string()?,
         thumb_720_url: blade.opt_string()?,
@@ -926,6 +1058,34 @@ mod tests {
     }
 
     #[test]
+    fn atom_sorting_keeps_group_slots_stable() -> Result<()> {
+        let mut query = Query::default();
+        assert!(query.push_atom(
+            &[],
+            QueryAtom::parse("zeta").context("zeta tag")?,
+            TagPolarity::Positive
+        ));
+        let group = query.push_group(&[], BoolOp::Or).context("OR group")?;
+        assert!(query.push_atom(
+            &[],
+            QueryAtom::parse("alpha").context("alpha tag")?,
+            TagPolarity::Positive
+        ));
+        assert!(query.push_atom(
+            &group,
+            QueryAtom::parse("right").context("right tag")?,
+            TagPolarity::Positive
+        ));
+        assert!(query.push_atom(
+            &group,
+            QueryAtom::parse("left").context("left tag")?,
+            TagPolarity::Positive
+        ));
+        assert_eq!(query.root.to_text(), "AND(alpha OR(left right) zeta)");
+        Ok(())
+    }
+
+    #[test]
     fn animated_posts_are_not_indexable() {
         let post = PostRecord {
             id: PostId(1),
@@ -936,6 +1096,7 @@ mod tests {
             height: 1,
             created_at: String::new(),
             tags: vec![Tag("animated".to_owned())],
+            tag_hints: Vec::new(),
             preview_url: None,
             thumb_360_url: None,
             thumb_720_url: None,
@@ -960,6 +1121,7 @@ mod tests {
                 Tag::forge("alpha").context("alpha")?,
                 Tag::forge("alpha").context("alpha")?,
             ],
+            tag_hints: Vec::new(),
             preview_url: Some("https://example.test/180.jpg".to_owned()),
             thumb_360_url: Some("https://example.test/360.jpg".to_owned()),
             thumb_720_url: None,

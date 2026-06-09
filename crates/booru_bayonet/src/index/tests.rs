@@ -1,5 +1,5 @@
 use super::*;
-use crate::model::{Rating, TagPolarity};
+use crate::model::{Rating, TagHint, TagKind, TagPolarity};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
@@ -86,6 +86,31 @@ fn posting_facts_are_query_visible_before_and_after_chunk_merge() -> Result<()> 
     Ok(())
 }
 
+#[test]
+fn tag_kind_hints_are_durable() -> Result<()> {
+    let path = std::env::temp_dir().join(format!(
+        "booru-bayonet-tag-kind-{}.redb",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ));
+    let _stale = std::fs::remove_file(&path);
+    let index = Index::open(&path)?;
+    let idol = Tag::forge("idol").context("idol tag")?;
+    let mut post = post(7, 10, Rating::General, &["idol"])?;
+    post.tag_hints = vec![TagHint::new(idol.clone(), TagKind::Character)];
+    index.absorb(&[post])?;
+    assert_eq!(index.tag_kind(&idol)?, TagKind::Character);
+    assert_eq!(
+        index
+            .tag_suggestions("id", 1)?
+            .first()
+            .map(|suggestion| suggestion.kind),
+        Some(TagKind::Character)
+    );
+    drop(index);
+    let _removed = std::fs::remove_file(&path);
+    Ok(())
+}
+
 fn ids(hit: SearchHit) -> Vec<u32> {
     hit.posts.into_iter().map(|post| post.id.0).collect()
 }
@@ -109,6 +134,7 @@ fn post(id: u32, score: i32, rating: Rating, tags: &[&str]) -> Result<PostRecord
             .iter()
             .map(|tag| Tag::forge(tag).context("forge post tag"))
             .collect::<Result<Vec<_>>>()?,
+        tag_hints: Vec::new(),
         preview_url: None,
         thumb_360_url: None,
         thumb_720_url: None,

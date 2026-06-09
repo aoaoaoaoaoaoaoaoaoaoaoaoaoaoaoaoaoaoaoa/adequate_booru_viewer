@@ -8,13 +8,14 @@ use std::{collections::BTreeSet, mem::size_of, path::Path, sync::Arc};
 
 use crate::model::{
     BoolOp, CLIP_DIM, Embedding, PostId, PostRecord, Query, QueryAtom, QueryExpr, RatingClass,
-    SearchHit, Sort, Tag, decode_record, encode_record,
+    SearchHit, Sort, Tag, TagKind, decode_record, encode_record,
 };
 use crate::posting::{self, Batch as FactBatch, Lane as PostingLane};
 use crate::trace::startup;
 
 const POSTS: TableDefinition<'_, u64, &[u8]> = TableDefinition::new("posts");
 const TAG_CHUNKS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("tag_chunks.v1");
+const TAG_KINDS: TableDefinition<'_, &str, u8> = TableDefinition::new("tag_kinds.v1");
 const RATING_CHUNKS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("rating_chunks.v1");
 const POSTING_FACTS: TableDefinition<'_, u64, &[u8]> = TableDefinition::new("posting_facts.v1");
 const SCORE_POSTS: TableDefinition<'_, u64, u32> = TableDefinition::new("score_posts");
@@ -59,6 +60,7 @@ pub struct SoftHit {
 
 #[derive(Clone, Debug)]
 pub struct TagSuggestion {
+    pub kind: TagKind,
     pub tag: String,
     pub posts: u64,
 }
@@ -109,6 +111,7 @@ impl Index {
             let mut score_table = tx.open_table(SCORE_POSTS).context("open score_posts")?;
             let mut fav_table = tx.open_table(FAV_POSTS).context("open fav_posts")?;
             let mut jina_table = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
+            let mut tag_kinds = tx.open_table(TAG_KINDS).context("open tag kind table")?;
             let mut facts = FactBatch::default();
 
             for post in posts {
@@ -141,6 +144,7 @@ impl Index {
                 }
 
                 let encoded = encode_record(post);
+                write_tag_kinds(&mut tag_kinds, post)?;
                 let _old_post = post_table
                     .insert(u64::from(post.id.0), encoded.as_slice())
                     .context("upsert post")?;
@@ -206,6 +210,7 @@ impl Index {
         };
         let tx = self.db.begin_read().context("begin tag suggestion read")?;
         let chunks = tx.open_table(TAG_CHUNKS).context("open tag chunks")?;
+        let kinds = tx.open_table(TAG_KINDS).context("open tag kind table")?;
         let facts = tx.open_table(POSTING_FACTS).context("open posting facts")?;
         let pending = pending_facts(&facts)?;
         let mut candidates = BTreeSet::new();
@@ -225,6 +230,7 @@ impl Index {
                 continue;
             };
             hits.push(TagSuggestion {
+                kind: read_tag_kind(&kinds, &tag_atom)?,
                 tag,
                 posts: read_tag_bitmap(&chunks, &pending, &tag_atom)?.len(),
             });
@@ -232,6 +238,12 @@ impl Index {
         hits.sort_unstable_by(|a, b| b.posts.cmp(&a.posts).then_with(|| a.tag.cmp(&b.tag)));
         hits.truncate(limit);
         Ok(hits)
+    }
+
+    pub fn tag_kind(&self, tag: &Tag) -> Result<TagKind> {
+        let tx = self.db.begin_read().context("begin tag kind read")?;
+        let kinds = tx.open_table(TAG_KINDS).context("open tag kind table")?;
+        read_tag_kind(&kinds, tag)
     }
 
     pub fn stats(&self) -> Result<CacheStats> {
@@ -477,6 +489,7 @@ impl Index {
         {
             let _posts = tx.open_table(POSTS).context("prime posts")?;
             let _tags = tx.open_table(TAG_CHUNKS).context("prime tag chunks")?;
+            let _tag_kinds = tx.open_table(TAG_KINDS).context("prime tag kinds")?;
             let _ratings = tx
                 .open_table(RATING_CHUNKS)
                 .context("prime rating chunks")?;
@@ -509,6 +522,7 @@ impl Index {
         }
         open!(POSTS);
         open!(TAG_CHUNKS);
+        open!(TAG_KINDS);
         open!(RATING_CHUNKS);
         open!(POSTING_FACTS);
         open!(SCORE_POSTS);
@@ -897,6 +911,24 @@ fn chunk_key(key: &str, chunk: u32) -> String {
 
 fn chunk_prefix(key: &str) -> String {
     format!("{key}\0")
+}
+
+fn write_tag_kinds(table: &mut redb::Table<'_, &str, u8>, post: &PostRecord) -> Result<()> {
+    for hint in &post.tag_hints {
+        let _old = table
+            .insert(hint.tag.as_str(), hint.kind.code())
+            .with_context(|| format!("write tag kind {}", hint.tag))?;
+    }
+    Ok(())
+}
+
+fn read_tag_kind(table: &impl redb::ReadableTable<&'static str, u8>, tag: &Tag) -> Result<TagKind> {
+    let kind = table
+        .get(tag.as_str())
+        .with_context(|| format!("read tag kind {tag}"))?
+        .and_then(|guard| TagKind::from_code(guard.value()))
+        .unwrap_or_default();
+    Ok(kind)
 }
 
 fn read_tag_bitmap(

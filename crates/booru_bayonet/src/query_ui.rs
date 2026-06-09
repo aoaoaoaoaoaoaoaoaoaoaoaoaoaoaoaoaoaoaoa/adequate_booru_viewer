@@ -1,6 +1,9 @@
 use eframe::egui;
 
-use crate::model::{BoolGroup, BoolOp, QueryAtom, QueryExpr};
+use crate::{
+    model::{BoolGroup, BoolOp, QueryAtom, QueryExpr, TagKind},
+    tag_chroma,
+};
 
 #[derive(Clone, Debug)]
 pub enum QueryAction {
@@ -16,9 +19,10 @@ pub fn render_query_tree(
     root: &QueryExpr,
     active: &[usize],
     actions: &mut Vec<QueryAction>,
+    tag_kind: &mut impl FnMut(&QueryAtom) -> TagKind,
 ) {
     let mut path = Vec::new();
-    render_query_expr(ui, root, &mut path, None, active, 0, actions);
+    render_query_expr(ui, root, &mut path, None, active, 0, actions, tag_kind);
 }
 
 fn render_query_expr(
@@ -29,15 +33,18 @@ fn render_query_expr(
     active: &[usize],
     depth: usize,
     actions: &mut Vec<QueryAction>,
+    tag_kind: &mut impl FnMut(&QueryAtom) -> TagKind,
 ) {
     let (negated, core) = expr.denote();
     match core {
-        QueryExpr::Atom { atom } => render_atom(ui, atom, negated, parent, actions),
+        QueryExpr::Atom { atom } => render_atom(ui, atom, negated, parent, actions, tag_kind),
         QueryExpr::Group { group } => {
-            render_group(ui, group, negated, path, parent, active, depth, actions);
+            render_group(
+                ui, group, negated, path, parent, active, depth, actions, tag_kind,
+            );
         }
         QueryExpr::Not { child } => {
-            render_query_expr(ui, child, path, parent, active, depth, actions);
+            render_query_expr(ui, child, path, parent, active, depth, actions, tag_kind);
         }
     }
 }
@@ -51,6 +58,7 @@ fn render_group(
     active: &[usize],
     depth: usize,
     actions: &mut Vec<QueryAction>,
+    tag_kind: &mut impl FnMut(&QueryAtom) -> TagKind,
 ) {
     let active_here = path.as_slice() == active;
     let frame = egui::Frame::group(ui.style())
@@ -98,6 +106,7 @@ fn render_group(
                 active,
                 depth + 1,
                 actions,
+                tag_kind,
             );
             let _old = path.pop();
         }
@@ -110,24 +119,15 @@ fn render_atom(
     negated: bool,
     parent: Option<(Vec<usize>, usize)>,
     actions: &mut Vec<QueryAction>,
+    tag_kind: &mut impl FnMut(&QueryAtom) -> TagKind,
 ) {
-    let text = if negated {
-        format!("¬ {atom}")
-    } else {
-        format!("+ {atom}")
-    };
-    let color = if negated {
-        egui::Color32::from_rgb(218, 150, 146)
-    } else {
-        egui::Color32::from_rgb(156, 204, 176)
-    };
     let _row = ui.horizontal(|ui| {
         if let Some((parent, child)) = parent
             && ui.small_button("×").clicked()
         {
             actions.push(QueryAction::RemoveChild { parent, child });
         }
-        let _label = ui.label(egui::RichText::new(text).color(color));
+        let _label = ui.label(tag_chroma::atom(atom, tag_kind(atom), negated));
     });
 }
 

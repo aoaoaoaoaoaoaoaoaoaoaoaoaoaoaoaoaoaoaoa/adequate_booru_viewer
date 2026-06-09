@@ -17,12 +17,15 @@ use crate::{
     index::{CacheStats, Index, TagSuggestion},
     media::{MediaCache, RgbaBlade, extension},
     model::{
-        BoolOp, Embedding, PostId, PostRecord, Query, QueryAtom, SearchHit, Sort, Tag, TagPolarity,
+        BoolOp, Embedding, PostId, PostRecord, Query, QueryAtom, SearchHit, Sort, Tag, TagKind,
+        TagPolarity,
     },
     query_ui::{QueryAction, render_query_tree},
+    tag_chroma,
     tag_menu::{
         HEIGHT as TAG_MENU_HEIGHT, TagMenu, WIDTH as TAG_MENU_WIDTH, position as tag_menu_pos,
     },
+    tag_palette,
     trace::startup,
     worker::{BladeEpoch, Command, Event, RefreshHit, SoftRefresh, Worker},
     xdg::{Lair, compact_path},
@@ -84,6 +87,7 @@ pub struct Bayonet {
     tile_scale: f32,
     tag_menu: TagMenu,
     tag_menu_rect: Option<egui::Rect>,
+    tag_kinds: HashMap<Tag, TagKind>,
     clip_inflight: HashSet<PostId>,
     cache_status: String,
     warm_status: String,
@@ -111,10 +115,11 @@ impl Bayonet {
         startup("app.worker.spawned");
         let saved_filters = filter_bank::sorted(config.filters.saved.clone());
         let active_filter = filter_bank::active(config.filters.active.clone(), &saved_filters);
-        let query = active_filter
+        let mut query = active_filter
             .as_ref()
             .and_then(|active| filter_bank::get(active, &saved_filters))
             .map_or_else(|| config.query.query(), |filter| filter.tree.clone());
+        query.sort_atoms();
         let sort = config.view.sort;
         let active_group = active_filter
             .as_ref()
@@ -164,6 +169,7 @@ impl Bayonet {
             tile_scale: config.view.tile_scale.clamp(MIN_TILE_SCALE, MAX_TILE_SCALE),
             tag_menu: TagMenu::Closed,
             tag_menu_rect: None,
+            tag_kinds: HashMap::new(),
             clip_inflight: HashSet::new(),
             cache_status: "cache measuring".to_owned(),
             warm_status: "query warm idle".to_owned(),
@@ -209,6 +215,8 @@ impl Bayonet {
     }
 
     fn install_query_at(&mut self, query: Query, active_group: Vec<usize>) {
+        let mut query = query;
+        query.sort_atoms();
         self.active_group = query.clamp_group_path(&active_group);
         self.query = query;
         self.advance_thumb_epoch();
@@ -257,6 +265,28 @@ impl Bayonet {
         let mut query = self.query.clone();
         query.remove_atom(&QueryAtom::Tag(tag));
         self.install_query(query);
+    }
+
+    fn tag_kind(&mut self, tag: &Tag) -> TagKind {
+        if let Some(kind) = self.tag_kinds.get(tag) {
+            return *kind;
+        }
+        let kind = match self.index.tag_kind(tag) {
+            Ok(kind) => kind,
+            Err(err) => {
+                self.status = format!("{err:#}");
+                TagKind::General
+            }
+        };
+        let _old = self.tag_kinds.insert(tag.clone(), kind);
+        kind
+    }
+
+    fn atom_kind(&mut self, atom: &QueryAtom) -> TagKind {
+        match atom {
+            QueryAtom::Tag(tag) => self.tag_kind(tag),
+            QueryAtom::Rating(_) => TagKind::Meta,
+        }
     }
 
     fn save_current_filter(&mut self) {
@@ -675,7 +705,10 @@ impl Bayonet {
             let _label = ui.label("complete");
             for suggestion in suggestions {
                 if ui
-                    .small_button(format!("{} ({})", suggestion.tag, suggestion.posts))
+                    .small_button(tag_chroma::text(
+                        format!("{} ({})", suggestion.tag, suggestion.posts),
+                        suggestion.kind,
+                    ))
                     .clicked()
                 {
                     self.complete_active(&suggestion, prefix.negative);
@@ -713,7 +746,9 @@ impl Bayonet {
         if query.is_empty() {
             let _empty = ui.label("neutral");
         }
-        render_query_tree(ui, query.root(), &active_group, &mut actions);
+        render_query_tree(ui, query.root(), &active_group, &mut actions, &mut |atom| {
+            self.atom_kind(atom)
+        });
         let _separator = ui.separator();
         let _active = ui.horizontal_wrapped(|ui| {
             let _label = ui.label("active");
@@ -922,6 +957,7 @@ impl Bayonet {
 
     fn tag_palette(&mut self, ui: &mut egui::Ui, post: &PostRecord) {
         let query = self.query();
+        let groups = tag_palette::grouped(post, |tag| self.tag_kind(tag));
         let _heading = ui.label(format!(
             "#{}  score {}  fav {}",
             post.id, post.score, post.favs
@@ -930,22 +966,25 @@ impl Bayonet {
         let _scroll = egui::ScrollArea::vertical()
             .max_height(TAG_MENU_HEIGHT)
             .show(ui, |ui| {
-                for tag in &post.tags {
-                    let active = query.polarity(tag);
-                    let _row = ui.horizontal(|ui| {
-                        if ui.small_button("-").clicked() {
-                            self.set_tag(tag.as_str(), TagPolarity::Negative);
-                        }
-                        if active.is_some() && ui.small_button("×").clicked() {
-                            self.remove_tag(tag.as_str());
-                        } else if active.is_none() {
-                            ui.add_space(18.0);
-                        }
-                        let _tag = ui.label(tag.as_str());
-                        if ui.small_button("+").clicked() {
-                            self.set_tag(tag.as_str(), TagPolarity::Positive);
-                        }
-                    });
+                for (kind, tags) in groups {
+                    let _kind = ui.label(tag_chroma::text(kind.label(), kind).strong());
+                    for tag in tags {
+                        let active = query.polarity(&tag);
+                        let _row = ui.horizontal(|ui| {
+                            if ui.small_button("-").clicked() {
+                                self.set_tag(tag.as_str(), TagPolarity::Negative);
+                            }
+                            if active.is_some() && ui.small_button("×").clicked() {
+                                self.remove_tag(tag.as_str());
+                            } else if active.is_none() {
+                                ui.add_space(18.0);
+                            }
+                            let _tag = ui.label(tag_chroma::text(tag.as_str(), kind));
+                            if ui.small_button("+").clicked() {
+                                self.set_tag(tag.as_str(), TagPolarity::Positive);
+                            }
+                        });
+                    }
                 }
             });
     }
