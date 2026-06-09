@@ -32,9 +32,9 @@ impl Bayonet {
     }
 
     fn dispatch_refresh(&mut self, serial: u64) {
-        let soft = self.soft_needle().cloned().map(|needle| SoftRefresh {
+        let soft = self.rank_needle().map(|needle| SoftRefresh {
             needle,
-            alpha: self.soft_alpha,
+            alpha: self.rank_alpha,
             limit: RESULT_LIMIT,
             pool: SOFT_POOL,
             backlog: SOFT_BACKLOG,
@@ -95,31 +95,22 @@ impl Bayonet {
                 let pool = hit.pool;
                 self.install_hit(hit.hit);
                 self.status = format!(
-                    "{} hits from {} candidates; clip {}/{} embedded, queued {}; α {:.2}",
-                    posts, candidates, embedded, pool, queued, self.soft_alpha
+                    "{} hits from {} candidates; image rank {}/{} embedded, queued {}; α {:.2}",
+                    posts, candidates, embedded, pool, queued, self.rank_alpha
                 );
             }
         }
     }
 
     fn install_hard_refresh(&mut self, hit: SearchHit) {
-        let soft_armed = self.soft_prompt().is_some();
-        let queued = if soft_armed {
-            self.queue_clip(hit.posts.clone())
-        } else {
-            0
-        };
+        let rank_armed = self.rank_alpha > 0.0 && !self.rank_pins.is_empty();
         let posts = hit.posts.len();
         let candidates = hit.candidates;
         self.install_hit(hit);
-        let requested = self.request_soft_prompt();
-        self.status = if soft_armed {
+        self.status = if rank_armed {
             format!(
-                "{} hits from {} candidates; clip text {}; queued {} visible images",
-                posts,
-                candidates,
-                if requested { "requested" } else { "pending" },
-                queued
+                "{} hits from {} candidates; waiting for pinned image embeddings",
+                posts, candidates
             )
         } else {
             format!(

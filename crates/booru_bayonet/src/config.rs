@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::model::{Query, Sort};
+use crate::model::{PostId, Query, Sort};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -14,15 +14,19 @@ pub struct Config {
     pub query: QueryConfig,
     pub filters: FilterConfig,
     pub view: ViewConfig,
-    pub soft: SoftConfig,
+    #[serde(default, alias = "soft")]
+    pub embedding: EmbeddingConfig,
 }
 
 impl Config {
     pub fn load(path: &Path) -> Result<Arc<Self>> {
         match std::fs::read_to_string(path) {
-            Ok(text) => toml::from_str::<Self>(&text)
-                .map(Arc::new)
-                .with_context(|| format!("parse {}", path.display())),
+            Ok(text) => {
+                let mut config = toml::from_str::<Self>(&text)
+                    .with_context(|| format!("parse {}", path.display()))?;
+                config.embedding.legacy_prompt.clear();
+                Ok(Arc::new(config))
+            }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Arc::new(Self::default())),
             Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
         }
@@ -141,16 +145,38 @@ impl Default for ViewConfig {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct SoftConfig {
-    pub prompt: String,
+pub struct EmbeddingConfig {
     pub alpha: f32,
+    pub pins: Vec<PinConfig>,
+    #[serde(default, rename = "prompt", skip_serializing)]
+    pub legacy_prompt: String,
 }
 
-impl Default for SoftConfig {
+impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
-            prompt: String::new(),
             alpha: 0.0,
+            pins: Vec::new(),
+            legacy_prompt: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinConfig {
+    pub id: PostId,
+    pub weight: u8,
+}
+
+impl PinConfig {
+    pub const MIN_WEIGHT: u8 = 1;
+    pub const MAX_WEIGHT: u8 = 6;
+
+    pub fn new(id: PostId, weight: u8) -> Self {
+        Self {
+            id,
+            weight: weight.clamp(Self::MIN_WEIGHT, Self::MAX_WEIGHT),
         }
     }
 }
@@ -182,7 +208,7 @@ mod tests {
                 )],
             },
             view: ViewConfig::default(),
-            soft: SoftConfig::default(),
+            embedding: EmbeddingConfig::default(),
         };
         let text = toml::to_string_pretty(&config)?;
         let roundtrip = toml::from_str::<Config>(&text)?;

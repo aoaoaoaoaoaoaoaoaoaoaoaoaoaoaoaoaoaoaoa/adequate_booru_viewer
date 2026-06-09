@@ -896,6 +896,27 @@ impl Embedding {
             .clamp(-1.0, 1.0)
     }
 
+    pub fn weighted<'a>(items: impl IntoIterator<Item = (f32, &'a Self)>) -> Result<Self> {
+        let mut values = vec![0.0; CLIP_DIM];
+        let mut total = 0.0_f32;
+        for (weight, embedding) in items {
+            if weight <= 0.0 {
+                continue;
+            }
+            total += weight;
+            for (out, lane) in values.iter_mut().zip(&embedding.values) {
+                *out += weight * lane;
+            }
+        }
+        if total <= f32::EPSILON {
+            bail!("weighted embedding has no positive mass");
+        }
+        for value in &mut values {
+            *value /= total;
+        }
+        Self::forge(values)
+    }
+
     fn normalize(&mut self) -> Result<()> {
         let norm = self.values.iter().map(|x| x * x).sum::<f32>().sqrt();
         if !norm.is_finite() || norm <= f32::EPSILON {

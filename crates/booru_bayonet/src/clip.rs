@@ -8,24 +8,17 @@ use ort::{
     value::{DynTensor, Tensor},
 };
 use std::{
-    collections::HashMap,
     io::Cursor,
     path::{Path, PathBuf},
     time::Duration,
 };
-use tokenizers::Tokenizer;
 use ureq::Agent;
 
 use crate::model::{CLIP_DIM, Embedding};
 
 const REPO: &str = "jinaai/jina-clip-v1";
 const REV: &str = "ceb3e44ca4d6eceaa4f3fb58b1c1a5748b3f29b6";
-const TEXT_MODEL: &str = "onnx/text_model_quantized.onnx";
 const VISION_MODEL: &str = "onnx/vision_model_quantized.onnx";
-const TOKENIZER: &str = "tokenizer.json";
-// The quantized Jina ONNX text export carries static sequence-axis constants at
-// 16. Feeding a longer tensor trips ORT broadcast checks inside attention.
-const TEXT_TOKENS: usize = 16;
 const IMAGE_SIZE: u32 = 224;
 const IMAGE_PIXELS: usize = IMAGE_SIZE as usize * IMAGE_SIZE as usize;
 const MODEL_BYTE_LIMIT: u64 = 600 * 1024 * 1024;
@@ -35,56 +28,22 @@ const CLIP_STD: [f32; 3] = [0.268_629_54, 0.261_302_6, 0.275_777_1];
 pub struct ClipForge {
     root: PathBuf,
     agent: Agent,
-    tokenizer: Tokenizer,
-    text: Session,
     vision: Option<Session>,
 }
 
 impl ClipForge {
-    pub fn new(root: PathBuf) -> Result<Self> {
+    pub fn new(root: PathBuf) -> Self {
         let agent = agent();
-        let tokenizer_path = ensure_file(&agent, &root, TOKENIZER)?;
-        let text_path = ensure_file(&agent, &root, TEXT_MODEL)?;
-        let tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|err| anyhow!("load tokenizer {}: {err}", tokenizer_path.display()))?;
-        let text = session(&text_path).context("load Jina CLIP text model")?;
-        Ok(Self {
+        Self {
             root,
             agent,
-            tokenizer,
-            text,
             vision: None,
-        })
-    }
-
-    pub fn text(&mut self, prompt: &str) -> Result<Embedding> {
-        let tokens = self.tokens(prompt)?;
-        let mut inputs = HashMap::<String, DynTensor>::new();
-        for name in self.text.inputs().iter().map(|input| input.name()) {
-            match name {
-                "input_ids" => {
-                    let tensor = Tensor::from_array(([1_usize, TEXT_TOKENS], tokens.ids.clone()))?;
-                    let _old = inputs.insert(name.to_owned(), tensor.upcast());
-                }
-                "attention_mask" => {
-                    let tensor = Tensor::from_array(([1_usize, TEXT_TOKENS], tokens.mask.clone()))?;
-                    let _old = inputs.insert(name.to_owned(), tensor.upcast());
-                }
-                "token_type_ids" => {
-                    let tensor =
-                        Tensor::from_array(([1_usize, TEXT_TOKENS], tokens.types.clone()))?;
-                    let _old = inputs.insert(name.to_owned(), tensor.upcast());
-                }
-                other => bail!("unsupported Jina CLIP text input `{other}`"),
-            }
         }
-        let outputs = self.text.run(inputs).context("run Jina CLIP text")?;
-        extract_embedding(&outputs, "text_embeds")
     }
 
     pub fn image(&mut self, bytes: &[u8]) -> Result<Embedding> {
         let pixels = pixels(bytes)?;
-        let mut inputs = HashMap::<String, DynTensor>::new();
+        let mut inputs = std::collections::HashMap::<String, DynTensor>::new();
         for name in self.vision()?.inputs().iter().map(|input| input.name()) {
             match name {
                 "pixel_values" => {
@@ -101,35 +60,6 @@ impl ClipForge {
         extract_embedding(&outputs, "image_embeds")
     }
 
-    fn tokens(&self, prompt: &str) -> Result<Tokens> {
-        let encoding = self
-            .tokenizer
-            .encode(prompt, true)
-            .map_err(|err| anyhow!("tokenize CLIP prompt: {err}"))?;
-        let mut ids = encoding
-            .get_ids()
-            .iter()
-            .take(TEXT_TOKENS)
-            .map(|&id| i64::from(id))
-            .collect::<Vec<_>>();
-        let mut mask = encoding
-            .get_attention_mask()
-            .iter()
-            .take(TEXT_TOKENS)
-            .map(|&x| i64::from(x))
-            .collect::<Vec<_>>();
-        let mut types = encoding
-            .get_type_ids()
-            .iter()
-            .take(TEXT_TOKENS)
-            .map(|&x| i64::from(x))
-            .collect::<Vec<_>>();
-        ids.resize(TEXT_TOKENS, 0);
-        mask.resize(TEXT_TOKENS, 0);
-        types.resize(TEXT_TOKENS, 0);
-        Ok(Tokens { ids, mask, types })
-    }
-
     fn vision(&mut self) -> Result<&mut Session> {
         if self.vision.is_none() {
             let path = ensure_file(&self.agent, &self.root, VISION_MODEL)?;
@@ -137,12 +67,6 @@ impl ClipForge {
         }
         self.vision.as_mut().context("vision session missing")
     }
-}
-
-struct Tokens {
-    ids: Vec<i64>,
-    mask: Vec<i64>,
-    types: Vec<i64>,
 }
 
 fn agent() -> Agent {

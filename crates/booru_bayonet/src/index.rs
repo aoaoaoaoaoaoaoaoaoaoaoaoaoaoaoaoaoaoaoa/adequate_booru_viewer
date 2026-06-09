@@ -183,6 +183,26 @@ impl Index {
             .map(|guard| guard.is_some())
     }
 
+    pub fn embedding(&self, id: PostId) -> Result<Option<Embedding>> {
+        let tx = self.db.begin_read().context("begin embedding read")?;
+        let table = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
+        table
+            .get(u64::from(id.0))
+            .context("read Jina image embedding")?
+            .map(|guard| decode_embedding(guard.value()))
+            .transpose()
+    }
+
+    pub fn post(&self, id: PostId) -> Result<Option<PostRecord>> {
+        let tx = self.db.begin_read().context("begin post read")?;
+        let table = tx.open_table(POSTS).context("open posts")?;
+        table
+            .get(u64::from(id.0))
+            .context("read post")?
+            .map(|guard| decode_record(guard.value()))
+            .transpose()
+    }
+
     pub fn crawl_before(&self) -> Result<Option<PostId>> {
         let tx = self.db.begin_read().context("begin crawl cursor read")?;
         let table = tx.open_table(META).context("open meta")?;

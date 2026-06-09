@@ -1,6 +1,7 @@
 use eframe::egui;
 
 use crate::{
+    chrome,
     model::{BoolGroup, BoolOp, QueryAtom, QueryExpr, TagKind},
     tag_chroma,
 };
@@ -67,7 +68,8 @@ fn render_group(
     let _frame = frame.show(ui, |ui| {
         let _header = ui.horizontal_wrapped(|ui| {
             if ui
-                .selectable_label(active_here, group_title(path))
+                .selectable_label(active_here, group_label(path, active_here))
+                .on_hover_text("click to target this group for new tags")
                 .clicked()
             {
                 actions.push(QueryAction::Select { path: path.clone() });
@@ -145,6 +147,14 @@ fn group_title(path: &[usize]) -> String {
     }
 }
 
+fn group_label(path: &[usize], active: bool) -> String {
+    if active {
+        format!("◆ {} target", group_title(path))
+    } else {
+        format!("◇ {}", group_title(path))
+    }
+}
+
 fn group_fill(depth: usize) -> egui::Color32 {
     const PALETTE: [(u8, u8, u8); 6] = [
         (86, 105, 143),
@@ -155,7 +165,8 @@ fn group_fill(depth: usize) -> egui::Color32 {
         (137, 91, 98),
     ];
     let (r, g, b) = PALETTE[depth % PALETTE.len()];
-    egui::Color32::from_rgba_unmultiplied(r, g, b, 28)
+    let alpha = if depth == 0 { 40 } else { 30 };
+    egui::Color32::from_rgba_unmultiplied(r, g, b, alpha)
 }
 
 fn group_stroke(depth: usize, active: bool) -> egui::Stroke {
@@ -169,7 +180,7 @@ fn group_stroke(depth: usize, active: bool) -> egui::Stroke {
     ];
     let (r, g, b) = PALETTE[depth % PALETTE.len()];
     if active {
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(r, g, b))
+        egui::Stroke::new(2.0, chrome::HOT)
     } else {
         egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(r, g, b, 96))
     }

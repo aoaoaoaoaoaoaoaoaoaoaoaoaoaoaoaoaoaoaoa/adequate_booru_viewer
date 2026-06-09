@@ -70,9 +70,6 @@ pub enum Command {
         url: Option<String>,
         path: PathBuf,
     },
-    SoftText {
-        prompt: String,
-    },
     EmbedPosts {
         posts: Vec<PostRecord>,
     },
@@ -129,10 +126,6 @@ pub enum Event {
     MediaSaveFault {
         id: PostId,
         fault: String,
-    },
-    SoftText {
-        prompt: String,
-        embedding: Embedding,
     },
     ClipIndexed {
         ids: Vec<PostId>,
@@ -268,7 +261,7 @@ impl Worker {
                 .media_tx
                 .send(MediaCommand::Save { id, url, path })
                 .context("send media worker command"),
-            command @ (Command::SoftText { .. } | Command::EmbedPosts { .. }) => self
+            command @ Command::EmbedPosts { .. } => self
                 .clip_tx
                 .send(command)
                 .context("send CLIP worker command"),
@@ -526,10 +519,6 @@ fn clip_loop(
     let mut clip = None;
     for command in commands {
         let outcome = match command {
-            Command::SoftText { prompt } => forge(&mut clip, &model_root).and_then(|clip| {
-                clip.text(&prompt)
-                    .map(|embedding| Event::SoftText { prompt, embedding })
-            }),
             Command::EmbedPosts { posts } => {
                 forge(&mut clip, &model_root).map(|clip| embed_posts(&index, &media, clip, posts))
             }
@@ -683,7 +672,7 @@ impl RateGate {
 
 fn forge<'a>(clip: &'a mut Option<ClipForge>, model_root: &Path) -> Result<&'a mut ClipForge> {
     if clip.is_none() {
-        *clip = Some(ClipForge::new(model_root.to_path_buf())?);
+        *clip = Some(ClipForge::new(model_root.to_path_buf()));
     }
     clip.as_mut().context("CLIP forge missing")
 }

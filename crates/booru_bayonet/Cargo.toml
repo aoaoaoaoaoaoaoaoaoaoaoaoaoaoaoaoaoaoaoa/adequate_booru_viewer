@@ -17,7 +17,6 @@ redb = "4.1.0"
 rfd = "0.17.2"
 roaring = "0.11.4"
 serde = { version = "1.0.228", features = ["derive"] }
-tokenizers = { version = "0.23.1", default-features = false, features = ["onig"] }
 toml = "1.1.2"
 ureq = { version = "3.3.0", features = ["json"] }
 

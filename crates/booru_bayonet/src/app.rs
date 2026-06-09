@@ -12,7 +12,11 @@ use std::{
 };
 
 use crate::{
-    config::{Config, FilterConfig, FilterName, QueryConfig, SavedFilter, SoftConfig, ViewConfig},
+    chrome,
+    config::{
+        Config, EmbeddingConfig, FilterConfig, FilterName, PinConfig, QueryConfig, SavedFilter,
+        ViewConfig,
+    },
     filter_bank,
     index::{CacheStats, Index, TagSuggestion},
     media::{MediaCache, RgbaBlade, extension},
@@ -32,6 +36,7 @@ use crate::{
     xdg::{Lair, compact_path},
 };
 
+mod panels;
 mod refresh;
 
 use refresh::AsyncPulse;
@@ -48,6 +53,7 @@ const MIN_TILE_SCALE: f32 = 0.5;
 const MAX_TILE_SCALE: f32 = 3.0;
 const GAP: f32 = 8.0;
 const VIEWER_CHROME: f32 = 40.0;
+const MAX_PINS: usize = 6;
 
 pub struct Bayonet {
     lair: Lair,
@@ -59,11 +65,8 @@ pub struct Bayonet {
     filter_name_entry: String,
     active_filter: Option<FilterName>,
     saved_filters: Vec<SavedFilter>,
-    soft_text: String,
-    soft_alpha: f32,
-    soft_prompt: Option<String>,
-    soft_embedding: Option<Embedding>,
-    soft_requested: Option<String>,
+    rank_alpha: f32,
+    rank_pins: Vec<RankPin>,
     sort: Sort,
     refresh_serial: u64,
     refresh_pulse: AsyncPulse,
@@ -129,6 +132,7 @@ impl Bayonet {
                 || query.clamp_group_path(&config.query.active_group),
                 |filter| query.clamp_group_path(&filter.active_group),
             );
+        let rank_pins = restore_rank_pins(&index, &config.embedding.pins)?;
         let mut app = Self {
             status: format!("index {}", compact_path(&lair.index_path())),
             crawl_status: "crawl waking".to_owned(),
@@ -141,11 +145,8 @@ impl Bayonet {
             filter_name_entry: String::new(),
             active_filter,
             saved_filters,
-            soft_text: config.soft.prompt.clone(),
-            soft_alpha: config.soft.alpha.clamp(0.0, 2.0),
-            soft_prompt: None,
-            soft_embedding: None,
-            soft_requested: None,
+            rank_alpha: config.embedding.alpha.clamp(0.0, 2.0),
+            rank_pins,
             sort,
             refresh_serial: 0,
             refresh_pulse: AsyncPulse::Idle,
@@ -392,35 +393,6 @@ impl Bayonet {
         }
     }
 
-    fn soft_prompt(&self) -> Option<String> {
-        let prompt = self.soft_text.trim();
-        (self.soft_alpha > 0.0 && !prompt.is_empty()).then(|| prompt.to_owned())
-    }
-
-    fn soft_needle(&self) -> Option<&Embedding> {
-        let prompt = self.soft_prompt()?;
-        (self.soft_prompt.as_deref() == Some(prompt.as_str()))
-            .then_some(self.soft_embedding.as_ref())
-            .flatten()
-    }
-
-    fn request_soft_prompt(&mut self) -> bool {
-        let Some(prompt) = self.soft_prompt() else {
-            return false;
-        };
-        if self.soft_prompt.as_deref() == Some(prompt.as_str())
-            || self.soft_requested.as_deref() == Some(prompt.as_str())
-        {
-            return false;
-        }
-        self.soft_requested = Some(prompt.clone());
-        if let Err(err) = self.worker.send(Command::SoftText { prompt }) {
-            self.status = format!("{err:#}");
-            return false;
-        }
-        true
-    }
-
     fn queue_clip(&mut self, posts: Vec<PostRecord>) -> usize {
         let posts = posts
             .into_iter()
@@ -434,6 +406,81 @@ impl Bayonet {
             self.status = format!("{err:#}");
         }
         queued
+    }
+
+    fn rank_needle(&mut self) -> Option<Embedding> {
+        if self.rank_alpha <= 0.0 || self.rank_pins.is_empty() {
+            return None;
+        }
+        let mut embeddings = Vec::<(f32, Embedding)>::new();
+        let mut missing = Vec::new();
+        for pin in &self.rank_pins {
+            match self.index.embedding(pin.post.id) {
+                Ok(Some(embedding)) => embeddings.push((f32::from(pin.weight), embedding)),
+                Ok(None) => missing.push(pin.post.clone()),
+                Err(err) => {
+                    self.status = format!("{err:#}");
+                    return None;
+                }
+            }
+        }
+        if !missing.is_empty() {
+            let queued = self.queue_clip(missing);
+            if queued > 0 {
+                self.status = format!("queued {queued} pinned images for embedding");
+            }
+        }
+        if embeddings.is_empty() {
+            return None;
+        }
+        Embedding::weighted(
+            embeddings
+                .iter()
+                .map(|(weight, embedding)| (*weight, embedding)),
+        )
+        .map_err(|err| {
+            self.status = format!("{err:#}");
+        })
+        .ok()
+    }
+
+    fn pin_weight(&self, id: PostId) -> Option<u8> {
+        self.rank_pins
+            .iter()
+            .find(|pin| pin.post.id == id)
+            .map(|pin| pin.weight)
+    }
+
+    fn add_pin(&mut self, post: &PostRecord) {
+        if let Some(pin) = self.rank_pins.iter_mut().find(|pin| pin.post.id == post.id) {
+            pin.weight = pin.weight.saturating_add(1).min(PinConfig::MAX_WEIGHT);
+        } else if self.rank_pins.len() < MAX_PINS {
+            self.rank_pins.push(RankPin::new(post.clone(), 1));
+        } else {
+            self.status = format!("pin heap is full ({MAX_PINS})");
+            return;
+        }
+        self.save_config();
+        self.request_refresh();
+    }
+
+    fn weaken_pin(&mut self, id: PostId) {
+        let Some(slot) = self.rank_pins.iter().position(|pin| pin.post.id == id) else {
+            return;
+        };
+        if self.rank_pins[slot].weight > PinConfig::MIN_WEIGHT {
+            self.rank_pins[slot].weight -= 1;
+        } else {
+            let _removed = self.rank_pins.remove(slot);
+        }
+        self.save_config();
+        self.request_refresh();
+    }
+
+    fn remove_pin(&mut self, id: PostId) {
+        self.rank_pins.retain(|pin| pin.post.id != id);
+        self.save_config();
+        self.request_refresh();
     }
 
     fn align_warm(&mut self, query: &Query) {
@@ -595,17 +642,6 @@ impl Bayonet {
                     self.status = format!("save #{id} failed: {fault}");
                     ctx.request_repaint();
                 }
-                Event::SoftText { prompt, embedding } => {
-                    if self.soft_requested.as_deref() == Some(prompt.as_str()) {
-                        self.soft_requested = None;
-                    }
-                    if self.soft_prompt().as_deref() == Some(prompt.as_str()) {
-                        self.soft_prompt = Some(prompt);
-                        self.soft_embedding = Some(embedding);
-                        self.request_refresh();
-                    }
-                    ctx.request_repaint();
-                }
                 Event::ClipIndexed {
                     ids,
                     stored,
@@ -674,215 +710,6 @@ impl Bayonet {
         ctx.request_repaint();
     }
 
-    fn top(&mut self, ui: &mut egui::Ui) {
-        let _bar = ui.horizontal(|ui| {
-            for sort in Sort::ALL {
-                if ui
-                    .selectable_label(self.sort == sort, sort.label())
-                    .clicked()
-                {
-                    self.sort = sort;
-                    self.save_config();
-                    self.strike(true, AUTO_WARM_PAGES);
-                }
-            }
-
-            if ui.button("warm +200").clicked() {
-                self.strike(true, 1);
-            }
-            if ui.button("ransack +1000").clicked() {
-                self.strike(true, 5);
-            }
-            let _zoom = ui.label(format!("thumb {:.0}px", self.tile_edge()));
-        });
-        let _soft = ui.horizontal(|ui| {
-            let _label = ui.label("soft");
-            let prompt = ui.text_edit_singleline(&mut self.soft_text);
-            if prompt.changed() {
-                self.save_config();
-                self.strike(false, 0);
-            }
-            let slider = egui::Slider::new(&mut self.soft_alpha, 0.0..=2.0)
-                .text("clip α")
-                .fixed_decimals(2);
-            if ui.add(slider).changed() {
-                self.save_config();
-                self.strike(false, 0);
-            }
-            if ui.button("embed visible").clicked() {
-                let queued = self.queue_clip(self.hit.posts.clone());
-                self.status = format!("queued {queued} visible images for Jina CLIP");
-            }
-        });
-        let _label = ui.label(format!(
-            "{}; {}; {}; {}",
-            self.status, self.cache_status, self.warm_status, self.crawl_status
-        ));
-    }
-
-    fn autocomplete(&mut self, ui: &mut egui::Ui) {
-        let Some(prefix) = active_prefix(&self.tag_entry) else {
-            return;
-        };
-        let suggestions = match self.index.tag_suggestions(&prefix.body, SUGGESTIONS) {
-            Ok(suggestions) => suggestions,
-            Err(err) => {
-                self.status = format!("{err:#}");
-                return;
-            }
-        };
-        if suggestions.is_empty() {
-            return;
-        }
-        let _row = ui.horizontal_wrapped(|ui| {
-            let _label = ui.label("complete");
-            for suggestion in suggestions {
-                if ui
-                    .small_button(tag_chroma::text(
-                        format!("{} ({})", suggestion.tag, suggestion.posts),
-                        suggestion.kind,
-                    ))
-                    .clicked()
-                {
-                    self.complete_active(&suggestion, prefix.negative);
-                }
-            }
-        });
-    }
-
-    fn complete_active(&mut self, suggestion: &TagSuggestion, negative: bool) {
-        let polarity = if negative {
-            TagPolarity::Negative
-        } else {
-            TagPolarity::Positive
-        };
-        if let Some(tag) = Tag::forge(&suggestion.tag) {
-            self.add_atom(QueryAtom::Tag(tag), polarity);
-        }
-        self.tag_entry.clear();
-    }
-
-    fn left_panel(&mut self, ui: &mut egui::Ui) {
-        let query = self.query.clone();
-        let active_group = self.active_group.clone();
-        let mut actions = Vec::new();
-        let _heading = ui.heading("filter");
-        let entry = ui.text_edit_singleline(&mut self.tag_entry);
-        let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
-        if enter && (entry.has_focus() || entry.lost_focus()) {
-            self.commit_tag_entry();
-        }
-        self.autocomplete(ui);
-        let _hint =
-            ui.label("enter targets the highlighted group; -foo inserts NOT foo; rating:q works.");
-        let _separator = ui.separator();
-        if query.is_empty() {
-            let _empty = ui.label("neutral");
-        }
-        render_query_tree(ui, query.root(), &active_group, &mut actions, &mut |atom| {
-            self.atom_kind(atom)
-        });
-        let _separator = ui.separator();
-        let _active = ui.horizontal_wrapped(|ui| {
-            let _label = ui.label("active");
-            for op in BoolOp::ALL {
-                let selected = self
-                    .query
-                    .group(&self.active_group)
-                    .is_some_and(|group| group.op == op);
-                if ui.selectable_label(selected, op.label()).clicked() {
-                    actions.push(QueryAction::SetOp {
-                        path: self.active_group.clone(),
-                        op,
-                    });
-                }
-            }
-            if ui.button("add group").clicked() {
-                actions.push(QueryAction::AddGroup { op: BoolOp::And });
-            }
-            if ui.button("NOT active").clicked() {
-                actions.push(QueryAction::ToggleNot {
-                    path: self.active_group.clone(),
-                });
-            }
-        });
-        self.apply_query_actions(actions);
-        let _separator = ui.separator();
-        self.saved_filter_panel(ui);
-        let _cache = ui.label(&self.cache_status);
-    }
-
-    fn saved_filter_panel(&mut self, ui: &mut egui::Ui) {
-        for action in saved_filter_ui::render(
-            ui,
-            &mut self.filter_name_entry,
-            self.active_filter.as_ref(),
-            &self.saved_filters,
-        ) {
-            match action {
-                SavedFilterAction::New => self.new_filter(),
-                SavedFilterAction::Save => self.save_current_filter(),
-                SavedFilterAction::Rename => self.rename_filter(),
-                SavedFilterAction::Load(filter) => self.load_filter(filter),
-                SavedFilterAction::Clone(name) => self.clone_filter(&name),
-                SavedFilterAction::Delete(name) => self.delete_filter(&name),
-            }
-        }
-    }
-
-    fn commit_tag_entry(&mut self) {
-        let terms = Query::parse_terms(&self.tag_entry);
-        if terms.is_empty() {
-            return;
-        }
-        let mut query = self.query.clone();
-        for term in terms {
-            let _inserted = query.push_atom(&self.active_group, term.atom, term.polarity);
-        }
-        self.tag_entry.clear();
-        self.install_query(query);
-    }
-
-    fn apply_query_actions(&mut self, actions: Vec<QueryAction>) {
-        for action in actions {
-            self.apply_query_action(action);
-        }
-    }
-
-    fn apply_query_action(&mut self, action: QueryAction) {
-        match action {
-            QueryAction::Select { path } => {
-                self.active_group = self.query.clamp_group_path(&path);
-                self.sync_active_filter();
-                self.save_config();
-            }
-            QueryAction::SetOp { path, op } => {
-                let mut query = self.query.clone();
-                if query.set_group_op(&path, op) {
-                    self.install_query(query);
-                }
-            }
-            QueryAction::ToggleNot { path } => {
-                let mut query = self.query.clone();
-                if query.toggle_not(&path) {
-                    self.install_query(query);
-                }
-            }
-            QueryAction::RemoveChild { parent, child } => {
-                let mut query = self.query.clone();
-                if query.remove_child(&parent, child) {
-                    self.install_query_at(query, parent);
-                }
-            }
-            QueryAction::AddGroup { op } => {
-                let mut query = self.query.clone();
-                if let Some(path) = query.push_group(&self.active_group, op) {
-                    self.install_query_at(query, path);
-                }
-            }
-        }
-    }
-
     fn grid(&mut self, ui: &mut egui::Ui) -> bool {
         let tile = self.tile_edge();
         let width = ui.available_width().max(tile);
@@ -924,6 +751,9 @@ impl Bayonet {
                 Some(ThumbLoad::Loading) => paint_tile_text(ui, rect, "loading"),
                 Some(ThumbLoad::Fault) => paint_tile_text(ui, rect, "fault"),
                 None => paint_tile_text(ui, rect, "no image"),
+            }
+            if let Some(weight) = self.pin_weight(post.id) {
+                paint_pin_badge(ui, rect, weight);
             }
             if response.clicked() && !self.tag_menu.is_open() {
                 self.open_full(post);
@@ -971,6 +801,25 @@ impl Bayonet {
             "#{}  score {}  fav {}",
             post.id, post.score, post.favs
         ));
+        let _pins = ui.horizontal(|ui| {
+            let weight = self.pin_weight(post.id).unwrap_or(0);
+            let _label = ui.label(chrome::muted(format!("pin weight {weight}/6")));
+            if ui.small_button("pin +").clicked() {
+                self.add_pin(post);
+            }
+            if ui
+                .add_enabled(weight > 0, egui::Button::new("pin -").small())
+                .clicked()
+            {
+                self.weaken_pin(post.id);
+            }
+            if ui
+                .add_enabled(weight > 0, egui::Button::new("unpin").small())
+                .clicked()
+            {
+                self.remove_pin(post.id);
+            }
+        });
         let _separator = ui.separator();
         let _scroll = egui::ScrollArea::vertical()
             .max_height(TAG_MENU_HEIGHT)
@@ -1238,9 +1087,10 @@ impl Bayonet {
                 sort: self.sort,
                 tile_scale: self.tile_scale,
             },
-            soft: SoftConfig {
-                prompt: self.soft_text.clone(),
-                alpha: self.soft_alpha,
+            embedding: EmbeddingConfig {
+                alpha: self.rank_alpha,
+                pins: self.rank_pins.iter().map(RankPin::config).collect(),
+                legacy_prompt: String::new(),
             },
         };
         if let Err(err) = config.save(&self.lair.config_path()) {
@@ -1278,6 +1128,33 @@ enum ThumbLoad<'a> {
 enum ZoomGate {
     Fresh,
     Armed,
+}
+
+#[derive(Clone, Debug)]
+struct RankPin {
+    post: PostRecord,
+    weight: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PinAction {
+    Changed,
+    Weaken(PostId),
+    Remove(PostId),
+    Clear,
+}
+
+impl RankPin {
+    fn new(post: PostRecord, weight: u8) -> Self {
+        Self {
+            post,
+            weight: weight.clamp(PinConfig::MIN_WEIGHT, PinConfig::MAX_WEIGHT),
+        }
+    }
+
+    fn config(&self) -> PinConfig {
+        PinConfig::new(self.post.id, self.weight)
+    }
 }
 
 impl BladeKind {
@@ -1367,6 +1244,16 @@ fn active_prefix(text: &str) -> Option<ActivePrefix> {
     })
 }
 
+fn restore_rank_pins(index: &Index, pins: &[PinConfig]) -> Result<Vec<RankPin>> {
+    let mut restored = Vec::new();
+    for pin in pins.iter().take(MAX_PINS) {
+        if let Some(post) = index.post(pin.id)? {
+            restored.push(RankPin::new(post, pin.weight));
+        }
+    }
+    Ok(restored)
+}
+
 fn posts_changed(old: &[PostRecord], new: &[PostRecord]) -> bool {
     old.len() != new.len()
         || old
@@ -1382,6 +1269,24 @@ fn paint_tile_text(ui: &egui::Ui, rect: egui::Rect, text: &str) {
         text,
         egui::TextStyle::Body.resolve(ui.style()),
         ui.visuals().text_color(),
+    );
+}
+
+fn paint_pin_badge(ui: &egui::Ui, rect: egui::Rect, weight: u8) {
+    let badge = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 6.0), egui::vec2(34.0, 20.0));
+    let _fill = ui.painter().rect_filled(badge, 0.0, chrome::RAISED);
+    let _stroke = ui.painter().rect_stroke(
+        badge,
+        0.0,
+        egui::Stroke::new(1.0, chrome::HOT),
+        egui::StrokeKind::Inside,
+    );
+    let _text = ui.painter().text(
+        badge.center(),
+        egui::Align2::CENTER_CENTER,
+        format!("◆{weight}"),
+        egui::TextStyle::Button.resolve(ui.style()),
+        chrome::HOT,
     );
 }
 
@@ -1470,10 +1375,10 @@ impl App for Bayonet {
 impl Bayonet {
     fn paint(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        let _edge = egui::Panel::top("edge").show_inside(ui, |ui| self.top(ui));
+        chrome::install(&ctx);
         let _left = egui::Panel::left("filter")
             .resizable(true)
-            .default_size(220.0)
+            .default_size(360.0)
             .show_inside(ui, |ui| self.left_panel(ui));
         let prior = self.tag_menu.post_id();
         self.tag_menu_rect = None;

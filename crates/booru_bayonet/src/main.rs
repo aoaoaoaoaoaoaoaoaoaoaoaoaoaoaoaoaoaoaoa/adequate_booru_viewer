@@ -1,5 +1,6 @@
 mod app;
 mod booru;
+mod chrome;
 mod clip;
 mod config;
 mod filter_bank;
