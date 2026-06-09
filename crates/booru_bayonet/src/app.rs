@@ -13,8 +13,9 @@ use std::{
 
 use crate::{
     config::{Config, FilterConfig, FilterName, QueryConfig, SavedFilter, SoftConfig, ViewConfig},
+    filter_bank,
     index::{CacheStats, Index, TagSuggestion},
-    media::{MediaCache, RgbaBlade},
+    media::{MediaCache, RgbaBlade, extension},
     model::{
         BoolOp, Embedding, PostId, PostRecord, Query, QueryAtom, SearchHit, Sort, Tag, TagPolarity,
     },
@@ -52,6 +53,7 @@ pub struct Bayonet {
     active_group: Vec<usize>,
     tag_entry: String,
     filter_name_entry: String,
+    active_filter: Option<FilterName>,
     saved_filters: Vec<SavedFilter>,
     soft_text: String,
     soft_alpha: f32,
@@ -107,9 +109,20 @@ impl Bayonet {
         startup("app.media.opened");
         let worker = Worker::spawn(index.clone(), media, lair.model_dir());
         startup("app.worker.spawned");
-        let query = config.query.query();
+        let saved_filters = filter_bank::sorted(config.filters.saved.clone());
+        let active_filter = filter_bank::active(config.filters.active.clone(), &saved_filters);
+        let query = active_filter
+            .as_ref()
+            .and_then(|active| filter_bank::get(active, &saved_filters))
+            .map_or_else(|| config.query.query(), |filter| filter.tree.clone());
         let sort = config.view.sort;
-        let active_group = query.clamp_group_path(&config.query.active_group);
+        let active_group = active_filter
+            .as_ref()
+            .and_then(|active| filter_bank::get(active, &saved_filters))
+            .map_or_else(
+                || query.clamp_group_path(&config.query.active_group),
+                |filter| query.clamp_group_path(&filter.active_group),
+            );
         let mut app = Self {
             status: format!("index {}", compact_path(&lair.index_path())),
             crawl_status: "crawl waking".to_owned(),
@@ -120,7 +133,8 @@ impl Bayonet {
             active_group,
             tag_entry: String::new(),
             filter_name_entry: String::new(),
-            saved_filters: sorted_filters(config.filters.saved.clone()),
+            active_filter,
+            saved_filters,
             soft_text: config.soft.prompt.clone(),
             soft_alpha: config.soft.alpha.clamp(0.0, 2.0),
             soft_prompt: None,
@@ -200,6 +214,7 @@ impl Bayonet {
         self.advance_thumb_epoch();
         let query = self.query.clone();
         self.align_warm(&query);
+        self.sync_active_filter();
         self.save_config();
         self.strike(true, AUTO_WARM_PAGES);
     }
@@ -246,24 +261,38 @@ impl Bayonet {
 
     fn save_current_filter(&mut self) {
         let typed = FilterName::forge(&self.filter_name_entry);
-        let name = typed
-            .clone()
-            .unwrap_or_else(|| spare_filter_name(&self.query, &self.saved_filters));
-        let filter = SavedFilter::new(name.clone(), self.query.clone(), self.active_group.clone());
-        match self
-            .saved_filters
-            .binary_search_by(|probe| probe.name.cmp(&filter.name))
-        {
-            Ok(slot) => self.saved_filters[slot] = filter,
-            Err(slot) => self.saved_filters.insert(slot, filter),
-        }
+        let name = typed.unwrap_or_else(|| {
+            self.active_filter
+                .clone()
+                .unwrap_or_else(|| filter_bank::spare(&self.query, &self.saved_filters))
+        });
+        self.upsert_filter(name.clone(), self.query.clone(), self.active_group.clone());
+        self.active_filter = Some(name.clone());
         self.filter_name_entry.clear();
         self.status = format!("saved filter `{name}`");
         self.save_config();
     }
 
     fn load_filter(&mut self, filter: SavedFilter) {
-        self.filter_name_entry = filter.name.to_string();
+        self.active_filter = Some(filter.name.clone());
+        self.filter_name_entry.clear();
+        self.status = format!("active filter `{}`", filter.name);
+        self.install_query_at(filter.tree, filter.active_group);
+    }
+
+    fn clone_filter(&mut self, name: &FilterName) {
+        let Some(filter) = filter_bank::get(name, &self.saved_filters).cloned() else {
+            return;
+        };
+        let name = filter_bank::spare_named(&filter.name, &self.saved_filters);
+        self.upsert_filter(
+            name.clone(),
+            filter.tree.clone(),
+            filter.active_group.clone(),
+        );
+        self.active_filter = Some(name.clone());
+        self.filter_name_entry.clear();
+        self.status = format!("cloned filter `{name}`");
         self.install_query_at(filter.tree, filter.active_group);
     }
 
@@ -275,8 +304,29 @@ impl Bayonet {
             return;
         };
         let removed = self.saved_filters.remove(slot);
+        if self.active_filter.as_ref() == Some(&removed.name) {
+            self.active_filter = None;
+        }
         self.status = format!("deleted filter `{}`", removed.name);
         self.save_config();
+    }
+
+    fn sync_active_filter(&mut self) {
+        let Some(name) = self.active_filter.clone() else {
+            return;
+        };
+        self.upsert_filter(name, self.query.clone(), self.active_group.clone());
+    }
+
+    fn upsert_filter(&mut self, name: FilterName, tree: Query, active_group: Vec<usize>) {
+        let filter = SavedFilter::new(name, tree, active_group);
+        match self
+            .saved_filters
+            .binary_search_by(|probe| probe.name.cmp(&filter.name))
+        {
+            Ok(slot) => self.saved_filters[slot] = filter,
+            Err(slot) => self.saved_filters.insert(slot, filter),
+        }
     }
 
     fn soft_prompt(&self) -> Option<String> {
@@ -472,6 +522,14 @@ impl Bayonet {
                     let _was_inflight = self.full_inflight.remove(&id);
                     let _faulted = self.full_faults.insert(id);
                     self.status = fault;
+                    ctx.request_repaint();
+                }
+                Event::MediaSaved { id, path } => {
+                    self.status = format!("saved #{id} to {}", path.display());
+                    ctx.request_repaint();
+                }
+                Event::MediaSaveFault { id, fault } => {
+                    self.status = format!("save #{id} failed: {fault}");
                     ctx.request_repaint();
                 }
                 Event::SoftText { prompt, embedding } => {
@@ -706,7 +764,14 @@ impl Bayonet {
                 if ui.small_button("×").clicked() {
                     actions.push(SavedFilterAction::Delete(filter.name.clone()));
                 }
-                if ui.button(filter.name.as_str()).clicked() {
+                if ui.small_button("clone").clicked() {
+                    actions.push(SavedFilterAction::Clone(filter.name.clone()));
+                }
+                let selected = self.active_filter.as_ref() == Some(&filter.name);
+                if ui
+                    .selectable_label(selected, filter.name.as_str())
+                    .clicked()
+                {
                     actions.push(SavedFilterAction::Load(filter.clone()));
                 }
             });
@@ -715,6 +780,7 @@ impl Bayonet {
             match action {
                 SavedFilterAction::Save => self.save_current_filter(),
                 SavedFilterAction::Load(filter) => self.load_filter(filter),
+                SavedFilterAction::Clone(name) => self.clone_filter(&name),
                 SavedFilterAction::Delete(name) => self.delete_filter(&name),
             }
         }
@@ -743,6 +809,7 @@ impl Bayonet {
         match action {
             QueryAction::Select { path } => {
                 self.active_group = self.query.clamp_group_path(&path);
+                self.sync_active_filter();
                 self.save_config();
             }
             QueryAction::SetOp { path, op } => {
@@ -962,6 +1029,12 @@ impl Bayonet {
                 if ui.button("copy").clicked() {
                     self.copy_full(post.id);
                 }
+                if ui
+                    .add_enabled(post.full_url().is_some(), egui::Button::new("save"))
+                    .clicked()
+                {
+                    self.save_full(&post);
+                }
                 if ui.button("close").clicked() {
                     close = true;
                 }
@@ -989,6 +1062,28 @@ impl Bayonet {
             self.zoom_gate = ZoomGate::Fresh;
         } else {
             self.zoom_gate = ZoomGate::Armed;
+        }
+    }
+
+    fn save_full(&mut self, post: &PostRecord) {
+        let Some(url) = post.full_url().map(ToOwned::to_owned) else {
+            self.status = format!("#{id} has no full image URL", id = post.id);
+            return;
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(save_filename(post, &url))
+            .save_file()
+        else {
+            return;
+        };
+        if let Err(err) = self.worker.send(Command::SaveMedia {
+            id: post.id,
+            url: Some(url),
+            path,
+        }) {
+            self.status = format!("{err:#}");
+        } else {
+            self.status = format!("saving #{id}", id = post.id);
         }
     }
 
@@ -1088,6 +1183,7 @@ impl Bayonet {
                 active_group: self.active_group.clone(),
             },
             filters: FilterConfig {
+                active: self.active_filter.clone(),
                 saved: self.saved_filters.clone(),
             },
             view: ViewConfig {
@@ -1211,6 +1307,7 @@ impl StartupProbe {
 enum SavedFilterAction {
     Save,
     Load(SavedFilter),
+    Clone(FilterName),
     Delete(FilterName),
 }
 
@@ -1269,6 +1366,10 @@ fn post_image_size(post: &PostRecord) -> egui::Vec2 {
     }
 }
 
+fn save_filename(post: &PostRecord, url: &str) -> String {
+    format!("danbooru-{}.{}", post.id, extension(url))
+}
+
 fn centered_box(ui: &mut egui::Ui, size: egui::Vec2, text: &str) {
     let _box = ui.allocate_ui_with_layout(
         size,
@@ -1303,54 +1404,6 @@ fn thumb_bucket(edge: f32) -> u8 {
     } else {
         u8::from(edge > 190.0)
     }
-}
-
-fn sorted_filters(mut filters: Vec<SavedFilter>) -> Vec<SavedFilter> {
-    filters.sort_by(|a, b| a.name.cmp(&b.name));
-    filters.dedup_by(|a, b| a.name == b.name);
-    filters
-}
-
-fn spare_filter_name(query: &Query, filters: &[SavedFilter]) -> FilterName {
-    let base = FilterName::forge(&filter_stem(query)).unwrap_or_else(FilterName::neutral);
-    if !filter_name_taken(&base, filters) {
-        return base;
-    }
-    let mut suffix = 2_u64;
-    loop {
-        let raw = format!("{} {suffix}", base.as_str());
-        if let Some(candidate) = FilterName::forge(&raw)
-            && !filter_name_taken(&candidate, filters)
-        {
-            return candidate;
-        }
-        suffix = suffix.saturating_add(1);
-    }
-}
-
-fn filter_stem(query: &Query) -> String {
-    let text = query.to_text();
-    let text = if text.is_empty() {
-        "neutral".to_owned()
-    } else {
-        text
-    };
-    clip_chars(&text, 48)
-}
-
-fn clip_chars(text: &str, limit: usize) -> String {
-    let mut chars = text.chars();
-    let mut out = chars.by_ref().take(limit).collect::<String>();
-    if chars.next().is_some() {
-        out.push('…');
-    }
-    out
-}
-
-fn filter_name_taken(name: &FilterName, filters: &[SavedFilter]) -> bool {
-    filters
-        .binary_search_by(|filter| filter.name.cmp(name))
-        .is_ok()
 }
 
 fn consume_wheel(ctx: &egui::Context) {

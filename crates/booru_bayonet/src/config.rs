@@ -57,6 +57,7 @@ impl QueryConfig {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FilterConfig {
+    pub active: Option<FilterName>,
     pub saved: Vec<SavedFilter>,
 }
 
@@ -173,6 +174,7 @@ mod tests {
                 active_group: choice.clone(),
             },
             filters: FilterConfig {
+                active: Some(FilterName::forge("beach").context("active filter name")?),
                 saved: vec![SavedFilter::new(
                     FilterName::forge("beach").context("filter name")?,
                     query.clone(),
@@ -186,6 +188,10 @@ mod tests {
         let roundtrip = toml::from_str::<Config>(&text)?;
         assert_eq!(roundtrip.query.query(), query);
         assert_eq!(roundtrip.query.active_group, choice);
+        assert_eq!(
+            roundtrip.filters.active.as_ref().map(FilterName::as_str),
+            Some("beach")
+        );
         assert_eq!(roundtrip.filters.saved[0].name.as_str(), "beach");
         assert_eq!(roundtrip.filters.saved[0].active_group, choice);
         Ok(())

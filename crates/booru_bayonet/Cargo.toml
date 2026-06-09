@@ -14,6 +14,7 @@ eframe = "0.34.3"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 ort = "2.0.0-rc.12"
 redb = "4.1.0"
+rfd = "0.17.2"
 roaring = "0.11.4"
 serde = { version = "1.0.228", features = ["derive"] }
 tokenizers = { version = "0.23.1", default-features = false, features = ["onig"] }

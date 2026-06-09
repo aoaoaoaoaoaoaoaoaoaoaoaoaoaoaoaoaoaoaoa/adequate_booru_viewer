@@ -65,6 +65,11 @@ pub enum Command {
         id: PostId,
         url: Option<String>,
     },
+    SaveMedia {
+        id: PostId,
+        url: Option<String>,
+        path: PathBuf,
+    },
     SoftText {
         prompt: String,
     },
@@ -114,6 +119,14 @@ pub enum Event {
     },
     FullBlade(RgbaBlade),
     FullBladeFault {
+        id: PostId,
+        fault: String,
+    },
+    MediaSaved {
+        id: PostId,
+        path: PathBuf,
+    },
+    MediaSaveFault {
         id: PostId,
         fault: String,
     },
@@ -251,6 +264,10 @@ impl Worker {
                 .media_tx
                 .send(MediaCommand::FullBlade { id, url })
                 .context("send media worker command"),
+            Command::SaveMedia { id, url, path } => self
+                .media_tx
+                .send(MediaCommand::Save { id, url, path })
+                .context("send media worker command"),
             command @ (Command::SoftText { .. } | Command::EmbedPosts { .. }) => self
                 .clip_tx
                 .send(command)
@@ -301,6 +318,11 @@ enum MediaCommand {
     FullBlade {
         id: PostId,
         url: Option<String>,
+    },
+    Save {
+        id: PostId,
+        url: Option<String>,
+        path: PathBuf,
     },
 }
 
@@ -420,9 +442,25 @@ fn media_loop(media: MediaCache, commands: Receiver<MediaCommand>, events: Sende
                     },
                 }
             }
+            MediaCommand::Save { id, url, path } => {
+                match required_url(url.as_deref()).and_then(|url| save_media(&media, id, url, path))
+                {
+                    Ok(path) => Event::MediaSaved { id, path },
+                    Err(err) => Event::MediaSaveFault {
+                        id,
+                        fault: format!("{err:#}"),
+                    },
+                }
+            }
         };
         let _sent = events.send(event);
     }
+}
+
+fn save_media(media: &MediaCache, id: PostId, url: &str, path: PathBuf) -> Result<PathBuf> {
+    let bytes = media.bytes(id, url)?;
+    std::fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
 }
 
 fn next_media_command(
@@ -445,8 +483,12 @@ fn next_media_command(
         let full = pending
             .iter()
             .position(|command| matches!(command, MediaCommand::FullBlade { .. }));
+        let save = pending
+            .iter()
+            .position(|command| matches!(command, MediaCommand::Save { .. }));
         if let Some(command) = full
             .and_then(|slot| pending.remove(slot))
+            .or_else(|| save.and_then(|slot| pending.remove(slot)))
             .or_else(|| pending.pop_front())
         {
             return Some(command);
@@ -459,7 +501,7 @@ impl MediaCommand {
         match self {
             Self::Blade { epoch, .. } => Some(*epoch),
             Self::Cull { epoch } => Some(*epoch),
-            Self::FullBlade { .. } => None,
+            Self::FullBlade { .. } | Self::Save { .. } => None,
         }
     }
 
@@ -469,7 +511,7 @@ impl MediaCommand {
                 epoch: candidate, ..
             } => *candidate >= epoch,
             Self::Cull { .. } => false,
-            Self::FullBlade { .. } => true,
+            Self::FullBlade { .. } | Self::Save { .. } => true,
         }
     }
 }
@@ -496,7 +538,8 @@ fn clip_loop(
             | Command::Stats { .. }
             | Command::Blade { .. }
             | Command::CullBlades { .. }
-            | Command::FullBlade { .. } => {
+            | Command::FullBlade { .. }
+            | Command::SaveMedia { .. } => {
                 Ok(Event::Fault("I/O command reached CLIP worker".to_owned()))
             }
         };

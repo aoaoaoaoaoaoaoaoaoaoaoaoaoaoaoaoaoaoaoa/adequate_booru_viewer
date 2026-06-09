@@ -2,6 +2,7 @@ mod app;
 mod booru;
 mod clip;
 mod config;
+mod filter_bank;
 mod index;
 mod media;
 mod model;

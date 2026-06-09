@@ -85,7 +85,7 @@ fn decode(id: PostId, bytes: &[u8]) -> Result<RgbaBlade> {
     })
 }
 
-fn extension(url: &str) -> &str {
+pub fn extension(url: &str) -> &str {
     let path = url.split('?').next().unwrap_or(url);
     let Some(ext) = Path::new(path).extension().and_then(|ext| ext.to_str()) else {
         return "img";
