@@ -21,6 +21,7 @@ use crate::{
         TagPolarity,
     },
     query_ui::{QueryAction, render_query_tree},
+    saved_filter_ui::{self, Action as SavedFilterAction},
     tag_chroma,
     tag_menu::{
         HEIGHT as TAG_MENU_HEIGHT, TagMenu, WIDTH as TAG_MENU_WIDTH, position as tag_menu_pos,
@@ -308,6 +309,38 @@ impl Bayonet {
         self.filter_name_entry.clear();
         self.status = format!("active filter `{}`", filter.name);
         self.install_query_at(filter.tree, filter.active_group);
+    }
+
+    fn new_filter(&mut self) {
+        self.active_filter = None;
+        self.filter_name_entry.clear();
+        "new unsaved filter".clone_into(&mut self.status);
+        self.install_query_at(Query::default(), Vec::new());
+    }
+
+    fn rename_filter(&mut self) {
+        let Some(old) = self.active_filter.clone() else {
+            "no active filter to rename".clone_into(&mut self.status);
+            return;
+        };
+        let Some(new) = FilterName::forge(&self.filter_name_entry) else {
+            "rename needs a nonempty filter name".clone_into(&mut self.status);
+            return;
+        };
+        if old == new {
+            self.filter_name_entry.clear();
+            return;
+        }
+        if filter_bank::get(&new, &self.saved_filters).is_some() {
+            self.status = format!("filter `{new}` already exists");
+            return;
+        }
+        self.delete_filter(&old);
+        self.upsert_filter(new.clone(), self.query.clone(), self.active_group.clone());
+        self.active_filter = Some(new.clone());
+        self.filter_name_entry.clear();
+        self.status = format!("renamed filter `{old}` → `{new}`");
+        self.save_config();
     }
 
     fn clone_filter(&mut self, name: &FilterName) {
@@ -780,40 +813,16 @@ impl Bayonet {
     }
 
     fn saved_filter_panel(&mut self, ui: &mut egui::Ui) {
-        let _heading = ui.heading("saved");
-        let mut actions = Vec::new();
-        let _save = ui.horizontal(|ui| {
-            let entry = ui.add(
-                egui::TextEdit::singleline(&mut self.filter_name_entry).hint_text("filter name"),
-            );
-            let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
-            if ui.button("save").clicked() || (entry.has_focus() && enter) {
-                actions.push(SavedFilterAction::Save);
-            }
-        });
-        if self.saved_filters.is_empty() {
-            let _empty = ui.label("none");
-        }
-        for filter in &self.saved_filters {
-            let _row = ui.horizontal_wrapped(|ui| {
-                if ui.small_button("×").clicked() {
-                    actions.push(SavedFilterAction::Delete(filter.name.clone()));
-                }
-                if ui.small_button("clone").clicked() {
-                    actions.push(SavedFilterAction::Clone(filter.name.clone()));
-                }
-                let selected = self.active_filter.as_ref() == Some(&filter.name);
-                if ui
-                    .selectable_label(selected, filter.name.as_str())
-                    .clicked()
-                {
-                    actions.push(SavedFilterAction::Load(filter.clone()));
-                }
-            });
-        }
-        for action in actions {
+        for action in saved_filter_ui::render(
+            ui,
+            &mut self.filter_name_entry,
+            self.active_filter.as_ref(),
+            &self.saved_filters,
+        ) {
             match action {
+                SavedFilterAction::New => self.new_filter(),
                 SavedFilterAction::Save => self.save_current_filter(),
+                SavedFilterAction::Rename => self.rename_filter(),
                 SavedFilterAction::Load(filter) => self.load_filter(filter),
                 SavedFilterAction::Clone(name) => self.clone_filter(&name),
                 SavedFilterAction::Delete(name) => self.delete_filter(&name),
@@ -1340,14 +1349,6 @@ impl StartupProbe {
         self.reported = true;
         Ok(())
     }
-}
-
-#[derive(Clone, Debug)]
-enum SavedFilterAction {
-    Save,
-    Load(SavedFilter),
-    Clone(FilterName),
-    Delete(FilterName),
 }
 
 fn active_prefix(text: &str) -> Option<ActivePrefix> {

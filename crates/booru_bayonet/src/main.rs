@@ -8,6 +8,7 @@ mod media;
 mod model;
 mod posting;
 mod query_ui;
+mod saved_filter_ui;
 mod tag_chroma;
 mod tag_menu;
 mod tag_palette;
