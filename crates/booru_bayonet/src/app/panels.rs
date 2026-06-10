@@ -44,7 +44,7 @@ impl Bayonet {
     }
 
     pub(super) fn left_panel(&mut self, ui: &mut egui::Ui) {
-        ui.set_min_width(340.0);
+        ui.set_width(ui.available_width());
         chrome::section(ui, "active-filter", "active filter", true, |ui| {
             self.active_filter_panel(ui);
         });
@@ -87,7 +87,7 @@ impl Bayonet {
         }
         self.autocomplete(ui);
         let _hint = ui.label(chrome::muted(
-            "enter targets the highlighted group; -foo inserts NOT foo; rating:q works",
+            "enter inserts into the highlighted group; -foo inserts ¬foo; rating:q works",
         ));
         ui.add_space(5.0);
         if query.is_empty() {
@@ -98,23 +98,31 @@ impl Bayonet {
         });
         ui.add_space(5.0);
         let _active = ui.horizontal_wrapped(|ui| {
-            let _label = ui.label(chrome::eyebrow("SELECTED GROUP"));
+            let _label = ui.label(chrome::eyebrow("◇ GROUP"));
             for op in BoolOp::ALL {
                 let selected = self
                     .query
                     .group(&self.active_group)
                     .is_some_and(|group| group.op == op);
-                if ui.selectable_label(selected, op.label()).clicked() {
+                if ui.add(chrome::glyph_button(op.label(), selected)).clicked() {
                     actions.push(QueryAction::SetOp {
                         path: self.active_group.clone(),
                         op,
                     });
                 }
             }
-            if ui.button("add group").clicked() {
+            if ui
+                .add(chrome::icon_button("＋"))
+                .on_hover_text("add group")
+                .clicked()
+            {
                 actions.push(QueryAction::AddGroup { op: BoolOp::And });
             }
-            if ui.button("NOT active").clicked() {
+            if ui
+                .add(chrome::icon_button("¬"))
+                .on_hover_text("negate group")
+                .clicked()
+            {
                 actions.push(QueryAction::ToggleNot {
                     path: self.active_group.clone(),
                 });
@@ -128,12 +136,13 @@ impl Bayonet {
         let _summary = ui.label(chrome::muted(if active {
             "weighted image centroid is pulling the score rank"
         } else {
-            "right-click thumbnails to add image pins"
+            "hover thumbnails and strike 📌 to add image pins"
         }));
-        let slider = egui::Slider::new(&mut self.rank_alpha, 0.0..=2.0)
-            .text("α")
-            .fixed_decimals(2);
-        if ui.add(slider).changed() {
+        let _row = ui.horizontal(|ui| {
+            let _label = ui.label(chrome::eyebrow("α"));
+            let _value = ui.label(chrome::muted(format!("{:.2}", self.rank_alpha)));
+        });
+        if chrome::rail_f32(ui, &mut self.rank_alpha, 0.0..=2.0).changed() {
             self.save_config();
             self.request_refresh();
         }
@@ -144,19 +153,16 @@ impl Bayonet {
         for (slot, pin) in self.rank_pins.iter_mut().enumerate() {
             let _row = ui.horizontal(|ui| {
                 let _id = ui.label(format!("#{}", pin.post.id));
-                let mut weight = i32::from(pin.weight);
-                if ui
-                    .add(egui::Slider::new(&mut weight, 1..=6).show_value(false))
-                    .changed()
-                {
-                    pin.weight = weight as u8;
+                let mut weight = u16::from(pin.weight);
+                if chrome::rail_u16_sized(ui, &mut weight, 1..=6, 82.0).changed() {
+                    pin.weight = u8::try_from(weight).unwrap_or(PinConfig::MAX_WEIGHT);
                     actions.push(PinAction::Changed);
                 }
                 let _w = ui.label(format!("×{}", pin.weight));
-                if ui.small_button("-").clicked() {
+                if ui.add(chrome::icon_button("−")).clicked() {
                     actions.push(PinAction::Weaken(pin.post.id));
                 }
-                if ui.small_button("×").clicked() {
+                if ui.add(chrome::icon_button("×")).clicked() {
                     actions.push(PinAction::Remove(pin.post.id));
                 }
                 if slot == 0 {
@@ -164,7 +170,11 @@ impl Bayonet {
                 }
             });
         }
-        if ui.button("clear pins").clicked() {
+        if ui
+            .add(chrome::icon_button("⌫"))
+            .on_hover_text("clear pins")
+            .clicked()
+        {
             actions.push(PinAction::Clear);
         }
         self.apply_pin_actions(actions);
@@ -175,7 +185,7 @@ impl Bayonet {
             let _label = ui.label(chrome::eyebrow("SORT"));
             for sort in Sort::ALL {
                 if ui
-                    .selectable_label(self.sort == sort, sort.label())
+                    .add(chrome::glyph_button(sort.label(), self.sort == sort))
                     .clicked()
                 {
                     self.sort = sort;
@@ -184,14 +194,21 @@ impl Bayonet {
                 }
             }
         });
-        let slider = egui::Slider::new(&mut self.tile_scale, MIN_TILE_SCALE..=MAX_TILE_SCALE)
-            .text("thumbnail")
-            .fixed_decimals(2);
-        if ui.add(slider).changed() {
+        let _row = ui.horizontal(|ui| {
+            let _label = ui.label(chrome::eyebrow("IMAGES/ROW"));
+            let _value = ui.label(chrome::muted(format!("{}", self.images_per_row)));
+        });
+        if chrome::rail_u16(
+            ui,
+            &mut self.images_per_row,
+            MIN_IMAGES_PER_ROW..=MAX_IMAGES_PER_ROW,
+        )
+        .changed()
+        {
             self.advance_thumb_epoch();
             self.save_config();
         }
-        let _edge = ui.label(chrome::muted(format!("tile {:.0}px", self.tile_edge())));
+        let _edge = ui.label(chrome::muted("rows now fill the gallery width exactly"));
     }
 
     fn filter_library_panel(&mut self, ui: &mut egui::Ui) {

@@ -24,6 +24,7 @@ impl Config {
             Ok(text) => {
                 let mut config = toml::from_str::<Self>(&text)
                     .with_context(|| format!("parse {}", path.display()))?;
+                config.view.canonicalize();
                 config.embedding.legacy_prompt.clear();
                 Ok(Arc::new(config))
             }
@@ -131,16 +132,37 @@ impl<'de> Deserialize<'de> for FilterName {
 #[serde(default, deny_unknown_fields)]
 pub struct ViewConfig {
     pub sort: Sort,
-    pub tile_scale: f32,
+    pub images_per_row: u16,
+    #[serde(default, skip_serializing)]
+    pub tile_scale: Option<f32>,
 }
 
 impl Default for ViewConfig {
     fn default() -> Self {
         Self {
             sort: Sort::Score,
-            tile_scale: 1.0,
+            images_per_row: 5,
+            tile_scale: None,
         }
     }
+}
+
+impl ViewConfig {
+    pub fn canonicalize(&mut self) {
+        if self.images_per_row == 0
+            && let Some(scale) = self.tile_scale
+        {
+            self.images_per_row = legacy_rows(scale);
+        }
+        if self.images_per_row == 0 {
+            self.images_per_row = Self::default().images_per_row;
+        }
+        self.tile_scale = None;
+    }
+}
+
+fn legacy_rows(scale: f32) -> u16 {
+    (5.0 / scale.clamp(0.25, 5.0)).round().clamp(1.0, 12.0) as u16
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

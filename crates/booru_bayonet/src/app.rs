@@ -48,9 +48,9 @@ const SUGGESTIONS: usize = 12;
 const EVENT_BUDGET: usize = 12;
 const AUTO_WARM_PAGES: u32 = 1;
 const DANBOORU_SEARCH_PAGE_LIMIT: u32 = 1_000;
-const BASE_TILE: f32 = 260.0;
-const MIN_TILE_SCALE: f32 = 0.5;
-const MAX_TILE_SCALE: f32 = 3.0;
+const MIN_IMAGES_PER_ROW: u16 = 1;
+const MAX_IMAGES_PER_ROW: u16 = 12;
+const MIN_TILE_EDGE: f32 = 72.0;
 const GAP: f32 = 8.0;
 const VIEWER_CHROME: f32 = 40.0;
 const MAX_PINS: usize = 6;
@@ -88,7 +88,7 @@ pub struct Bayonet {
     full_faults: HashSet<PostId>,
     zoom: Option<PostRecord>,
     zoom_gate: ZoomGate,
-    tile_scale: f32,
+    images_per_row: u16,
     tag_menu: TagMenu,
     tag_menu_rect: Option<egui::Rect>,
     tag_kinds: HashMap<Tag, TagKind>,
@@ -168,7 +168,10 @@ impl Bayonet {
             full_faults: HashSet::new(),
             zoom: None,
             zoom_gate: ZoomGate::Fresh,
-            tile_scale: config.view.tile_scale.clamp(MIN_TILE_SCALE, MAX_TILE_SCALE),
+            images_per_row: config
+                .view
+                .images_per_row
+                .clamp(MIN_IMAGES_PER_ROW, MAX_IMAGES_PER_ROW),
             tag_menu: TagMenu::Closed,
             tag_menu_rect: None,
             tag_kinds: HashMap::new(),
@@ -456,6 +459,9 @@ impl Bayonet {
             pin.weight = pin.weight.saturating_add(1).min(PinConfig::MAX_WEIGHT);
         } else if self.rank_pins.len() < MAX_PINS {
             self.rank_pins.push(RankPin::new(post.clone(), 1));
+            if self.rank_alpha <= f32::EPSILON {
+                self.rank_alpha = 0.10;
+            }
         } else {
             self.status = format!("pin heap is full ({MAX_PINS})");
             return;
@@ -711,20 +717,21 @@ impl Bayonet {
     }
 
     fn grid(&mut self, ui: &mut egui::Ui) -> bool {
-        let tile = self.tile_edge();
-        let width = ui.available_width().max(tile);
-        let cols = ((width + GAP) / (tile + GAP)).floor().max(1.0) as usize;
+        let width = ui.available_width().max(MIN_TILE_EDGE);
+        let cols = usize::from(self.images_per_row.max(1));
+        let tile = tile_edge(width, cols);
         let posts = self.hit.posts.clone();
         let rows = posts.len().div_ceil(cols);
         let row_height = tile + GAP;
         let mut menu_opened = false;
         let _scroll = egui::ScrollArea::vertical().show_rows(ui, row_height, rows, |ui, range| {
+            ui.spacing_mut().item_spacing.x = GAP;
             for row in range {
                 let start = row * cols;
                 let end = (start + cols).min(posts.len());
                 let _row = ui.horizontal(|ui| {
                     for post in &posts[start..end] {
-                        menu_opened |= self.tile(ui, post);
+                        menu_opened |= self.tile(ui, post, tile);
                     }
                 });
             }
@@ -732,14 +739,13 @@ impl Bayonet {
         menu_opened
     }
 
-    fn tile(&mut self, ui: &mut egui::Ui, post: &PostRecord) -> bool {
-        let tile = self.tile_edge();
+    fn tile(&mut self, ui: &mut egui::Ui, post: &PostRecord, tile: f32) -> bool {
         let mut menu_opened = false;
         let _tile = ui.vertical(|ui| {
             ui.set_width(tile);
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(tile, tile), egui::Sense::click());
-            match self.thumb(post) {
+            match self.thumb(post, tile) {
                 Some(ThumbLoad::Ready(texture)) => {
                     let size = fit(texture.size_vec2(), rect.size());
                     let image = egui::Rect::from_center_size(rect.center(), size);
@@ -755,7 +761,8 @@ impl Bayonet {
             if let Some(weight) = self.pin_weight(post.id) {
                 paint_pin_badge(ui, rect, weight);
             }
-            if response.clicked() && !self.tag_menu.is_open() {
+            let pin_clicked = self.pin_hover(ui, post, rect, &response);
+            if response.clicked() && !pin_clicked && !self.tag_menu.is_open() {
                 self.open_full(post);
             }
             if response.secondary_clicked()
@@ -773,6 +780,57 @@ impl Bayonet {
             post: Box::new(post.clone()),
             anchor,
         };
+    }
+
+    fn pin_hover(
+        &mut self,
+        ui: &mut egui::Ui,
+        post: &PostRecord,
+        rect: egui::Rect,
+        response: &egui::Response,
+    ) -> bool {
+        let pinned = self.pin_weight(post.id).is_some();
+        if !pinned && !response.hovered() {
+            return false;
+        }
+        let pin_rect = egui::Rect::from_min_size(
+            rect.right_top() + egui::vec2(-34.0, 6.0),
+            egui::vec2(28.0, 24.0),
+        );
+        let pin = ui.interact(
+            pin_rect,
+            egui::Id::new(("image-pin", post.id.0)),
+            egui::Sense::click(),
+        );
+        let fill = if pinned {
+            chrome::RAISED
+        } else {
+            chrome::CONTROL
+        };
+        let stroke = if pinned {
+            chrome::HOT
+        } else {
+            chrome::EDGE_STRONG
+        };
+        let _fill = ui.painter().rect_filled(pin_rect, 0.0, fill);
+        let _stroke = ui.painter().rect_stroke(
+            pin_rect,
+            0.0,
+            egui::Stroke::new(1.0, stroke),
+            egui::StrokeKind::Inside,
+        );
+        let _glyph = ui.painter().text(
+            pin_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "📌",
+            egui::TextStyle::Button.resolve(ui.style()),
+            chrome::HOT,
+        );
+        if pin.clicked() {
+            self.add_pin(post);
+            return true;
+        }
+        false
     }
 
     fn tag_palette_overlay(&mut self, ctx: &egui::Context) {
@@ -801,26 +859,6 @@ impl Bayonet {
             "#{}  score {}  fav {}",
             post.id, post.score, post.favs
         ));
-        let _pins = ui.horizontal(|ui| {
-            let weight = self.pin_weight(post.id).unwrap_or(0);
-            let _label = ui.label(chrome::muted(format!("pin weight {weight}/6")));
-            if ui.small_button("pin +").clicked() {
-                self.add_pin(post);
-            }
-            if ui
-                .add_enabled(weight > 0, egui::Button::new("pin -").small())
-                .clicked()
-            {
-                self.weaken_pin(post.id);
-            }
-            if ui
-                .add_enabled(weight > 0, egui::Button::new("unpin").small())
-                .clicked()
-            {
-                self.remove_pin(post.id);
-            }
-        });
-        let _separator = ui.separator();
         let _scroll = egui::ScrollArea::vertical()
             .max_height(TAG_MENU_HEIGHT)
             .show(ui, |ui| {
@@ -1006,8 +1044,8 @@ impl Bayonet {
         }
     }
 
-    fn thumb(&mut self, post: &PostRecord) -> Option<ThumbLoad<'_>> {
-        let bucket = thumb_bucket(self.tile_edge());
+    fn thumb(&mut self, post: &PostRecord, edge: f32) -> Option<ThumbLoad<'_>> {
+        let bucket = thumb_bucket(edge);
         let key = ThumbKey {
             id: post.id,
             bucket,
@@ -1019,7 +1057,7 @@ impl Bayonet {
             return Some(ThumbLoad::Fault);
         }
         if !self.thumb_inflight.contains(&key) {
-            let url = post.thumb_url(self.tile_edge()).map(ToOwned::to_owned)?;
+            let url = post.thumb_url(edge).map(ToOwned::to_owned)?;
             let _now_inflight = self.thumb_inflight.insert(key);
             if let Err(err) = self.worker.send(Command::Blade {
                 epoch: self.thumb_epoch,
@@ -1034,10 +1072,6 @@ impl Bayonet {
             }
         }
         Some(ThumbLoad::Loading)
-    }
-
-    fn tile_edge(&self) -> f32 {
-        BASE_TILE * self.tile_scale
     }
 
     fn zoom_tiles(&mut self, ctx: &egui::Context) {
@@ -1066,8 +1100,10 @@ impl Bayonet {
         if steps == 0.0 {
             return;
         }
-        self.tile_scale =
-            (self.tile_scale * 1.12_f32.powf(steps)).clamp(MIN_TILE_SCALE, MAX_TILE_SCALE);
+        let delta = -steps.round() as i32;
+        self.images_per_row = (i32::from(self.images_per_row) + delta)
+            .clamp(i32::from(MIN_IMAGES_PER_ROW), i32::from(MAX_IMAGES_PER_ROW))
+            as u16;
         self.advance_thumb_epoch();
         self.save_config();
         ctx.request_repaint();
@@ -1085,7 +1121,8 @@ impl Bayonet {
             },
             view: ViewConfig {
                 sort: self.sort,
-                tile_scale: self.tile_scale,
+                images_per_row: self.images_per_row,
+                tile_scale: None,
             },
             embedding: EmbeddingConfig {
                 alpha: self.rank_alpha,
@@ -1284,7 +1321,7 @@ fn paint_pin_badge(ui: &egui::Ui, rect: egui::Rect, weight: u8) {
     let _text = ui.painter().text(
         badge.center(),
         egui::Align2::CENTER_CENTER,
-        format!("◆{weight}"),
+        format!("📌{weight}"),
         egui::TextStyle::Button.resolve(ui.style()),
         chrome::HOT,
     );
@@ -1343,6 +1380,12 @@ fn fit(image: egui::Vec2, bounds: egui::Vec2) -> egui::Vec2 {
     image * scale
 }
 
+fn tile_edge(width: f32, columns: usize) -> f32 {
+    let columns = columns.max(1);
+    let gaps = GAP * columns.saturating_sub(1) as f32;
+    ((width - gaps) / columns as f32).max(MIN_TILE_EDGE)
+}
+
 fn thumb_bucket(edge: f32) -> u8 {
     if edge > 390.0 {
         2
@@ -1377,8 +1420,8 @@ impl Bayonet {
         let ctx = ui.ctx().clone();
         chrome::install(&ctx);
         let _left = egui::Panel::left("filter")
-            .resizable(true)
-            .default_size(360.0)
+            .resizable(false)
+            .exact_size(chrome::INSPECTOR_WIDTH)
             .show_inside(ui, |ui| self.left_panel(ui));
         let prior = self.tag_menu.post_id();
         self.tag_menu_rect = None;

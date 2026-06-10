@@ -459,7 +459,7 @@ impl QueryExpr {
             }
             Self::Not { child } => child.to_text(),
         };
-        if negated { format!("NOT {text}") } else { text }
+        if negated { format!("¬{text}") } else { text }
     }
 
     fn expr(&self, path: &[usize]) -> Option<&Self> {
@@ -644,9 +644,9 @@ impl BoolOp {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::And => "AND",
-            Self::Or => "OR",
-            Self::Xor => "XOR",
+            Self::And => "∧",
+            Self::Or => "∨",
+            Self::Xor => "⊕",
         }
     }
 }
@@ -1102,7 +1102,7 @@ mod tests {
             QueryAtom::parse("left").context("left tag")?,
             TagPolarity::Positive
         ));
-        assert_eq!(query.root.to_text(), "AND(alpha OR(left right) zeta)");
+        assert_eq!(query.root.to_text(), "∧(alpha ∨(left right) zeta)");
         Ok(())
     }
 

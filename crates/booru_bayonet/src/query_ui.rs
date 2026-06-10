@@ -68,17 +68,23 @@ fn render_group(
     let _frame = frame.show(ui, |ui| {
         let _header = ui.horizontal_wrapped(|ui| {
             if ui
-                .selectable_label(active_here, group_label(path, active_here))
-                .on_hover_text("click to target this group for new tags")
+                .add(chrome::glyph_button(
+                    group_label(path, active_here),
+                    active_here,
+                ))
+                .on_hover_text("click to select this group for new tags")
                 .clicked()
             {
                 actions.push(QueryAction::Select { path: path.clone() });
             }
-            if ui.selectable_label(negated, "NOT").clicked() {
+            if ui.add(chrome::glyph_button("¬", negated)).clicked() {
                 actions.push(QueryAction::ToggleNot { path: path.clone() });
             }
             for op in BoolOp::ALL {
-                if ui.selectable_label(group.op == op, op.label()).clicked() {
+                if ui
+                    .add(chrome::glyph_button(op.label(), group.op == op))
+                    .clicked()
+                {
                     actions.push(QueryAction::SetOp {
                         path: path.clone(),
                         op,
@@ -149,7 +155,7 @@ fn group_title(path: &[usize]) -> String {
 
 fn group_label(path: &[usize], active: bool) -> String {
     if active {
-        format!("◆ {} target", group_title(path))
+        format!("◆ {}", group_title(path))
     } else {
         format!("◇ {}", group_title(path))
     }
