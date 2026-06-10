@@ -1399,7 +1399,10 @@ impl Bayonet {
                     .id_salt("filter-scroll")
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .auto_shrink([false, false])
-                    .show(ui, |ui| self.left_panel(ui));
+                    .show(ui, |ui| {
+                        ui.add_space(ui.spacing().item_spacing.x);
+                        self.left_panel(ui);
+                    });
             });
         let prior = self.tag_menu.post_id();
         self.tag_menu_rect = None;
