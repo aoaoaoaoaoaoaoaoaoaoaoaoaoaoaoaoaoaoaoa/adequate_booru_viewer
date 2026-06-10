@@ -1,8 +1,8 @@
 mod app;
 mod booru;
 mod chrome;
-mod clip;
 mod config;
+mod dino;
 mod filter_bank;
 mod index;
 mod media;

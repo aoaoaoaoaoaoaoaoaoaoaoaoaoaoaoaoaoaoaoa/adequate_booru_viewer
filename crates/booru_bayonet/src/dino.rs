@@ -14,24 +14,25 @@ use std::{
 };
 use ureq::Agent;
 
-use crate::model::{CLIP_DIM, Embedding};
+use crate::model::{EMBEDDING_DIM, Embedding};
 
-const REPO: &str = "jinaai/jina-clip-v1";
-const REV: &str = "ceb3e44ca4d6eceaa4f3fb58b1c1a5748b3f29b6";
-const VISION_MODEL: &str = "onnx/vision_model_quantized.onnx";
-const IMAGE_SIZE: u32 = 224;
-const IMAGE_PIXELS: usize = IMAGE_SIZE as usize * IMAGE_SIZE as usize;
-const MODEL_BYTE_LIMIT: u64 = 600 * 1024 * 1024;
-const CLIP_MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
-const CLIP_STD: [f32; 3] = [0.268_629_54, 0.261_302_6, 0.275_777_1];
+const REPO: &str = "onnx-community/dinov2-small";
+const REV: &str = "8b1f705a3a7f6f062f6bdd21986c1583d3ef105d";
+const VISION_MODEL: &str = "onnx/model_quantized.onnx";
+const CROP_SIZE: u32 = 224;
+const RESIZE_SHORTEST_EDGE: u32 = 256;
+const IMAGE_PIXELS: usize = CROP_SIZE as usize * CROP_SIZE as usize;
+const MODEL_BYTE_LIMIT: u64 = 256 * 1024 * 1024;
+const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
+const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
-pub struct ClipForge {
+pub struct DinoForge {
     root: PathBuf,
     agent: Agent,
     vision: Option<Session>,
 }
 
-impl ClipForge {
+impl DinoForge {
     pub fn new(root: PathBuf) -> Self {
         let agent = agent();
         Self {
@@ -48,22 +49,22 @@ impl ClipForge {
             match name {
                 "pixel_values" => {
                     let tensor = Tensor::from_array((
-                        [1_usize, 3, IMAGE_SIZE as usize, IMAGE_SIZE as usize],
+                        [1_usize, 3, CROP_SIZE as usize, CROP_SIZE as usize],
                         pixels.clone(),
                     ))?;
                     let _old = inputs.insert(name.to_owned(), tensor.upcast());
                 }
-                other => bail!("unsupported Jina CLIP vision input `{other}`"),
+                other => bail!("unsupported DINOv2 vision input `{other}`"),
             }
         }
-        let outputs = self.vision()?.run(inputs).context("run Jina CLIP vision")?;
-        extract_embedding(&outputs, "image_embeds")
+        let outputs = self.vision()?.run(inputs).context("run DINOv2 vision")?;
+        extract_cls(&outputs, "last_hidden_state")
     }
 
     fn vision(&mut self) -> Result<&mut Session> {
         if self.vision.is_none() {
             let path = ensure_file(&self.agent, &self.root, VISION_MODEL)?;
-            self.vision = Some(session(&path).context("load Jina CLIP vision model")?);
+            self.vision = Some(session(&path).context("load DINOv2 vision model")?);
         }
         self.vision.as_mut().context("vision session missing")
     }
@@ -125,45 +126,46 @@ fn pixels(bytes: &[u8]) -> Result<Vec<f32>> {
         .with_guessed_format()
         .context("guess image format")?
         .decode()
-        .context("decode image for CLIP")?
+        .context("decode image for DINOv2")?
         .to_rgb8();
     let (width, height) = image.dimensions();
     if width == 0 || height == 0 {
         bail!("empty image");
     }
     let shortest = width.min(height);
-    let new_width = ((u64::from(width) * u64::from(IMAGE_SIZE)) / u64::from(shortest))
-        .max(u64::from(IMAGE_SIZE)) as u32;
-    let new_height = ((u64::from(height) * u64::from(IMAGE_SIZE)) / u64::from(shortest))
-        .max(u64::from(IMAGE_SIZE)) as u32;
+    let new_width = ((u64::from(width) * u64::from(RESIZE_SHORTEST_EDGE)) / u64::from(shortest))
+        .max(u64::from(RESIZE_SHORTEST_EDGE)) as u32;
+    let new_height = ((u64::from(height) * u64::from(RESIZE_SHORTEST_EDGE)) / u64::from(shortest))
+        .max(u64::from(RESIZE_SHORTEST_EDGE)) as u32;
     let resized = resize(&image, new_width, new_height, FilterType::CatmullRom);
-    let x = (new_width - IMAGE_SIZE) / 2;
-    let y = (new_height - IMAGE_SIZE) / 2;
-    let cropped = crop_imm(&resized, x, y, IMAGE_SIZE, IMAGE_SIZE).to_image();
+    let x = (new_width - CROP_SIZE) / 2;
+    let y = (new_height - CROP_SIZE) / 2;
+    let cropped = crop_imm(&resized, x, y, CROP_SIZE, CROP_SIZE).to_image();
     let mut out = vec![0.0_f32; 3 * IMAGE_PIXELS];
     for (i, pixel) in cropped.pixels().enumerate() {
         for channel in 0..3 {
-            out[channel * IMAGE_PIXELS + i] =
-                (f32::from(pixel[channel]) / 255.0 - CLIP_MEAN[channel]) / CLIP_STD[channel];
+            out[channel * IMAGE_PIXELS + i] = (f32::from(pixel[channel]) / 255.0
+                - IMAGENET_MEAN[channel])
+                / IMAGENET_STD[channel];
         }
     }
     Ok(out)
 }
 
-fn extract_embedding(outputs: &ort::session::SessionOutputs<'_>, name: &str) -> Result<Embedding> {
+fn extract_cls(outputs: &ort::session::SessionOutputs<'_>, name: &str) -> Result<Embedding> {
     let Some(output) = outputs.get(name) else {
         let keys = outputs.keys().collect::<Vec<_>>().join(", ");
-        bail!("Jina CLIP produced no `{name}` output; outputs: {keys}");
+        bail!("DINOv2 produced no `{name}` output; outputs: {keys}");
     };
     let (_, data) = output
         .try_extract_tensor::<f32>()
         .with_context(|| format!("extract `{name}` tensor"))?;
-    if data.len() != CLIP_DIM {
+    if data.len() < EMBEDDING_DIM {
         let keys = outputs.keys().collect::<Vec<_>>().join(", ");
         bail!(
-            "expected {CLIP_DIM}-wide `{name}` embedding, got {} floats; outputs: {keys}",
+            "expected at least {EMBEDDING_DIM} floats in `{name}`, got {}; outputs: {keys}",
             data.len()
         );
     }
-    Embedding::forge(data.to_vec())
+    Embedding::forge(data[..EMBEDDING_DIM].to_vec())
 }

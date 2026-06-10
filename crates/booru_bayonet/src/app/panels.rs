@@ -51,7 +51,7 @@ impl Bayonet {
         chrome::section(ui, "reference-query", "reference query", true, |ui| {
             self.query_panel(ui);
         });
-        chrome::section(ui, "embedding-pins", "embedding pins", true, |ui| {
+        chrome::section(ui, "embedding-magnets", "image magnets", true, |ui| {
             self.embedding_panel(ui);
         });
         chrome::section(ui, "gallery-controls", "gallery", false, |ui| {
@@ -88,10 +88,6 @@ impl Bayonet {
             self.commit_tag_entry();
         }
         self.autocomplete(ui);
-        let _hint = chrome::note(
-            ui,
-            "enter inserts into the highlighted group; -foo inserts ¬foo; rating:q works",
-        );
         ui.add_space(5.0);
         if query.is_empty() {
             let _empty = ui.label(chrome::muted("neutral query"));
@@ -113,15 +109,6 @@ impl Bayonet {
     }
 
     fn embedding_panel(&mut self, ui: &mut egui::Ui) {
-        let active = self.rank_alpha > 0.0 && !self.rank_pins.is_empty();
-        let _summary = chrome::note(
-            ui,
-            if active {
-                "weighted image centroid is pulling the score rank"
-            } else {
-                "hover thumbnails and strike 📌 to add image pins"
-            },
-        );
         let _row = ui.horizontal(|ui| {
             let _label = ui.label(chrome::eyebrow("α"));
             let _value = ui.label(chrome::muted(format!("{:.2}", self.rank_alpha)));
@@ -130,24 +117,31 @@ impl Bayonet {
             self.save_config();
             self.request_refresh();
         }
-        if self.rank_pins.is_empty() {
+        if self.rank_magnets.is_empty() {
             return;
         }
         let mut actions = Vec::new();
-        for (slot, pin) in self.rank_pins.iter_mut().enumerate() {
+        for (slot, magnet) in self.rank_magnets.iter_mut().enumerate() {
             let _row = ui.horizontal(|ui| {
-                let _id = ui.label(format!("#{}", pin.post.id));
-                let mut weight = u16::from(pin.weight);
-                if chrome::rail_u16_sized(ui, &mut weight, 1..=6, 82.0).changed() {
-                    pin.weight = u8::try_from(weight).unwrap_or(PinConfig::MAX_WEIGHT);
-                    actions.push(PinAction::Changed);
+                let _id = ui.label(format!("#{}", magnet.post.id));
+                let mut weight = magnet.weight;
+                if chrome::rail_i8_sized(
+                    ui,
+                    &mut weight,
+                    MagnetConfig::MIN_WEIGHT..=MagnetConfig::MAX_WEIGHT,
+                    82.0,
+                )
+                .changed()
+                {
+                    magnet.weight = weight;
+                    actions.push(MagnetAction::Changed);
                 }
-                let _w = ui.label(format!("×{}", pin.weight));
+                let _w = ui.label(magnet_marks(magnet.weight));
                 if ui.add(chrome::icon_button("−")).clicked() {
-                    actions.push(PinAction::Weaken(pin.post.id));
+                    actions.push(MagnetAction::Repel(magnet.post.id));
                 }
                 if ui.add(chrome::icon_button("×")).clicked() {
-                    actions.push(PinAction::Remove(pin.post.id));
+                    actions.push(MagnetAction::Remove(magnet.post.id));
                 }
                 if slot == 0 {
                     let _prime = ui.label(chrome::eyebrow("prime"));
@@ -156,12 +150,12 @@ impl Bayonet {
         }
         if ui
             .add(chrome::icon_button("⌫"))
-            .on_hover_text("clear pins")
+            .on_hover_text("clear magnets")
             .clicked()
         {
-            actions.push(PinAction::Clear);
+            actions.push(MagnetAction::Clear);
         }
-        self.apply_pin_actions(actions);
+        self.apply_magnet_actions(actions);
     }
 
     fn gallery_panel(&mut self, ui: &mut egui::Ui) {
@@ -192,7 +186,6 @@ impl Bayonet {
             self.advance_thumb_epoch();
             self.save_config();
         }
-        let _edge = chrome::note(ui, "rows now fill the gallery width exactly");
     }
 
     fn filter_library_panel(&mut self, ui: &mut egui::Ui) {
@@ -231,29 +224,37 @@ impl Bayonet {
         }
     }
 
-    fn apply_pin_actions(&mut self, actions: Vec<PinAction>) {
+    fn apply_magnet_actions(&mut self, actions: Vec<MagnetAction>) {
         if actions.is_empty() {
             return;
         }
         let mut changed = false;
         for action in actions {
             match action {
-                PinAction::Changed => changed = true,
-                PinAction::Weaken(id) => {
-                    self.weaken_pin(id);
+                MagnetAction::Changed => changed = true,
+                MagnetAction::Repel(id) => {
+                    if let Some(post) = self
+                        .rank_magnets
+                        .iter()
+                        .find(|magnet| magnet.post.id == id)
+                        .map(|magnet| magnet.post.clone())
+                    {
+                        self.repel_magnet(&post);
+                    }
                     changed = false;
                 }
-                PinAction::Remove(id) => {
-                    self.remove_pin(id);
+                MagnetAction::Remove(id) => {
+                    self.remove_magnet(id);
                     changed = false;
                 }
-                PinAction::Clear => {
-                    self.rank_pins.clear();
+                MagnetAction::Clear => {
+                    self.rank_magnets.clear();
                     changed = true;
                 }
             }
         }
         if changed {
+            self.rank_magnets.retain(|magnet| magnet.weight != 0);
             self.save_config();
             self.request_refresh();
         }
@@ -311,4 +312,14 @@ impl Bayonet {
             }
         }
     }
+}
+
+fn magnet_marks(weight: i8) -> egui::RichText {
+    let magnitude = weight.unsigned_abs();
+    if magnitude == 0 {
+        return chrome::muted("0");
+    }
+    egui::RichText::new(MAGNET_GLYPH.repeat(usize::from(magnitude)))
+        .color(magnet_ink(weight))
+        .strong()
 }

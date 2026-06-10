@@ -10,8 +10,8 @@ use std::{
 
 use crate::{
     booru::{Booru as _, Danbooru},
-    clip::ClipForge,
-    index::{CacheStats, FactMergeBudget, Index, SoftHit},
+    dino::DinoForge,
+    index::{CacheStats, FactMergeBudget, Index, MagnetHit},
     media::{MediaCache, RgbaBlade, required_url},
     model::{Embedding, PostId, PostRecord, Query, SearchHit, Sort},
 };
@@ -47,7 +47,7 @@ pub enum Command {
         query: Query,
         sort: Sort,
         limit: usize,
-        soft: Option<SoftRefresh>,
+        magnet: Option<MagnetRefresh>,
     },
     Stats {
         serial: u64,
@@ -127,7 +127,7 @@ pub enum Event {
         id: PostId,
         fault: String,
     },
-    ClipIndexed {
+    EmbeddingsIndexed {
         ids: Vec<PostId>,
         stored: usize,
         faults: usize,
@@ -141,7 +141,7 @@ pub enum Event {
 }
 
 #[derive(Clone, Debug)]
-pub struct SoftRefresh {
+pub struct MagnetRefresh {
     pub needle: Embedding,
     pub alpha: f32,
     pub limit: usize,
@@ -152,14 +152,14 @@ pub struct SoftRefresh {
 #[derive(Clone, Debug)]
 pub enum RefreshHit {
     Hard(SearchHit),
-    Soft(SoftHit),
+    Magnetic(MagnetHit),
 }
 
 pub struct Worker {
     refresh_tx: Sender<RefreshCommand>,
     warm_tx: Sender<WarmCommand>,
     media_tx: Sender<MediaCommand>,
-    clip_tx: Sender<Command>,
+    embedding_tx: Sender<Command>,
     rx: Receiver<Event>,
 }
 
@@ -168,7 +168,7 @@ impl Worker {
         let (refresh_tx, refresh_rx) = unbounded();
         let (warm_tx, warm_rx) = unbounded();
         let (media_tx, media_rx) = unbounded();
-        let (clip_tx, clip_rx) = unbounded();
+        let (embedding_tx, embedding_rx) = unbounded();
         let (event_tx, event_rx) = unbounded();
         let refresh_events = event_tx.clone();
         let refresh_index = index.clone();
@@ -189,12 +189,13 @@ impl Worker {
         let merge_index = index.clone();
         let merge_events = event_tx.clone();
         let _merge = thread::spawn(move || merge_loop(merge_index, merge_events));
-        let _clip = thread::spawn(move || clip_loop(index, media, model_root, clip_rx, event_tx));
+        let _embedding =
+            thread::spawn(move || embedding_loop(index, media, model_root, embedding_rx, event_tx));
         Self {
             refresh_tx,
             warm_tx,
             media_tx,
-            clip_tx,
+            embedding_tx,
             rx: event_rx,
         }
     }
@@ -206,7 +207,7 @@ impl Worker {
                 query,
                 sort,
                 limit,
-                soft,
+                magnet,
             } => self
                 .refresh_tx
                 .send(RefreshCommand::Search {
@@ -214,7 +215,7 @@ impl Worker {
                     query,
                     sort,
                     limit,
-                    soft,
+                    magnet,
                 })
                 .context("send refresh worker command"),
             Command::Stats { serial } => self
@@ -262,9 +263,9 @@ impl Worker {
                 .send(MediaCommand::Save { id, url, path })
                 .context("send media worker command"),
             command @ Command::EmbedPosts { .. } => self
-                .clip_tx
+                .embedding_tx
                 .send(command)
-                .context("send CLIP worker command"),
+                .context("send embedding worker command"),
         }
     }
 
@@ -280,7 +281,7 @@ enum RefreshCommand {
         query: Query,
         sort: Sort,
         limit: usize,
-        soft: Option<SoftRefresh>,
+        magnet: Option<MagnetRefresh>,
     },
     Stats {
         serial: u64,
@@ -327,8 +328,8 @@ fn refresh_loop(index: Index, commands: Receiver<RefreshCommand>, events: Sender
         for command in commands.try_iter() {
             collect_refresh(command, &mut search, &mut stats);
         }
-        if let Some((serial, query, sort, limit, soft)) = search {
-            let event = match refresh(&index, &query, sort, limit, soft) {
+        if let Some((serial, query, sort, limit, magnet)) = search {
+            let event = match refresh(&index, &query, sort, limit, magnet) {
                 Ok(hit) => Event::Refreshed { serial, hit },
                 Err(err) => Event::RefreshFault {
                     serial,
@@ -350,7 +351,7 @@ fn refresh_loop(index: Index, commands: Receiver<RefreshCommand>, events: Sender
     }
 }
 
-type PendingSearch = Option<(u64, Query, Sort, usize, Option<SoftRefresh>)>;
+type PendingSearch = Option<(u64, Query, Sort, usize, Option<MagnetRefresh>)>;
 
 fn collect_refresh(command: RefreshCommand, search: &mut PendingSearch, stats: &mut Option<u64>) {
     match command {
@@ -359,8 +360,8 @@ fn collect_refresh(command: RefreshCommand, search: &mut PendingSearch, stats: &
             query,
             sort,
             limit,
-            soft,
-        } => *search = Some((serial, query, sort, limit, soft)),
+            magnet,
+        } => *search = Some((serial, query, sort, limit, magnet)),
         RefreshCommand::Stats { serial } => *stats = Some(serial),
     }
 }
@@ -370,20 +371,20 @@ fn refresh(
     query: &Query,
     sort: Sort,
     limit: usize,
-    soft: Option<SoftRefresh>,
+    magnet: Option<MagnetRefresh>,
 ) -> Result<RefreshHit> {
-    match soft {
-        Some(soft) => index
-            .search_soft(
+    match magnet {
+        Some(magnet) => index
+            .search_magnetic(
                 query,
                 sort,
-                &soft.needle,
-                soft.alpha,
-                soft.limit,
-                soft.pool,
-                soft.backlog,
+                &magnet.needle,
+                magnet.alpha,
+                magnet.limit,
+                magnet.pool,
+                magnet.backlog,
             )
-            .map(RefreshHit::Soft),
+            .map(RefreshHit::Magnetic),
         None => index.search(query, sort, limit).map(RefreshHit::Hard),
     }
 }
@@ -509,18 +510,18 @@ impl MediaCommand {
     }
 }
 
-fn clip_loop(
+fn embedding_loop(
     index: Index,
     media: MediaCache,
     model_root: PathBuf,
     commands: Receiver<Command>,
     events: Sender<Event>,
 ) {
-    let mut clip = None;
+    let mut forge = None;
     for command in commands {
         let outcome = match command {
             Command::EmbedPosts { posts } => {
-                forge(&mut clip, &model_root).map(|clip| embed_posts(&index, &media, clip, posts))
+                dino(&mut forge, &model_root).map(|dino| embed_posts(&index, &media, dino, posts))
             }
             Command::Warm { .. }
             | Command::Refresh { .. }
@@ -528,9 +529,9 @@ fn clip_loop(
             | Command::Blade { .. }
             | Command::CullBlades { .. }
             | Command::FullBlade { .. }
-            | Command::SaveMedia { .. } => {
-                Ok(Event::Fault("I/O command reached CLIP worker".to_owned()))
-            }
+            | Command::SaveMedia { .. } => Ok(Event::Fault(
+                "I/O command reached embedding worker".to_owned(),
+            )),
         };
         match outcome {
             Ok(event) => {
@@ -670,17 +671,17 @@ impl RateGate {
     }
 }
 
-fn forge<'a>(clip: &'a mut Option<ClipForge>, model_root: &Path) -> Result<&'a mut ClipForge> {
-    if clip.is_none() {
-        *clip = Some(ClipForge::new(model_root.to_path_buf()));
+fn dino<'a>(forge: &'a mut Option<DinoForge>, model_root: &Path) -> Result<&'a mut DinoForge> {
+    if forge.is_none() {
+        *forge = Some(DinoForge::new(model_root.to_path_buf()));
     }
-    clip.as_mut().context("CLIP forge missing")
+    forge.as_mut().context("DINOv2 forge missing")
 }
 
 fn embed_posts(
     index: &Index,
     media: &MediaCache,
-    clip: &mut ClipForge,
+    dino: &mut DinoForge,
     posts: Vec<PostRecord>,
 ) -> Event {
     let mut ids = Vec::with_capacity(posts.len());
@@ -688,13 +689,13 @@ fn embed_posts(
     let mut faults = 0_usize;
     for post in posts {
         ids.push(post.id);
-        match embed_post(index, media, clip, &post) {
+        match embed_post(index, media, dino, &post) {
             Ok(true) => stored += 1,
             Ok(false) => {}
             Err(_err) => faults += 1,
         }
     }
-    Event::ClipIndexed {
+    Event::EmbeddingsIndexed {
         ids,
         stored,
         faults,
@@ -704,15 +705,15 @@ fn embed_posts(
 fn embed_post(
     index: &Index,
     media: &MediaCache,
-    clip: &mut ClipForge,
+    dino: &mut DinoForge,
     post: &PostRecord,
 ) -> Result<bool> {
     if index.has_embedding(post.id)? {
         return Ok(false);
     }
-    let url = required_url(post.clip_url())?;
+    let url = required_url(post.embedding_url())?;
     let bytes = media.bytes(post.id, url)?;
-    let embedding = clip.image(&bytes)?;
+    let embedding = dino.image(&bytes)?;
     index.put_embedding(post.id, &embedding)?;
     Ok(true)
 }

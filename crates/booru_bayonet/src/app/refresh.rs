@@ -32,19 +32,19 @@ impl Bayonet {
     }
 
     fn dispatch_refresh(&mut self, serial: u64) {
-        let soft = self.rank_needle().map(|needle| SoftRefresh {
+        let magnet = self.rank_needle().map(|needle| MagnetRefresh {
             needle,
             alpha: self.rank_alpha,
             limit: RESULT_LIMIT,
-            pool: SOFT_POOL,
-            backlog: SOFT_BACKLOG,
+            pool: MAGNET_POOL,
+            backlog: MAGNET_BACKLOG,
         });
         let send = self.worker.send(Command::Refresh {
             serial,
             query: self.query(),
             sort: self.sort,
             limit: RESULT_LIMIT,
-            soft,
+            magnet,
         });
         match send {
             Ok(()) => {
@@ -87,15 +87,15 @@ impl Bayonet {
     fn install_refresh(&mut self, hit: RefreshHit) {
         match hit {
             RefreshHit::Hard(hit) => self.install_hard_refresh(hit),
-            RefreshHit::Soft(hit) => {
-                let queued = self.queue_clip(hit.missing);
+            RefreshHit::Magnetic(hit) => {
+                let queued = self.queue_embeddings(hit.missing);
                 let posts = hit.hit.posts.len();
                 let candidates = hit.hit.candidates;
                 let embedded = hit.embedded;
                 let pool = hit.pool;
                 self.install_hit(hit.hit);
                 self.status = format!(
-                    "{} hits from {} candidates; image rank {}/{} embedded, queued {}; α {:.2}",
+                    "{} hits from {} candidates; magnet rank {}/{} embedded, queued {}; α {:.2}",
                     posts, candidates, embedded, pool, queued, self.rank_alpha
                 );
             }
@@ -103,13 +103,13 @@ impl Bayonet {
     }
 
     fn install_hard_refresh(&mut self, hit: SearchHit) {
-        let rank_armed = self.rank_alpha > 0.0 && !self.rank_pins.is_empty();
+        let rank_armed = self.rank_alpha > 0.0 && !self.rank_magnets.is_empty();
         let posts = hit.posts.len();
         let candidates = hit.candidates;
         self.install_hit(hit);
         self.status = if rank_armed {
             format!(
-                "{} hits from {} candidates; waiting for pinned image embeddings",
+                "{} hits from {} candidates; waiting for magnet image embeddings",
                 posts, candidates
             )
         } else {
@@ -210,7 +210,7 @@ fn cache_status(stats: &CacheStats) -> String {
         .newest
         .map_or_else(|| "newest unknown".to_owned(), |id| format!("newest #{id}"));
     format!(
-        "cache {} posts, {} tag chunks, {} clip, {} pending fact batches, ratings {ratings}, {newest}, {frontier}",
+        "cache {} posts, {} tag chunks, {} dino, {} pending fact batches, ratings {ratings}, {newest}, {frontier}",
         stats.posts, stats.tag_chunks, stats.embeddings, stats.pending_fact_batches
     )
 }

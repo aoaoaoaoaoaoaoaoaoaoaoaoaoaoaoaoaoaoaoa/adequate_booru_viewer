@@ -14,7 +14,7 @@ use std::{
 use crate::{
     chrome,
     config::{
-        Config, EmbeddingConfig, FilterConfig, FilterName, PinConfig, QueryConfig, SavedFilter,
+        Config, EmbeddingConfig, FilterConfig, FilterName, MagnetConfig, QueryConfig, SavedFilter,
         ViewConfig,
     },
     filter_bank,
@@ -32,7 +32,7 @@ use crate::{
     },
     tag_palette,
     trace::startup,
-    worker::{BladeEpoch, Command, Event, RefreshHit, SoftRefresh, Worker},
+    worker::{BladeEpoch, Command, Event, MagnetRefresh, RefreshHit, Worker},
     xdg::{Lair, compact_path},
 };
 
@@ -44,8 +44,8 @@ use refresh::AsyncPulse;
 use viewer::viewer_title_bar;
 
 const RESULT_LIMIT: usize = 360;
-const SOFT_POOL: usize = 2_400;
-const SOFT_BACKLOG: usize = 128;
+const MAGNET_POOL: usize = 2_400;
+const MAGNET_BACKLOG: usize = 128;
 const SUGGESTIONS: usize = 12;
 const EVENT_BUDGET: usize = 12;
 const AUTO_WARM_PAGES: u32 = 1;
@@ -55,7 +55,8 @@ const MAX_IMAGES_PER_ROW: u16 = 12;
 const MIN_TILE_EDGE: f32 = 72.0;
 const GAP: f32 = 8.0;
 const VIEWER_CHROME: f32 = 40.0;
-const MAX_PINS: usize = 6;
+const MAX_MAGNETS: usize = 6;
+const MAGNET_GLYPH: &str = "∩";
 
 pub struct Bayonet {
     lair: Lair,
@@ -69,7 +70,7 @@ pub struct Bayonet {
     active_filter: Option<FilterName>,
     saved_filters: Vec<SavedFilter>,
     rank_alpha: f32,
-    rank_pins: Vec<RankPin>,
+    rank_magnets: Vec<RankMagnet>,
     sort: Sort,
     refresh_serial: u64,
     refresh_pulse: AsyncPulse,
@@ -95,7 +96,7 @@ pub struct Bayonet {
     tag_menu: TagMenu,
     tag_menu_rect: Option<egui::Rect>,
     tag_kinds: HashMap<Tag, TagKind>,
-    clip_inflight: HashSet<PostId>,
+    embedding_inflight: HashSet<PostId>,
     cache_status: String,
     warm_status: String,
     crawl_status: String,
@@ -136,7 +137,7 @@ impl Bayonet {
                 || query.clamp_group_path(&config.query.active_group),
                 |filter| query.clamp_group_path(&filter.active_group),
             );
-        let rank_pins = restore_rank_pins(&index, &config.embedding.pins)?;
+        let rank_magnets = restore_rank_magnets(&index, &config.embedding.magnets)?;
         let mut app = Self {
             status: format!("index {}", compact_path(&lair.index_path())),
             crawl_status: "crawl waking".to_owned(),
@@ -151,7 +152,7 @@ impl Bayonet {
             active_filter,
             saved_filters,
             rank_alpha: config.embedding.alpha.clamp(0.0, 2.0),
-            rank_pins,
+            rank_magnets,
             sort,
             refresh_serial: 0,
             refresh_pulse: AsyncPulse::Idle,
@@ -180,7 +181,7 @@ impl Bayonet {
             tag_menu: TagMenu::Closed,
             tag_menu_rect: None,
             tag_kinds: HashMap::new(),
-            clip_inflight: HashSet::new(),
+            embedding_inflight: HashSet::new(),
             cache_status: "cache measuring".to_owned(),
             warm_status: "query warm idle".to_owned(),
             startup_probe: StartupProbe::from_env(),
@@ -408,10 +409,10 @@ impl Bayonet {
         }
     }
 
-    fn queue_clip(&mut self, posts: Vec<PostRecord>) -> usize {
+    fn queue_embeddings(&mut self, posts: Vec<PostRecord>) -> usize {
         let posts = posts
             .into_iter()
-            .filter(|post| self.clip_inflight.insert(post.id))
+            .filter(|post| self.embedding_inflight.insert(post.id))
             .collect::<Vec<_>>();
         let queued = posts.len();
         if queued == 0 {
@@ -424,15 +425,15 @@ impl Bayonet {
     }
 
     fn rank_needle(&mut self) -> Option<Embedding> {
-        if self.rank_alpha <= 0.0 || self.rank_pins.is_empty() {
+        if self.rank_alpha <= 0.0 || self.rank_magnets.is_empty() {
             return None;
         }
         let mut embeddings = Vec::<(f32, Embedding)>::new();
         let mut missing = Vec::new();
-        for pin in &self.rank_pins {
-            match self.index.embedding(pin.post.id) {
-                Ok(Some(embedding)) => embeddings.push((f32::from(pin.weight), embedding)),
-                Ok(None) => missing.push(pin.post.clone()),
+        for magnet in &self.rank_magnets {
+            match self.index.embedding(magnet.post.id) {
+                Ok(Some(embedding)) => embeddings.push((f32::from(magnet.weight), embedding)),
+                Ok(None) => missing.push(magnet.post.clone()),
                 Err(err) => {
                     self.status = format!("{err:#}");
                     return None;
@@ -440,9 +441,9 @@ impl Bayonet {
             }
         }
         if !missing.is_empty() {
-            let queued = self.queue_clip(missing);
+            let queued = self.queue_embeddings(missing);
             if queued > 0 {
-                self.status = format!("queued {queued} pinned images for embedding");
+                self.status = format!("queued {queued} magnet images for embedding");
             }
         }
         if embeddings.is_empty() {
@@ -459,44 +460,49 @@ impl Bayonet {
         .ok()
     }
 
-    fn pin_weight(&self, id: PostId) -> Option<u8> {
-        self.rank_pins
+    fn magnet_weight(&self, id: PostId) -> Option<i8> {
+        self.rank_magnets
             .iter()
-            .find(|pin| pin.post.id == id)
-            .map(|pin| pin.weight)
+            .find(|magnet| magnet.post.id == id)
+            .map(|magnet| magnet.weight)
     }
 
-    fn add_pin(&mut self, post: &PostRecord) {
-        if let Some(pin) = self.rank_pins.iter_mut().find(|pin| pin.post.id == post.id) {
-            pin.weight = pin.weight.saturating_add(1).min(PinConfig::MAX_WEIGHT);
-        } else if self.rank_pins.len() < MAX_PINS {
-            self.rank_pins.push(RankPin::new(post.clone(), 1));
+    fn attract_magnet(&mut self, post: &PostRecord) {
+        self.shift_magnet(post, 1);
+    }
+
+    fn repel_magnet(&mut self, post: &PostRecord) {
+        self.shift_magnet(post, -1);
+    }
+
+    fn shift_magnet(&mut self, post: &PostRecord, delta: i8) {
+        if let Some(slot) = self
+            .rank_magnets
+            .iter()
+            .position(|magnet| magnet.post.id == post.id)
+        {
+            let weight = (self.rank_magnets[slot].weight + delta)
+                .clamp(MagnetConfig::MIN_WEIGHT, MagnetConfig::MAX_WEIGHT);
+            if weight == 0 {
+                let _removed = self.rank_magnets.remove(slot);
+            } else {
+                self.rank_magnets[slot].weight = weight;
+            }
+        } else if self.rank_magnets.len() < MAX_MAGNETS {
+            self.rank_magnets.push(RankMagnet::new(post.clone(), delta));
             if self.rank_alpha <= f32::EPSILON {
                 self.rank_alpha = 0.10;
             }
         } else {
-            self.status = format!("pin heap is full ({MAX_PINS})");
+            self.status = format!("magnet heap is full ({MAX_MAGNETS})");
             return;
         }
         self.save_config();
         self.request_refresh();
     }
 
-    fn weaken_pin(&mut self, id: PostId) {
-        let Some(slot) = self.rank_pins.iter().position(|pin| pin.post.id == id) else {
-            return;
-        };
-        if self.rank_pins[slot].weight > PinConfig::MIN_WEIGHT {
-            self.rank_pins[slot].weight -= 1;
-        } else {
-            let _removed = self.rank_pins.remove(slot);
-        }
-        self.save_config();
-        self.request_refresh();
-    }
-
-    fn remove_pin(&mut self, id: PostId) {
-        self.rank_pins.retain(|pin| pin.post.id != id);
+    fn remove_magnet(&mut self, id: PostId) {
+        self.rank_magnets.retain(|magnet| magnet.post.id != id);
         self.save_config();
         self.request_refresh();
     }
@@ -660,21 +666,20 @@ impl Bayonet {
                     self.status = format!("save #{id} failed: {fault}");
                     ctx.request_repaint();
                 }
-                Event::ClipIndexed {
+                Event::EmbeddingsIndexed {
                     ids,
                     stored,
                     faults,
                 } => {
                     for id in ids {
-                        let _was_inflight = self.clip_inflight.remove(&id);
+                        let _was_inflight = self.embedding_inflight.remove(&id);
                     }
                     self.request_refresh();
                     self.request_stats();
                     if faults == 0 {
-                        self.status = format!("embedded {stored} Jina CLIP images");
+                        self.status = format!("embedded {stored} DINOv2 images");
                     } else {
-                        self.status =
-                            format!("embedded {stored} Jina CLIP images; {faults} faults");
+                        self.status = format!("embedded {stored} DINOv2 images; {faults} faults");
                     }
                     ctx.request_repaint();
                 }
@@ -770,15 +775,15 @@ impl Bayonet {
                 Some(ThumbLoad::Fault) => paint_tile_text(ui, rect, "fault"),
                 None => paint_tile_text(ui, rect, "no image"),
             }
-            if let Some(weight) = self.pin_weight(post.id) {
-                paint_pin_badge(ui, rect, weight);
+            if let Some(weight) = self.magnet_weight(post.id) {
+                paint_magnet_badge(ui, rect, weight);
             }
-            let pin_consumed = self.pin_hover(ui, post, rect, &response);
-            if response.clicked() && !pin_consumed && !self.tag_menu.is_open() {
+            let magnet_consumed = self.magnet_hover(ui, post, rect, &response);
+            if response.clicked() && !magnet_consumed && !self.tag_menu.is_open() {
                 self.open_full(post);
             }
             if response.secondary_clicked()
-                && !pin_consumed
+                && !magnet_consumed
                 && let Some(pos) = response.interact_pointer_pos()
             {
                 self.open_tag_menu(post, pos);
@@ -795,73 +800,74 @@ impl Bayonet {
         };
     }
 
-    fn pin_hover(
+    fn magnet_hover(
         &mut self,
         ui: &mut egui::Ui,
         post: &PostRecord,
         rect: egui::Rect,
         response: &egui::Response,
     ) -> bool {
-        let pinned = self.pin_weight(post.id).is_some();
-        let pin_rect = egui::Rect::from_min_size(
+        let weight = self.magnet_weight(post.id);
+        let magnetized = weight.is_some();
+        let magnet_rect = egui::Rect::from_min_size(
             rect.right_top() + egui::vec2(-34.0, 6.0),
             egui::vec2(28.0, 24.0),
         );
-        let (hovering_pin, primary_pin, secondary_pin) = ui.input(|input| {
+        let (hovering_magnet, primary_magnet, secondary_magnet) = ui.input(|input| {
             let hovering = input
                 .pointer
                 .hover_pos()
-                .is_some_and(|pos| pin_rect.contains(pos));
+                .is_some_and(|pos| magnet_rect.contains(pos));
             let inside = input
                 .pointer
                 .interact_pos()
-                .is_some_and(|pos| pin_rect.contains(pos));
+                .is_some_and(|pos| magnet_rect.contains(pos));
             (
                 hovering,
                 input.pointer.primary_clicked() && inside,
                 input.pointer.secondary_clicked() && inside,
             )
         });
-        if !pinned && !response.hovered() && !hovering_pin && !primary_pin && !secondary_pin {
+        if !magnetized
+            && !response.hovered()
+            && !hovering_magnet
+            && !primary_magnet
+            && !secondary_magnet
+        {
             return false;
         }
-        let pin = ui.interact(
-            pin_rect,
-            egui::Id::new(("image-pin", post.id.0)),
+        let magnet = ui.interact(
+            magnet_rect,
+            egui::Id::new(("image-magnet", post.id.0)),
             egui::Sense::click(),
         );
-        let fill = if pinned {
+        let fill = if magnetized {
             chrome::RAISED
         } else {
             chrome::CONTROL
         };
-        let stroke = if pinned {
-            chrome::HOT
-        } else {
-            chrome::EDGE_STRONG
-        };
-        let _fill = ui.painter().rect_filled(pin_rect, 0.0, fill);
+        let ink = magnet_ink(weight.unwrap_or(1));
+        let stroke = if magnetized { ink } else { chrome::EDGE_STRONG };
+        let _fill = ui.painter().rect_filled(magnet_rect, 0.0, fill);
         let _stroke = ui.painter().rect_stroke(
-            pin_rect,
+            magnet_rect,
             0.0,
             egui::Stroke::new(1.0, stroke),
             egui::StrokeKind::Inside,
         );
         let _glyph = ui.painter().text(
-            pin_rect.center(),
+            magnet_rect.center(),
             egui::Align2::CENTER_CENTER,
-            "📌",
+            MAGNET_GLYPH,
             egui::TextStyle::Button.resolve(ui.style()),
-            chrome::HOT,
+            ink,
         );
-        if pin.clicked() || primary_pin {
-            self.add_pin(post);
+        if magnet.clicked() || primary_magnet {
+            self.attract_magnet(post);
             return true;
         }
-        if secondary_pin {
-            if pinned {
-                self.weaken_pin(post.id);
-            }
+        if secondary_magnet {
+            self.repel_magnet(post);
             return true;
         }
         false
@@ -1153,8 +1159,11 @@ impl Bayonet {
             },
             embedding: EmbeddingConfig {
                 alpha: self.rank_alpha,
-                pins: self.rank_pins.iter().map(RankPin::config).collect(),
-                legacy_prompt: String::new(),
+                magnets: self
+                    .rank_magnets
+                    .iter()
+                    .filter_map(RankMagnet::config)
+                    .collect(),
             },
         };
         if let Err(err) = config.save(&self.lair.config_path()) {
@@ -1195,29 +1204,29 @@ enum ZoomGate {
 }
 
 #[derive(Clone, Debug)]
-struct RankPin {
+struct RankMagnet {
     post: PostRecord,
-    weight: u8,
+    weight: i8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PinAction {
+enum MagnetAction {
     Changed,
-    Weaken(PostId),
+    Repel(PostId),
     Remove(PostId),
     Clear,
 }
 
-impl RankPin {
-    fn new(post: PostRecord, weight: u8) -> Self {
+impl RankMagnet {
+    fn new(post: PostRecord, weight: i8) -> Self {
         Self {
             post,
-            weight: weight.clamp(PinConfig::MIN_WEIGHT, PinConfig::MAX_WEIGHT),
+            weight: weight.clamp(MagnetConfig::MIN_WEIGHT, MagnetConfig::MAX_WEIGHT),
         }
     }
 
-    fn config(&self) -> PinConfig {
-        PinConfig::new(self.post.id, self.weight)
+    fn config(&self) -> Option<MagnetConfig> {
+        MagnetConfig::forge(self.post.id, self.weight)
     }
 }
 
@@ -1308,11 +1317,11 @@ fn active_prefix(text: &str) -> Option<ActivePrefix> {
     })
 }
 
-fn restore_rank_pins(index: &Index, pins: &[PinConfig]) -> Result<Vec<RankPin>> {
+fn restore_rank_magnets(index: &Index, magnets: &[MagnetConfig]) -> Result<Vec<RankMagnet>> {
     let mut restored = Vec::new();
-    for pin in pins.iter().take(MAX_PINS) {
-        if let Some(post) = index.post(pin.id)? {
-            restored.push(RankPin::new(post, pin.weight));
+    for magnet in magnets.iter().take(MAX_MAGNETS) {
+        if let Some(post) = index.post(magnet.id)? {
+            restored.push(RankMagnet::new(post, magnet.weight));
         }
     }
     Ok(restored)
@@ -1336,26 +1345,37 @@ fn paint_tile_text(ui: &egui::Ui, rect: egui::Rect, text: &str) {
     );
 }
 
-fn paint_pin_badge(ui: &egui::Ui, rect: egui::Rect, weight: u8) {
-    let weight = weight.clamp(PinConfig::MIN_WEIGHT, PinConfig::MAX_WEIGHT);
+fn paint_magnet_badge(ui: &egui::Ui, rect: egui::Rect, weight: i8) {
+    let magnitude = weight
+        .unsigned_abs()
+        .clamp(MagnetConfig::MIN_MAGNITUDE, MagnetConfig::MAX_MAGNITUDE);
     let badge = egui::Rect::from_min_size(
         rect.min + egui::vec2(6.0, 6.0),
-        egui::vec2(10.0 + 18.0 * f32::from(weight), 20.0),
+        egui::vec2(10.0 + 18.0 * f32::from(magnitude), 20.0),
     );
+    let ink = magnet_ink(weight);
     let _fill = ui.painter().rect_filled(badge, 0.0, chrome::RAISED);
     let _stroke = ui.painter().rect_stroke(
         badge,
         0.0,
-        egui::Stroke::new(1.0, chrome::HOT),
+        egui::Stroke::new(1.0, ink),
         egui::StrokeKind::Inside,
     );
     let _text = ui.painter().text(
         badge.center(),
         egui::Align2::CENTER_CENTER,
-        "📌".repeat(usize::from(weight)),
+        MAGNET_GLYPH.repeat(usize::from(magnitude)),
         egui::TextStyle::Button.resolve(ui.style()),
-        chrome::HOT,
+        ink,
     );
+}
+
+fn magnet_ink(weight: i8) -> egui::Color32 {
+    if weight < 0 {
+        chrome::PUSH
+    } else {
+        chrome::HOT
+    }
 }
 
 fn full_image_box(

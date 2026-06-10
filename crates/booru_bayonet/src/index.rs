@@ -7,7 +7,7 @@ use roaring::RoaringBitmap;
 use std::{collections::BTreeSet, mem::size_of, path::Path, sync::Arc};
 
 use crate::model::{
-    BoolOp, CLIP_DIM, Embedding, PostId, PostRecord, Query, QueryAtom, QueryExpr, RatingClass,
+    BoolOp, EMBEDDING_DIM, Embedding, PostId, PostRecord, Query, QueryAtom, QueryExpr, RatingClass,
     SearchHit, Sort, Tag, TagKind, decode_record, encode_record,
 };
 use crate::posting::{self, Batch as FactBatch, Lane as PostingLane};
@@ -20,8 +20,8 @@ const RATING_CHUNKS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("ra
 const POSTING_FACTS: TableDefinition<'_, u64, &[u8]> = TableDefinition::new("posting_facts.v1");
 const SCORE_POSTS: TableDefinition<'_, u64, u32> = TableDefinition::new("score_posts");
 const FAV_POSTS: TableDefinition<'_, u64, u32> = TableDefinition::new("fav_posts");
-const JINA_IMAGE: TableDefinition<'_, u64, &[u8]> =
-    TableDefinition::new("jina_clip_v1_image_embeddings");
+const IMAGE_EMBEDDINGS: TableDefinition<'_, u64, &[u8]> =
+    TableDefinition::new("dinov2_s14_image_embeddings.v1");
 const META: TableDefinition<'_, &str, u64> = TableDefinition::new("meta");
 
 const SMALL_SORT: u64 = 50_000;
@@ -51,7 +51,7 @@ pub struct FactMerge {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct SoftHit {
+pub struct MagnetHit {
     pub hit: SearchHit,
     pub pool: usize,
     pub embedded: usize,
@@ -110,7 +110,9 @@ impl Index {
             let mut post_table = tx.open_table(POSTS).context("open posts")?;
             let mut score_table = tx.open_table(SCORE_POSTS).context("open score_posts")?;
             let mut fav_table = tx.open_table(FAV_POSTS).context("open fav_posts")?;
-            let mut jina_table = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
+            let mut embeddings = tx
+                .open_table(IMAGE_EMBEDDINGS)
+                .context("open image embedding table")?;
             let mut tag_kinds = tx.open_table(TAG_KINDS).context("open tag kind table")?;
             let mut facts = FactBatch::default();
 
@@ -129,7 +131,7 @@ impl Index {
                         &mut post_table,
                         &mut score_table,
                         &mut fav_table,
-                        &mut jina_table,
+                        &mut embeddings,
                         old,
                         !indexable,
                     )?;
@@ -165,30 +167,36 @@ impl Index {
     pub fn put_embedding(&self, id: PostId, embedding: &Embedding) -> Result<()> {
         let tx = self.begin_quick_write("begin embedding write")?;
         {
-            let mut table = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
+            let mut table = tx
+                .open_table(IMAGE_EMBEDDINGS)
+                .context("open image embedding table")?;
             let bytes = encode_embedding(embedding);
             let _old = table
                 .insert(u64::from(id.0), bytes.as_slice())
-                .context("upsert Jina image embedding")?;
+                .context("upsert DINOv2 image embedding")?;
         }
         tx.commit().context("commit embedding write")
     }
 
     pub fn has_embedding(&self, id: PostId) -> Result<bool> {
         let tx = self.db.begin_read().context("begin embedding read")?;
-        let table = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
+        let table = tx
+            .open_table(IMAGE_EMBEDDINGS)
+            .context("open image embedding table")?;
         table
             .get(u64::from(id.0))
-            .context("read Jina image embedding")
+            .context("read DINOv2 image embedding")
             .map(|guard| guard.is_some())
     }
 
     pub fn embedding(&self, id: PostId) -> Result<Option<Embedding>> {
         let tx = self.db.begin_read().context("begin embedding read")?;
-        let table = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
+        let table = tx
+            .open_table(IMAGE_EMBEDDINGS)
+            .context("open image embedding table")?;
         table
             .get(u64::from(id.0))
-            .context("read Jina image embedding")?
+            .context("read DINOv2 image embedding")?
             .map(|guard| decode_embedding(guard.value()))
             .transpose()
     }
@@ -275,7 +283,9 @@ impl Index {
         let rating_chunks = tx.open_table(RATING_CHUNKS).context("open rating chunks")?;
         let facts = tx.open_table(POSTING_FACTS).context("open posting facts")?;
         let pending = pending_facts(&facts)?;
-        let embeddings = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
+        let embeddings = tx
+            .open_table(IMAGE_EMBEDDINGS)
+            .context("open image embedding table")?;
         let meta = tx.open_table(META).context("open meta")?;
         startup("index.stats.tables");
         let posts_len = posts.len().context("count posts")?;
@@ -307,7 +317,7 @@ impl Index {
         Ok(CacheStats {
             posts: posts_len,
             tag_chunks: tag_chunks.len().context("count tag chunks")?,
-            embeddings: embeddings.len().context("count Jina image embeddings")?,
+            embeddings: embeddings.len().context("count DINOv2 image embeddings")?,
             pending_fact_batches: facts.len().context("count posting fact batches")?,
             newest,
             crawl_before,
@@ -445,7 +455,7 @@ impl Index {
         })
     }
 
-    pub fn search_soft(
+    pub fn search_magnetic(
         &self,
         query: &Query,
         sort: Sort,
@@ -454,25 +464,27 @@ impl Index {
         limit: usize,
         pool: usize,
         backlog: usize,
-    ) -> Result<SoftHit> {
-        startup("index.soft.enter");
+    ) -> Result<MagnetHit> {
+        startup("index.magnet.enter");
         let mut hit = self.search(query, sort, pool.max(limit))?;
-        startup("index.soft.base.search.done");
+        startup("index.magnet.base.search.done");
         let candidates = hit.candidates;
         let pool_len = hit.posts.len();
         let mut missing = Vec::with_capacity(backlog);
         let mut embedded = 0_usize;
         {
-            let tx = self.db.begin_read().context("begin soft rank read")?;
-            startup("index.soft.tx");
-            let embeddings = tx.open_table(JINA_IMAGE).context("open Jina image table")?;
-            startup("index.soft.table");
+            let tx = self.db.begin_read().context("begin magnet rank read")?;
+            startup("index.magnet.tx");
+            let embeddings = tx
+                .open_table(IMAGE_EMBEDDINGS)
+                .context("open image embedding table")?;
+            startup("index.magnet.table");
             let mut scored = Vec::with_capacity(pool_len);
             for (rank, post) in hit.posts.drain(..).enumerate() {
                 let base = base_rank(&post, sort, rank, pool_len);
                 let sim = embeddings
                     .get(u64::from(post.id.0))
-                    .context("read Jina image embedding")?
+                    .context("read DINOv2 image embedding")?
                     .map(|guard| decode_embedding(guard.value()).map(|image| needle.cosine(&image)))
                     .transpose()?;
                 if sim.is_some() {
@@ -482,7 +494,7 @@ impl Index {
                 }
                 scored.push((base + alpha * sim.unwrap_or_default(), rank, post));
             }
-            startup("index.soft.embeddings.read");
+            startup("index.magnet.embeddings.read");
             scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
             hit.posts = scored
                 .into_iter()
@@ -490,9 +502,9 @@ impl Index {
                 .map(|(_, _, post)| post)
                 .collect();
         }
-        startup("index.soft.done");
+        startup("index.magnet.done");
         hit.candidates = candidates;
-        Ok(SoftHit {
+        Ok(MagnetHit {
             hit,
             pool: pool_len,
             embedded,
@@ -518,9 +530,9 @@ impl Index {
                 .context("prime posting facts")?;
             let _score = tx.open_table(SCORE_POSTS).context("prime score_posts")?;
             let _favs = tx.open_table(FAV_POSTS).context("prime fav_posts")?;
-            let _jina = tx
-                .open_table(JINA_IMAGE)
-                .context("prime Jina image table")?;
+            let _embeddings = tx
+                .open_table(IMAGE_EMBEDDINGS)
+                .context("prime image embedding table")?;
             let mut meta = tx.open_table(META).context("prime meta")?;
             let _old = meta
                 .insert(QUICK_REPAIR_V1, 1)
@@ -547,7 +559,7 @@ impl Index {
         open!(POSTING_FACTS);
         open!(SCORE_POSTS);
         open!(FAV_POSTS);
-        open!(JINA_IMAGE);
+        open!(IMAGE_EMBEDDINGS);
         open!(META);
         Ok(true)
     }
@@ -766,7 +778,7 @@ fn remove_record_core(
     post_table: &mut redb::Table<'_, u64, &[u8]>,
     score_table: &mut redb::Table<'_, u64, u32>,
     fav_table: &mut redb::Table<'_, u64, u32>,
-    jina_table: &mut redb::Table<'_, u64, &[u8]>,
+    embedding_table: &mut redb::Table<'_, u64, &[u8]>,
     post: &PostRecord,
     purge_embedding: bool,
 ) -> Result<()> {
@@ -780,9 +792,9 @@ fn remove_record_core(
         .remove(sort_key_u32(post.favs, post.id))
         .context("remove favorite lane")?;
     if purge_embedding {
-        let _old_embedding = jina_table
+        let _old_embedding = embedding_table
             .remove(u64::from(post.id.0))
-            .context("remove Jina image embedding")?;
+            .context("remove image embedding")?;
     }
     Ok(())
 }
@@ -1192,7 +1204,7 @@ fn unsigned_log_rank(count: u32) -> f32 {
 }
 
 fn encode_embedding(embedding: &Embedding) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(CLIP_DIM * size_of::<f32>());
+    let mut bytes = Vec::with_capacity(EMBEDDING_DIM * size_of::<f32>());
     for value in embedding.as_slice() {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
@@ -1200,10 +1212,10 @@ fn encode_embedding(embedding: &Embedding) -> Vec<u8> {
 }
 
 fn decode_embedding(bytes: &[u8]) -> Result<Embedding> {
-    if bytes.len() != CLIP_DIM * size_of::<f32>() {
+    if bytes.len() != EMBEDDING_DIM * size_of::<f32>() {
         anyhow::bail!(
             "expected {} embedding bytes, got {}",
-            CLIP_DIM * size_of::<f32>(),
+            EMBEDDING_DIM * size_of::<f32>(),
             bytes.len()
         );
     }

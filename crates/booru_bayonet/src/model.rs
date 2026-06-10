@@ -7,7 +7,7 @@ use std::{
 
 use crate::wire;
 
-pub const CLIP_DIM: usize = 768;
+pub const EMBEDDING_DIM: usize = 384;
 const POST_MAGIC: &[u8; 4] = b"BBP1";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -839,7 +839,7 @@ impl PostRecord {
             .or(self.preview_url.as_deref())
     }
 
-    pub fn clip_url(&self) -> Option<&str> {
+    pub fn embedding_url(&self) -> Option<&str> {
         self.thumb_720_url
             .as_deref()
             .or(self.large_url.as_deref())
@@ -862,9 +862,9 @@ pub struct Embedding {
 
 impl Embedding {
     pub fn forge(values: Vec<f32>) -> Result<Self> {
-        if values.len() != CLIP_DIM {
+        if values.len() != EMBEDDING_DIM {
             bail!(
-                "expected {CLIP_DIM}-wide Jina CLIP embedding, got {}",
+                "expected {EMBEDDING_DIM}-wide DINOv2 embedding, got {}",
                 values.len()
             );
         }
@@ -874,9 +874,9 @@ impl Embedding {
     }
 
     pub fn from_normalized(values: Vec<f32>) -> Result<Self> {
-        if values.len() != CLIP_DIM {
+        if values.len() != EMBEDDING_DIM {
             bail!(
-                "expected {CLIP_DIM}-wide Jina CLIP embedding, got {}",
+                "expected {EMBEDDING_DIM}-wide DINOv2 embedding, got {}",
                 values.len()
             );
         }
@@ -897,22 +897,22 @@ impl Embedding {
     }
 
     pub fn weighted<'a>(items: impl IntoIterator<Item = (f32, &'a Self)>) -> Result<Self> {
-        let mut values = vec![0.0; CLIP_DIM];
-        let mut total = 0.0_f32;
+        let mut values = vec![0.0; EMBEDDING_DIM];
+        let mut mass = 0.0_f32;
         for (weight, embedding) in items {
-            if weight <= 0.0 {
+            if weight.abs() <= f32::EPSILON {
                 continue;
             }
-            total += weight;
+            mass += weight.abs();
             for (out, lane) in values.iter_mut().zip(&embedding.values) {
                 *out += weight * lane;
             }
         }
-        if total <= f32::EPSILON {
-            bail!("weighted embedding has no positive mass");
+        if mass <= f32::EPSILON {
+            bail!("weighted embedding has no magnetic mass");
         }
         for value in &mut values {
-            *value /= total;
+            *value /= mass;
         }
         Self::forge(values)
     }
@@ -920,7 +920,7 @@ impl Embedding {
     fn normalize(&mut self) -> Result<()> {
         let norm = self.values.iter().map(|x| x * x).sum::<f32>().sqrt();
         if !norm.is_finite() || norm <= f32::EPSILON {
-            bail!("degenerate Jina CLIP embedding");
+            bail!("degenerate DINOv2 embedding");
         }
         for x in &mut self.values {
             *x /= norm;

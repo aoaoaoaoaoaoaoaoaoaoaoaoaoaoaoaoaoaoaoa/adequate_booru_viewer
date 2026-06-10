@@ -48,10 +48,10 @@ fn stem(query: &Query) -> String {
     } else {
         text
     };
-    clip(&text, 48)
+    truncate(&text, 48)
 }
 
-fn clip(text: &str, limit: usize) -> String {
+fn truncate(text: &str, limit: usize) -> String {
     let mut chars = text.chars();
     let mut out = chars.by_ref().take(limit).collect::<String>();
     if chars.next().is_some() {

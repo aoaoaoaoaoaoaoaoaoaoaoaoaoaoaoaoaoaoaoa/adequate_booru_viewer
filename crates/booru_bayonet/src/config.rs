@@ -14,7 +14,7 @@ pub struct Config {
     pub query: QueryConfig,
     pub filters: FilterConfig,
     pub view: ViewConfig,
-    #[serde(default, alias = "soft")]
+    #[serde(default)]
     pub embedding: EmbeddingConfig,
 }
 
@@ -25,7 +25,6 @@ impl Config {
                 let mut config = toml::from_str::<Self>(&text)
                     .with_context(|| format!("parse {}", path.display()))?;
                 config.view.canonicalize();
-                config.embedding.legacy_prompt.clear();
                 Ok(Arc::new(config))
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Arc::new(Self::default())),
@@ -169,37 +168,34 @@ fn legacy_rows(scale: f32) -> u16 {
 #[serde(default, deny_unknown_fields)]
 pub struct EmbeddingConfig {
     pub alpha: f32,
-    pub pins: Vec<PinConfig>,
-    #[serde(default, rename = "prompt", skip_serializing)]
-    pub legacy_prompt: String,
+    pub magnets: Vec<MagnetConfig>,
 }
 
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
             alpha: 0.0,
-            pins: Vec::new(),
-            legacy_prompt: String::new(),
+            magnets: Vec::new(),
         }
     }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct PinConfig {
+pub struct MagnetConfig {
     pub id: PostId,
-    pub weight: u8,
+    pub weight: i8,
 }
 
-impl PinConfig {
-    pub const MIN_WEIGHT: u8 = 1;
-    pub const MAX_WEIGHT: u8 = 6;
+impl MagnetConfig {
+    pub const MIN_WEIGHT: i8 = -6;
+    pub const MAX_WEIGHT: i8 = 6;
+    pub const MIN_MAGNITUDE: u8 = 1;
+    pub const MAX_MAGNITUDE: u8 = 6;
 
-    pub fn new(id: PostId, weight: u8) -> Self {
-        Self {
-            id,
-            weight: weight.clamp(Self::MIN_WEIGHT, Self::MAX_WEIGHT),
-        }
+    pub fn forge(id: PostId, weight: i8) -> Option<Self> {
+        let weight = weight.clamp(Self::MIN_WEIGHT, Self::MAX_WEIGHT);
+        (weight != 0).then_some(Self { id, weight })
     }
 }
 

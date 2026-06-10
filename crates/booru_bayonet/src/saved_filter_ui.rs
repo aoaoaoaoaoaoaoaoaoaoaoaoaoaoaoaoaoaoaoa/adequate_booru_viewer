@@ -37,11 +37,6 @@ pub fn active_card(
             actions.push(Action::BeginRename(name.clone()));
         }
     });
-    let _mode = ui.label(match active {
-        Some(_) => chrome::muted("autosave is armed for query edits"),
-        None => chrome::muted("scratch query; save to keep it in the library"),
-    });
-    ui.add_space(3.0);
     let entry = ui.add_sized(
         [ui.available_width(), 20.0],
         egui::TextEdit::singleline(name_entry).hint_text("name / rename"),
