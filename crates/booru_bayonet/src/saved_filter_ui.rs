@@ -22,7 +22,7 @@ pub fn active_card(
 ) -> Vec<Action> {
     let mut actions = Vec::new();
     let _eyebrow = ui.label(chrome::eyebrow("ACTIVE FILTER"));
-    let _title = ui.horizontal(|ui| {
+    let _title = ui.horizontal_wrapped(|ui| {
         let _name = ui.label(match active {
             Some(name) => chrome::title(name.to_string()),
             None => chrome::title("new unsaved filter"),
@@ -40,11 +40,17 @@ pub fn active_card(
         None => chrome::muted("scratch query; save to keep it in the library"),
     });
     ui.add_space(3.0);
-    let _save = ui.horizontal(|ui| {
-        let entry = ui.add(egui::TextEdit::singleline(name_entry).hint_text("name / rename"));
-        let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
+    let entry = ui.add_sized(
+        [ui.available_width(), 20.0],
+        egui::TextEdit::singleline(name_entry).hint_text("name / rename"),
+    );
+    let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
+    if entry.has_focus() && enter {
+        actions.push(Action::Save);
+    }
+    let _save = ui.horizontal_wrapped(|ui| {
         if ui
-            .add(chrome::icon_button("＋"))
+            .add(chrome::icon_button("✚"))
             .on_hover_text("new filter")
             .clicked()
         {
@@ -54,7 +60,6 @@ pub fn active_card(
             .add(chrome::icon_button("✓"))
             .on_hover_text("save")
             .clicked()
-            || (entry.has_focus() && enter)
         {
             actions.push(Action::Save);
         }

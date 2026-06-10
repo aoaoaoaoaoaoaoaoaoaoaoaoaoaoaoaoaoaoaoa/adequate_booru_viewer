@@ -78,7 +78,8 @@ impl Bayonet {
         let query = self.query.clone();
         let active_group = self.active_group.clone();
         let mut actions = Vec::new();
-        let entry = ui.add(
+        let entry = ui.add_sized(
+            [ui.available_width(), 20.0],
             egui::TextEdit::singleline(&mut self.tag_entry).hint_text("add tag to selected group…"),
         );
         let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -86,9 +87,10 @@ impl Bayonet {
             self.commit_tag_entry();
         }
         self.autocomplete(ui);
-        let _hint = ui.label(chrome::muted(
+        let _hint = chrome::note(
+            ui,
             "enter inserts into the highlighted group; -foo inserts ¬foo; rating:q works",
-        ));
+        );
         ui.add_space(5.0);
         if query.is_empty() {
             let _empty = ui.label(chrome::muted("neutral query"));
@@ -112,7 +114,7 @@ impl Bayonet {
                 }
             }
             if ui
-                .add(chrome::icon_button("＋"))
+                .add(chrome::icon_button("✚"))
                 .on_hover_text("add group")
                 .clicked()
             {
@@ -133,11 +135,14 @@ impl Bayonet {
 
     fn embedding_panel(&mut self, ui: &mut egui::Ui) {
         let active = self.rank_alpha > 0.0 && !self.rank_pins.is_empty();
-        let _summary = ui.label(chrome::muted(if active {
-            "weighted image centroid is pulling the score rank"
-        } else {
-            "hover thumbnails and strike 📌 to add image pins"
-        }));
+        let _summary = chrome::note(
+            ui,
+            if active {
+                "weighted image centroid is pulling the score rank"
+            } else {
+                "hover thumbnails and strike 📌 to add image pins"
+            },
+        );
         let _row = ui.horizontal(|ui| {
             let _label = ui.label(chrome::eyebrow("α"));
             let _value = ui.label(chrome::muted(format!("{:.2}", self.rank_alpha)));
@@ -208,7 +213,7 @@ impl Bayonet {
             self.advance_thumb_epoch();
             self.save_config();
         }
-        let _edge = ui.label(chrome::muted("rows now fill the gallery width exactly"));
+        let _edge = chrome::note(ui, "rows now fill the gallery width exactly");
     }
 
     fn filter_library_panel(&mut self, ui: &mut egui::Ui) {
@@ -229,7 +234,7 @@ impl Bayonet {
             format!("data: {}", compact_path(&self.lair.data)),
             format!("index: {}", compact_path(&self.lair.index_path())),
         ] {
-            let _line = ui.label(chrome::muted(line));
+            let _line = chrome::note(ui, line);
         }
     }
 

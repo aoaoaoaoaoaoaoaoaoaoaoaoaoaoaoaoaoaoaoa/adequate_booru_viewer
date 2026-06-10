@@ -1,4 +1,16 @@
-use eframe::egui::{self, Color32, RichText, Sense, Stroke, Vec2};
+use std::sync::Arc;
+
+use eframe::egui::{
+    self, Color32, FontData, FontDefinitions, FontFamily, RichText, Sense, Stroke, Vec2,
+};
+
+const CMU_TYPEWRITER: &[u8] = include_bytes!("../assets/fonts/cmu-typewriter/cmuntt.ttf");
+const NOTO_MATH: &[u8] = include_bytes!("../assets/fonts/noto/NotoSansMath-Regular.ttf");
+const NOTO_SYMBOLS: &[u8] = include_bytes!("../assets/fonts/noto/NotoSansSymbols2-Regular.ttf");
+
+const FACE_TEXT: &str = "cmu-typewriter-text";
+const FACE_MATH: &str = "noto-sans-math";
+const FACE_SYMBOLS: &str = "noto-sans-symbols-2";
 
 pub const INSPECTOR_WIDTH: f32 = 380.0;
 pub const PAGE: Color32 = Color32::from_rgb(4, 8, 13);
@@ -12,6 +24,7 @@ pub const MUTED: Color32 = Color32::from_rgb(159, 180, 202);
 pub const HOT: Color32 = Color32::from_rgb(159, 215, 234);
 
 pub fn install(ctx: &egui::Context) {
+    install_fonts(ctx);
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = PAGE;
     visuals.window_fill = SURFACE;
@@ -37,6 +50,34 @@ pub fn install(ctx: &egui::Context) {
     style.spacing.menu_margin = egui::Margin::symmetric(8, 8);
     style.spacing.indent = 12.0;
     ctx.set_global_style(style);
+}
+
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+    let _old_text = fonts.font_data.insert(
+        FACE_TEXT.to_owned(),
+        Arc::new(FontData::from_static(CMU_TYPEWRITER)),
+    );
+    let _old_math = fonts.font_data.insert(
+        FACE_MATH.to_owned(),
+        Arc::new(FontData::from_static(NOTO_MATH)),
+    );
+    let _old_symbols = fonts.font_data.insert(
+        FACE_SYMBOLS.to_owned(),
+        Arc::new(FontData::from_static(NOTO_SYMBOLS)),
+    );
+    for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        prepend_faces(&mut fonts, family, &[FACE_TEXT, FACE_MATH, FACE_SYMBOLS]);
+    }
+    ctx.set_fonts(fonts);
+}
+
+fn prepend_faces(fonts: &mut FontDefinitions, family: FontFamily, faces: &[&str]) {
+    let stack = fonts.families.entry(family).or_default();
+    for face in faces.iter().rev() {
+        stack.retain(|name| name != face);
+        stack.insert(0, (*face).to_owned());
+    }
 }
 
 pub fn section(
@@ -216,4 +257,8 @@ pub fn title(text: impl Into<String>) -> RichText {
 
 pub fn muted(text: impl Into<String>) -> RichText {
     RichText::new(text.into()).size(12.0).color(MUTED)
+}
+
+pub fn note(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
+    ui.add(egui::Label::new(muted(text)).wrap())
 }

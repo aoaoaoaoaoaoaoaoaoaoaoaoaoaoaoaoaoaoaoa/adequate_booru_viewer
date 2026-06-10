@@ -101,7 +101,8 @@ pub struct Bayonet {
 }
 
 impl Bayonet {
-    pub fn new(_cc: &CreationContext<'_>) -> Result<Self> {
+    pub fn new(cc: &CreationContext<'_>) -> Result<Self> {
+        chrome::install(&cc.egui_ctx);
         Self::open()
     }
 
@@ -189,6 +190,7 @@ impl Bayonet {
     pub fn draw_startup_probe_frame(&mut self) {
         startup("app.draw.enter");
         let ctx = egui::Context::default();
+        chrome::install(&ctx);
         startup("app.draw.ctx");
         let output = ctx.run_ui(
             egui::RawInput {
@@ -826,7 +828,10 @@ impl Bayonet {
             egui::TextStyle::Button.resolve(ui.style()),
             chrome::HOT,
         );
-        if pin.clicked() {
+        let geometric_click = response
+            .interact_pointer_pos()
+            .is_some_and(|pos| response.clicked() && pin_rect.contains(pos));
+        if pin.clicked() || geometric_click {
             self.add_pin(post);
             return true;
         }
@@ -1418,7 +1423,6 @@ impl App for Bayonet {
 impl Bayonet {
     fn paint(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        chrome::install(&ctx);
         let _left = egui::Panel::left("filter")
             .resizable(false)
             .exact_size(chrome::INSPECTOR_WIDTH)
