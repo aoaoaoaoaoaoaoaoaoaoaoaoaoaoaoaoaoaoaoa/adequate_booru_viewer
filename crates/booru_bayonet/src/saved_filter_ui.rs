@@ -51,7 +51,7 @@ pub fn active_card(
         *focus_name = false;
     }
     let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
-    if entry.has_focus() && enter {
+    if (entry.has_focus() || entry.lost_focus()) && enter {
         actions.push(if active.is_some() {
             Action::Rename
         } else {

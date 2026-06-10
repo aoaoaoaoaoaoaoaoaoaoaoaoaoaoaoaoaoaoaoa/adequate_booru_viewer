@@ -106,17 +106,17 @@ pub fn section(
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     let glyph = if state.is_open() { "▾" } else { "▸" };
-                    let response = ui
-                        .horizontal(|ui| {
-                            let _glyph = ui.label(RichText::new(glyph).color(HOT).strong());
-                            let _title = ui.label(section_title(title.to_ascii_uppercase()));
-                        })
-                        .response
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if response.clicked() {
-                        state.toggle(ui);
-                    }
+                    let _row = ui.horizontal(|ui| {
+                        let _glyph = ui.label(RichText::new(glyph).color(HOT).strong());
+                        let _title = ui.label(section_title(title.to_ascii_uppercase()));
+                    });
                 });
+            let header_click = ui
+                .interact(header.response.rect, id.with("header"), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if header_click.clicked() {
+                state.toggle(ui);
+            }
             if state.is_open() {
                 let _body = egui::Frame::new()
                     .fill(SURFACE)

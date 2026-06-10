@@ -38,8 +38,10 @@ use crate::{
 
 mod panels;
 mod refresh;
+mod viewer;
 
 use refresh::AsyncPulse;
+use viewer::viewer_title_bar;
 
 const RESULT_LIMIT: usize = 360;
 const SOFT_POOL: usize = 2_400;
@@ -771,11 +773,12 @@ impl Bayonet {
             if let Some(weight) = self.pin_weight(post.id) {
                 paint_pin_badge(ui, rect, weight);
             }
-            let pin_clicked = self.pin_hover(ui, post, rect, &response);
-            if response.clicked() && !pin_clicked && !self.tag_menu.is_open() {
+            let pin_consumed = self.pin_hover(ui, post, rect, &response);
+            if response.clicked() && !pin_consumed && !self.tag_menu.is_open() {
                 self.open_full(post);
             }
             if response.secondary_clicked()
+                && !pin_consumed
                 && let Some(pos) = response.interact_pointer_pos()
             {
                 self.open_tag_menu(post, pos);
@@ -804,19 +807,22 @@ impl Bayonet {
             rect.right_top() + egui::vec2(-34.0, 6.0),
             egui::vec2(28.0, 24.0),
         );
-        let (hovering_pin, clicked_pin) = ui.input(|input| {
+        let (hovering_pin, primary_pin, secondary_pin) = ui.input(|input| {
             let hovering = input
                 .pointer
                 .hover_pos()
                 .is_some_and(|pos| pin_rect.contains(pos));
-            let clicked = input.pointer.primary_clicked()
-                && input
-                    .pointer
-                    .interact_pos()
-                    .is_some_and(|pos| pin_rect.contains(pos));
-            (hovering, clicked)
+            let inside = input
+                .pointer
+                .interact_pos()
+                .is_some_and(|pos| pin_rect.contains(pos));
+            (
+                hovering,
+                input.pointer.primary_clicked() && inside,
+                input.pointer.secondary_clicked() && inside,
+            )
         });
-        if !pinned && !response.hovered() && !hovering_pin && !clicked_pin {
+        if !pinned && !response.hovered() && !hovering_pin && !primary_pin && !secondary_pin {
             return false;
         }
         let pin = ui.interact(
@@ -848,8 +854,14 @@ impl Bayonet {
             egui::TextStyle::Button.resolve(ui.style()),
             chrome::HOT,
         );
-        if pin.clicked() || clicked_pin {
+        if pin.clicked() || primary_pin {
             self.add_pin(post);
+            return true;
+        }
+        if secondary_pin {
+            if pinned {
+                self.weaken_pin(post.id);
+            }
             return true;
         }
         false
@@ -973,44 +985,37 @@ impl Bayonet {
         let screen = ctx.content_rect();
         let image_box = full_image_box(&post, self.full.get(&post.id), screen.size());
         let body = egui::vec2(image_box.x, image_box.y + VIEWER_CHROME);
-        let window = egui::Window::new(format!(
-            "#{}  score {}  fav {}",
-            post.id, post.score, post.favs
-        ))
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .default_size(body)
-        .collapsible(false)
-        .resizable(true)
-        .show(ctx, |ui| {
-            let _buttons = ui.horizontal(|ui| {
-                if ui.button("copy").clicked() {
+        let title = format!("#{}  score {}  fav {}", post.id, post.score, post.favs);
+        let window = egui::Window::new("full-viewer")
+            .id(egui::Id::new("full-viewer"))
+            .title_bar(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .default_size(body)
+            .collapsible(false)
+            .resizable(true)
+            .show(ctx, |ui| {
+                let bar = viewer_title_bar(ui, &title, post.full_url().is_some(), &mut close);
+                if bar.copy {
                     self.copy_full(post.id);
                 }
-                if ui
-                    .add_enabled(post.full_url().is_some(), egui::Button::new("save"))
-                    .clicked()
-                {
+                if bar.save {
                     self.save_full(&post);
                 }
-                if ui.button("close").clicked() {
-                    close = true;
+                if let Some(texture) = self.full.get(&post.id) {
+                    let response = ui.add(
+                        egui::Image::new(texture)
+                            .fit_to_exact_size(image_box)
+                            .sense(egui::Sense::click()),
+                    );
+                    if response.secondary_clicked() {
+                        close = true;
+                    }
+                } else if self.full_faults.contains(&post.id) {
+                    centered_box(ui, image_box, "full image failed");
+                } else {
+                    centered_box(ui, image_box, "loading full image");
                 }
             });
-            if let Some(texture) = self.full.get(&post.id) {
-                let response = ui.add(
-                    egui::Image::new(texture)
-                        .fit_to_exact_size(image_box)
-                        .sense(egui::Sense::click()),
-                );
-                if response.secondary_clicked() {
-                    close = true;
-                }
-            } else if self.full_faults.contains(&post.id) {
-                centered_box(ui, image_box, "full image failed");
-            } else {
-                centered_box(ui, image_box, "loading full image");
-            }
-        });
         let clicked_outside = window
             .as_ref()
             .is_some_and(|window| outside_click(ctx, window.response.rect));
@@ -1332,7 +1337,11 @@ fn paint_tile_text(ui: &egui::Ui, rect: egui::Rect, text: &str) {
 }
 
 fn paint_pin_badge(ui: &egui::Ui, rect: egui::Rect, weight: u8) {
-    let badge = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 6.0), egui::vec2(34.0, 20.0));
+    let weight = weight.clamp(PinConfig::MIN_WEIGHT, PinConfig::MAX_WEIGHT);
+    let badge = egui::Rect::from_min_size(
+        rect.min + egui::vec2(6.0, 6.0),
+        egui::vec2(10.0 + 18.0 * f32::from(weight), 20.0),
+    );
     let _fill = ui.painter().rect_filled(badge, 0.0, chrome::RAISED);
     let _stroke = ui.painter().rect_stroke(
         badge,
@@ -1343,7 +1352,7 @@ fn paint_pin_badge(ui: &egui::Ui, rect: egui::Rect, weight: u8) {
     let _text = ui.painter().text(
         badge.center(),
         egui::Align2::CENTER_CENTER,
-        format!("📌{weight}"),
+        "📌".repeat(usize::from(weight)),
         egui::TextStyle::Button.resolve(ui.style()),
         chrome::HOT,
     );
