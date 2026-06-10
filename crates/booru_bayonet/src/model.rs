@@ -1,7 +1,7 @@
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt::{Display, Formatter},
 };
 
@@ -950,6 +950,7 @@ pub fn encode_record(post: &PostRecord) -> Vec<u8> {
     sink.opt_str(post.thumb_720_url.as_deref());
     sink.opt_str(post.large_url.as_deref());
     sink.opt_str(post.file_url.as_deref());
+    encode_tag_hints(&mut sink, &post.tag_hints);
     sink.bytes()
 }
 
@@ -971,6 +972,16 @@ pub fn decode_record(bytes: &[u8]) -> Result<PostRecord> {
     }
     tags.sort();
     tags.dedup();
+    let preview_url = blade.opt_string()?;
+    let thumb_360_url = blade.opt_string()?;
+    let thumb_720_url = blade.opt_string()?;
+    let large_url = blade.opt_string()?;
+    let file_url = blade.opt_string()?;
+    let tag_hints = if blade.is_done() {
+        Vec::new()
+    } else {
+        decode_tag_hints(&mut blade)?
+    };
     let post = PostRecord {
         id,
         rating,
@@ -980,15 +991,43 @@ pub fn decode_record(bytes: &[u8]) -> Result<PostRecord> {
         height,
         created_at,
         tags,
-        tag_hints: Vec::new(),
-        preview_url: blade.opt_string()?,
-        thumb_360_url: blade.opt_string()?,
-        thumb_720_url: blade.opt_string()?,
-        large_url: blade.opt_string()?,
-        file_url: blade.opt_string()?,
+        tag_hints,
+        preview_url,
+        thumb_360_url,
+        thumb_720_url,
+        large_url,
+        file_url,
     };
     blade.done()?;
     Ok(post)
+}
+
+fn encode_tag_hints(sink: &mut wire::Sink, hints: &[TagHint]) {
+    let mut canonical = BTreeMap::new();
+    for hint in hints {
+        let _old = canonical.insert(hint.tag.as_str(), hint.kind);
+    }
+    sink.var(canonical.len() as u64);
+    for (tag, kind) in canonical {
+        sink.str(tag);
+        sink.u8(kind.code());
+    }
+}
+
+fn decode_tag_hints(blade: &mut wire::Blade<'_>) -> Result<Vec<TagHint>> {
+    let count = usize::try_from(blade.var()?).context("tag hint count exceeds usize")?;
+    let mut hints = BTreeMap::new();
+    for _ in 0..count {
+        let raw = blade.string()?;
+        let tag = Tag::forge(&raw).with_context(|| format!("decode empty tag hint `{raw}`"))?;
+        let code = blade.u8()?;
+        let kind = TagKind::from_code(code).with_context(|| format!("invalid tag kind {code}"))?;
+        let _old = hints.insert(tag, kind);
+    }
+    Ok(hints
+        .into_iter()
+        .map(|(tag, kind)| TagHint::new(tag, kind))
+        .collect())
 }
 
 fn encode_rating(sink: &mut wire::Sink, rating: &Rating) {
@@ -1075,6 +1114,40 @@ mod tests {
             TagPolarity::Positive
         ));
         assert_eq!(query.remote_seed(Sort::Score), "solo order:score");
+        Ok(())
+    }
+
+    #[test]
+    fn binary_post_record_preserves_tag_hints() -> Result<()> {
+        let artist = Tag::forge("ciloranko").context("artist tag")?;
+        let character = Tag::forge("hakurei_reimu").context("character tag")?;
+        let copyright = Tag::forge("touhou").context("copyright tag")?;
+        let post = PostRecord {
+            id: PostId(9),
+            rating: Rating::General,
+            score: 42,
+            favs: 7,
+            width: 800,
+            height: 1200,
+            created_at: "2026-06-10T00:00:00Z".to_owned(),
+            tags: vec![artist.clone(), character.clone(), copyright.clone()],
+            tag_hints: vec![
+                TagHint::new(character.clone(), TagKind::Character),
+                TagHint::new(artist.clone(), TagKind::Artist),
+                TagHint::new(copyright.clone(), TagKind::Copyright),
+            ],
+            preview_url: Some("https://example.test/preview.jpg".to_owned()),
+            thumb_360_url: None,
+            thumb_720_url: None,
+            large_url: None,
+            file_url: None,
+        };
+
+        let decoded = decode_record(&encode_record(&post))?;
+
+        assert_eq!(decoded.tag_kind(&artist), TagKind::Artist);
+        assert_eq!(decoded.tag_kind(&character), TagKind::Character);
+        assert_eq!(decoded.tag_kind(&copyright), TagKind::Copyright);
         Ok(())
     }
 

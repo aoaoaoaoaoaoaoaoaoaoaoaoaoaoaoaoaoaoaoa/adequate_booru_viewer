@@ -79,6 +79,10 @@ impl<'a> Blade<'a> {
         }
     }
 
+    pub fn is_done(&self) -> bool {
+        self.at == self.bytes.len()
+    }
+
     pub fn u8(&mut self) -> Result<u8> {
         let value = *self
             .bytes

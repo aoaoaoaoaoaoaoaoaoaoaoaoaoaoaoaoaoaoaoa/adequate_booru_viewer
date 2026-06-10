@@ -48,6 +48,9 @@ impl Bayonet {
         chrome::section(ui, "active-filter", "active filter", true, |ui| {
             self.active_filter_panel(ui);
         });
+        chrome::section(ui, "filter-library", "filter library", false, |ui| {
+            self.filter_library_panel(ui);
+        });
         chrome::section(ui, "reference-query", "reference query", true, |ui| {
             self.query_panel(ui);
         });
@@ -56,9 +59,6 @@ impl Bayonet {
         });
         chrome::section(ui, "gallery-controls", "gallery", false, |ui| {
             self.gallery_panel(ui);
-        });
-        chrome::section(ui, "filter-library", "filter library", false, |ui| {
-            self.filter_library_panel(ui);
         });
         chrome::section(ui, "index-status", "index status", false, |ui| {
             self.index_status_panel(ui);

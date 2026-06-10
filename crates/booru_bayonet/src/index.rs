@@ -4,7 +4,12 @@ use redb::{
     TableDefinition, TableError,
 };
 use roaring::RoaringBitmap;
-use std::{collections::BTreeSet, mem::size_of, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    mem::size_of,
+    path::Path,
+    sync::Arc,
+};
 
 use crate::model::{
     BoolOp, EMBEDDING_DIM, Embedding, PostId, PostRecord, Query, QueryAtom, QueryExpr, RatingClass,
@@ -272,6 +277,16 @@ impl Index {
         let tx = self.db.begin_read().context("begin tag kind read")?;
         let kinds = tx.open_table(TAG_KINDS).context("open tag kind table")?;
         read_tag_kind(&kinds, tag)
+    }
+
+    pub fn tag_kinds(&self, tags: &[Tag]) -> Result<BTreeMap<Tag, TagKind>> {
+        let tx = self.db.begin_read().context("begin tag kind batch read")?;
+        let kinds = tx.open_table(TAG_KINDS).context("open tag kind table")?;
+        let mut out = BTreeMap::new();
+        for tag in tags {
+            let _old = out.insert(tag.clone(), read_tag_kind(&kinds, tag)?);
+        }
+        Ok(out)
     }
 
     pub fn stats(&self) -> Result<CacheStats> {
