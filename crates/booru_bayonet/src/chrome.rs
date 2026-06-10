@@ -109,7 +109,7 @@ pub fn section(
                     let response = ui
                         .horizontal(|ui| {
                             let _glyph = ui.label(RichText::new(glyph).color(HOT).strong());
-                            let _title = ui.label(section_title(title));
+                            let _title = ui.label(section_title(title.to_ascii_uppercase()));
                         })
                         .response
                         .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -131,7 +131,7 @@ pub fn section(
         });
 }
 
-pub fn section_title(text: &'static str) -> RichText {
+pub fn section_title(text: impl Into<String>) -> RichText {
     RichText::new(text)
         .size(13.0)
         .strong()

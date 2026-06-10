@@ -9,6 +9,7 @@ use crate::{
 pub enum Action {
     New,
     Save,
+    BeginRename(FilterName),
     Rename,
     Load(SavedFilter),
     Clone(FilterName),
@@ -18,10 +19,10 @@ pub enum Action {
 pub fn active_card(
     ui: &mut egui::Ui,
     name_entry: &mut String,
+    focus_name: &mut bool,
     active: Option<&FilterName>,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
-    let _eyebrow = ui.label(chrome::eyebrow("ACTIVE FILTER"));
     let _title = ui.horizontal_wrapped(|ui| {
         let _name = ui.label(match active {
             Some(name) => chrome::title(name.to_string()),
@@ -31,8 +32,9 @@ pub fn active_card(
             .add_enabled(active.is_some(), chrome::icon_button("✎"))
             .on_hover_text("rename using the text field below")
             .clicked()
+            && let Some(name) = active
         {
-            actions.push(Action::Rename);
+            actions.push(Action::BeginRename(name.clone()));
         }
     });
     let _mode = ui.label(match active {
@@ -44,9 +46,17 @@ pub fn active_card(
         [ui.available_width(), 20.0],
         egui::TextEdit::singleline(name_entry).hint_text("name / rename"),
     );
+    if *focus_name {
+        entry.request_focus();
+        *focus_name = false;
+    }
     let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
     if entry.has_focus() && enter {
-        actions.push(Action::Save);
+        actions.push(if active.is_some() {
+            Action::Rename
+        } else {
+            Action::Save
+        });
     }
     let _save = ui.horizontal_wrapped(|ui| {
         if ui
@@ -58,10 +68,14 @@ pub fn active_card(
         }
         if ui
             .add(chrome::icon_button("✓"))
-            .on_hover_text("save")
+            .on_hover_text(if active.is_some() { "rename" } else { "save" })
             .clicked()
         {
-            actions.push(Action::Save);
+            actions.push(if active.is_some() {
+                Action::Rename
+            } else {
+                Action::Save
+            });
         }
         if let Some(active) = active
             && ui

@@ -63,6 +63,7 @@ pub struct Bayonet {
     active_group: Vec<usize>,
     tag_entry: String,
     filter_name_entry: String,
+    filter_name_focus: bool,
     active_filter: Option<FilterName>,
     saved_filters: Vec<SavedFilter>,
     rank_alpha: f32,
@@ -144,6 +145,7 @@ impl Bayonet {
             active_group,
             tag_entry: String::new(),
             filter_name_entry: String::new(),
+            filter_name_focus: false,
             active_filter,
             saved_filters,
             rank_alpha: config.embedding.alpha.clamp(0.0, 2.0),
@@ -347,6 +349,12 @@ impl Bayonet {
         self.filter_name_entry.clear();
         self.status = format!("renamed filter `{old}` → `{new}`");
         self.save_config();
+    }
+
+    fn begin_rename_filter(&mut self, name: &FilterName) {
+        self.filter_name_entry = name.to_string();
+        self.filter_name_focus = true;
+        self.status = format!("renaming filter `{name}`");
     }
 
     fn clone_filter(&mut self, name: &FilterName) {
@@ -792,13 +800,25 @@ impl Bayonet {
         response: &egui::Response,
     ) -> bool {
         let pinned = self.pin_weight(post.id).is_some();
-        if !pinned && !response.hovered() {
-            return false;
-        }
         let pin_rect = egui::Rect::from_min_size(
             rect.right_top() + egui::vec2(-34.0, 6.0),
             egui::vec2(28.0, 24.0),
         );
+        let (hovering_pin, clicked_pin) = ui.input(|input| {
+            let hovering = input
+                .pointer
+                .hover_pos()
+                .is_some_and(|pos| pin_rect.contains(pos));
+            let clicked = input.pointer.primary_clicked()
+                && input
+                    .pointer
+                    .interact_pos()
+                    .is_some_and(|pos| pin_rect.contains(pos));
+            (hovering, clicked)
+        });
+        if !pinned && !response.hovered() && !hovering_pin && !clicked_pin {
+            return false;
+        }
         let pin = ui.interact(
             pin_rect,
             egui::Id::new(("image-pin", post.id.0)),
@@ -828,10 +848,7 @@ impl Bayonet {
             egui::TextStyle::Button.resolve(ui.style()),
             chrome::HOT,
         );
-        let geometric_click = response
-            .interact_pointer_pos()
-            .is_some_and(|pos| response.clicked() && pin_rect.contains(pos));
-        if pin.clicked() || geometric_click {
+        if pin.clicked() || clicked_pin {
             self.add_pin(post);
             return true;
         }

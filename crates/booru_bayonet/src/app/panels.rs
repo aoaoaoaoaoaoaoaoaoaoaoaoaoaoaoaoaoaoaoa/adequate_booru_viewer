@@ -69,6 +69,7 @@ impl Bayonet {
         let actions = saved_filter_ui::active_card(
             ui,
             &mut self.filter_name_entry,
+            &mut self.filter_name_focus,
             self.active_filter.as_ref(),
         );
         self.apply_saved_filter_actions(actions);
@@ -100,34 +101,12 @@ impl Bayonet {
         });
         ui.add_space(5.0);
         let _active = ui.horizontal_wrapped(|ui| {
-            let _label = ui.label(chrome::eyebrow("◇ GROUP"));
-            for op in BoolOp::ALL {
-                let selected = self
-                    .query
-                    .group(&self.active_group)
-                    .is_some_and(|group| group.op == op);
-                if ui.add(chrome::glyph_button(op.label(), selected)).clicked() {
-                    actions.push(QueryAction::SetOp {
-                        path: self.active_group.clone(),
-                        op,
-                    });
-                }
-            }
             if ui
                 .add(chrome::icon_button("✚"))
                 .on_hover_text("add group")
                 .clicked()
             {
                 actions.push(QueryAction::AddGroup { op: BoolOp::And });
-            }
-            if ui
-                .add(chrome::icon_button("¬"))
-                .on_hover_text("negate group")
-                .clicked()
-            {
-                actions.push(QueryAction::ToggleNot {
-                    path: self.active_group.clone(),
-                });
             }
         });
         self.apply_query_actions(actions);
@@ -243,6 +222,7 @@ impl Bayonet {
             match action {
                 SavedFilterAction::New => self.new_filter(),
                 SavedFilterAction::Save => self.save_current_filter(),
+                SavedFilterAction::BeginRename(name) => self.begin_rename_filter(&name),
                 SavedFilterAction::Rename => self.rename_filter(),
                 SavedFilterAction::Load(filter) => self.load_filter(filter),
                 SavedFilterAction::Clone(name) => self.clone_filter(&name),

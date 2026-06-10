@@ -62,10 +62,11 @@ fn render_group(
     tag_kind: &mut impl FnMut(&QueryAtom) -> TagKind,
 ) {
     let active_here = path.as_slice() == active;
+    let baseline = actions.len();
     let frame = egui::Frame::group(ui.style())
         .fill(group_fill(depth))
         .stroke(group_stroke(depth, active_here));
-    let _frame = frame.show(ui, |ui| {
+    let frame = frame.show(ui, |ui| {
         let _header = ui.horizontal_wrapped(|ui| {
             if ui
                 .add(chrome::glyph_button(
@@ -119,6 +120,19 @@ fn render_group(
             let _old = path.pop();
         }
     });
+    if actions.len() == baseline && primary_click_inside(ui, frame.response.rect) {
+        actions.push(QueryAction::Select { path: path.clone() });
+    }
+}
+
+fn primary_click_inside(ui: &egui::Ui, rect: egui::Rect) -> bool {
+    ui.input(|input| {
+        input.pointer.primary_clicked()
+            && input
+                .pointer
+                .interact_pos()
+                .is_some_and(|pos| rect.contains(pos))
+    })
 }
 
 fn render_atom(
