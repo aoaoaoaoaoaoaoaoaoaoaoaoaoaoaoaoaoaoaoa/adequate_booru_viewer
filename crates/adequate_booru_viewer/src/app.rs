@@ -88,9 +88,9 @@ struct Surf {
 impl Default for Surf {
     fn default() -> Self {
         Self {
-            enter_amp: 3.0,
-            exit_amp: 1.4,
-            click_amp: 5.0,
+            enter_amp: 1.5,
+            exit_amp: 0.7,
+            click_amp: 2.5,
             viewer_life: 8.0,
             surge_quantum: 48.0,
             surge_amp: 4.8,

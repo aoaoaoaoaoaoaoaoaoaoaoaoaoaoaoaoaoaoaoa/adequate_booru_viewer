@@ -893,6 +893,9 @@ const LIFT_RADIUS: f32 = 3.0;
 const PLATE_FEATHER: f32 = 6.0;
 const PLATE_LIFT_GAIN: f32 = 2.0;
 const PLATE_DRY_GAIN: f32 = 5.0;
+const FIELD_SCALE: f32 = 2.0;
+const FIELD_HEIGHT_CEIL: f32 = 24.0;
+const FIELD_FLOW_CEIL: f32 = 10.0;
 
 @group(0) @binding(0) var sharp_tex: texture_2d<f32>;
 @group(0) @binding(1) var blur_tex: texture_2d<f32>;
@@ -932,6 +935,22 @@ fn island(sd: f32) -> f32 {
     return 1.0 - smoothstep(-PLATE_FEATHER, PLATE_FEATHER, sd);
 }
 
+fn field_obstacle(px: vec2f) -> f32 {
+    var block = max(
+        island(sd_cut(px, mask.a_min, mask.a_max, mask.radius_a)),
+        island(sd_cut(px, mask.b_min, mask.b_max, mask.radius_b)),
+    );
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let g = mask.lift_grips[i];
+        if (g <= 0.0) {
+            continue;
+        }
+        let r = mask.lift_rects[i];
+        block = max(block, island(sd_cut(px, r.xy, r.zw, LIFT_RADIUS)) * g);
+    }
+    return clamp(block, 0.0, 1.0);
+}
+
 fn lift_warp(px: vec2f, rect: vec4f, grow: f32) -> vec2f {
     let emin = rect.xy - vec2f(grow);
     let emax = rect.zw + vec2f(grow);
@@ -957,18 +976,37 @@ fn touch_flow(px: vec2f, center: vec2f, age: f32, amp: f32) -> vec2f {
     return dir * (a * s * exp(-s * s * 0.5));
 }
 
+fn sane_height(x: f32) -> f32 {
+    return clamp(select(0.0, x, x == x), -FIELD_HEIGHT_CEIL, FIELD_HEIGHT_CEIL);
+}
+
+fn cell_px(coord: vec2i) -> vec2f {
+    return (vec2f(coord) + vec2f(0.5)) * FIELD_SCALE;
+}
+
 fn sample_height(coord: vec2i, dims: vec2i) -> f32 {
     let p = clamp(coord, vec2i(0), dims - vec2i(1));
-    return textureLoad(water_tex, p, 0).x;
+    return sane_height(textureLoad(water_tex, p, 0).x);
+}
+
+fn sample_visible_height(coord: vec2i, dims: vec2i, center_h: f32) -> f32 {
+    let p = clamp(coord, vec2i(0), dims - vec2i(1));
+    let block = field_obstacle(cell_px(p));
+    return mix(sample_height(p, dims), center_h, block);
 }
 
 fn field_flow(px: vec2f) -> vec2f {
     let dims = vec2i(textureDimensions(water_tex));
-    let p = clamp(vec2i(floor(px / 2.0)), vec2i(0), dims - vec2i(1));
-    let dx = 2.0;
-    let hx = sample_height(p + vec2i(1, 0), dims) - sample_height(p - vec2i(1, 0), dims);
-    let hy = sample_height(p + vec2i(0, 1), dims) - sample_height(p - vec2i(0, 1), dims);
-    return -vec2f(hx, hy) * (4.5 / dx);
+    let p = clamp(vec2i(floor(px / FIELD_SCALE)), vec2i(0), dims - vec2i(1));
+    let center_h = sample_height(p, dims);
+    let hx = sample_visible_height(p + vec2i(1, 0), dims, center_h)
+        - sample_visible_height(p - vec2i(1, 0), dims, center_h);
+    let hy = sample_visible_height(p + vec2i(0, 1), dims, center_h)
+        - sample_visible_height(p - vec2i(0, 1), dims, center_h);
+    var flow = -vec2f(hx, hy) * (4.5 / FIELD_SCALE);
+    let mag = length(flow);
+    flow = flow * min(1.0, FIELD_FLOW_CEIL / max(mag, 1e-4));
+    return flow;
 }
 
 @fragment
@@ -1167,6 +1205,9 @@ const PLATE_FEATHER: f32 = 6.0;
 const SOURCE_GAIN: f32 = 38.0;
 const SOURCE_SIGMA: f32 = 12.0;
 const SOURCE_LIFE: f32 = 0.20;
+const SOURCE_CEIL: f32 = 12.0;
+const H_CEIL: f32 = 24.0;
+const V_CEIL: f32 = 720.0;
 const HEIGHT_BLEED: f32 = 0.9993;
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
@@ -1188,6 +1229,10 @@ fn island(sd: f32) -> f32 {
     return 1.0 - smoothstep(-PLATE_FEATHER, PLATE_FEATHER, sd);
 }
 
+fn sane(x: f32, ceil: f32) -> f32 {
+    return clamp(select(0.0, x, x == x), -ceil, ceil);
+}
+
 fn obstacle(px: vec2f) -> f32 {
     var block = max(
         island(sd_cut(px, mask.a_min, mask.a_max, mask.radius_a)),
@@ -1205,13 +1250,14 @@ fn obstacle(px: vec2f) -> f32 {
 }
 
 fn load_state(p: vec2i, dims: vec2i) -> vec2f {
-    return textureLoad(src_tex, clamp(p, vec2i(0), dims - vec2i(1)), 0).xy;
+    let raw = textureLoad(src_tex, clamp(p, vec2i(0), dims - vec2i(1)), 0).xy;
+    return vec2f(sane(raw.x, H_CEIL), sane(raw.y, V_CEIL));
 }
 
 fn wall_height(p: vec2i, dims: vec2i, h: f32) -> f32 {
     let q = clamp(p, vec2i(0), dims - vec2i(1));
     let b = obstacle(cell_px(q));
-    return mix(textureLoad(src_tex, q, 0).x, h, b);
+    return mix(load_state(q, dims).x, h, b);
 }
 
 fn plateau(x: f32, lo: f32, hi: f32) -> f32 {
@@ -1264,7 +1310,7 @@ fn source(px: vec2f) -> f32 {
         let phase = mask.tremor_k * d - mask.tremor_omega * mask.tide;
         drive = drive + mask.tremor_amp * g * shell * sin(phase);
     }
-    return drive;
+    return clamp(drive, -SOURCE_CEIL, SOURCE_CEIL);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -1292,10 +1338,11 @@ fn step(@builtin(global_invocation_id) gid: vec3u) {
     var v = here.y + c * c * lap * DT + source(px) * SOURCE_GAIN;
     v = v * exp(-DT / max(mask.wave_damp, 0.08)) * mix(0.985, 1.0, shelf);
 
-    var next_h = (h + v * DT) * HEIGHT_BLEED;
-    let wet = 1.0 - obstacle(px);
-    next_h = next_h * wet;
-    v = v * wet;
+    let block = obstacle(px);
+    v = mix(v, 0.0, block);
+    var next_h = mix((h + v * DT) * HEIGHT_BLEED, h * HEIGHT_BLEED, block);
+    v = sane(v, V_CEIL);
+    next_h = sane(next_h, H_CEIL);
     textureStore(dst_tex, p, vec4f(next_h, v, 0.0, 0.0));
 }
 ";
