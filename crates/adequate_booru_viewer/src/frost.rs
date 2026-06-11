@@ -116,6 +116,7 @@ impl Default for Brine {
 /// tremor wavetrain. Physical pixels; `grip` is the 0..=1 engagement.
 #[derive(Clone, Copy, Debug)]
 pub struct Tension {
+    pub id: u64,
     pub rect: egui::Rect,
     pub pointer: egui::Pos2,
     pub grip: f32,

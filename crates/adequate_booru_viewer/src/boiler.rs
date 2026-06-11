@@ -17,12 +17,15 @@ use egui_winit::winit::{
 };
 use std::{
     sync::{Arc, Mutex, MutexGuard},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use crate::{app::Bayonet, frost::Frost, trace::startup};
 
 const WINDOW_SIZE: LogicalSize<f64> = LogicalSize::new(1440.0, 920.0);
+const QUIVER_RELEASE: f32 = 0.48;
+const QUIVER_WAKE: Duration = Duration::from_secs(8);
+const QUIVER_EPSILON: f32 = 0.012;
 
 /// User event that wakes the loop; the alarm carries the actual deadline.
 #[derive(Clone, Copy, Debug)]
@@ -31,23 +34,73 @@ struct Spark;
 /// Earliest pending repaint deadline, shared with egui's repaint callback.
 type Alarm = Arc<Mutex<Option<Instant>>>;
 
-/// Collects the frame's button-quiver seeds (left by `chrome::tension`, one
-/// per gripped or fading button) and scales them to physical pixels.
-fn take_tensions(ctx: &egui::Context, scale: f32) -> Vec<crate::frost::Tension> {
-    ctx.data_mut(|data| {
-        data.remove_temp::<Vec<crate::frost::Tension>>(egui::Id::new("tension-field"))
-    })
-    .unwrap_or_default()
-    .into_iter()
-    .map(|seed| crate::frost::Tension {
-        rect: egui::Rect::from_min_max(
-            (seed.rect.min.to_vec2() * scale).to_pos2(),
-            (seed.rect.max.to_vec2() * scale).to_pos2(),
-        ),
-        pointer: (seed.pointer.to_vec2() * scale).to_pos2(),
-        grip: seed.grip,
-    })
-    .collect()
+/// One button-plate oscillator in logical pixels. Egui temp data drives it
+/// while hovered; once contact leaves, it rings down under its own damping so
+/// quiver waves never snap off.
+#[derive(Clone, Copy)]
+struct Quiver {
+    id: u64,
+    rect: egui::Rect,
+    pointer: egui::Pos2,
+    grip: f32,
+}
+
+impl Quiver {
+    fn physical(self, scale: f32) -> crate::frost::Tension {
+        crate::frost::Tension {
+            id: self.id,
+            rect: egui::Rect::from_min_max(
+                (self.rect.min.to_vec2() * scale).to_pos2(),
+                (self.rect.max.to_vec2() * scale).to_pos2(),
+            ),
+            pointer: (self.pointer.to_vec2() * scale).to_pos2(),
+            grip: self.grip,
+        }
+    }
+}
+
+/// Collects the frame's button-quiver seeds (left by `chrome::tension`) and
+/// evolves the persistent oscillator bank.
+fn take_tensions(
+    ctx: &egui::Context,
+    scale: f32,
+    bank: &mut Vec<Quiver>,
+    then: &mut Instant,
+) -> Vec<crate::frost::Tension> {
+    let now = Instant::now();
+    let dt = now.duration_since(*then).as_secs_f32().clamp(0.0, 0.12);
+    *then = now;
+    for quiver in bank.iter_mut() {
+        quiver.grip *= (-dt / QUIVER_RELEASE).exp();
+    }
+    let seeds = ctx
+        .data_mut(|data| {
+            data.remove_temp::<Vec<crate::frost::Tension>>(egui::Id::new("tension-field"))
+        })
+        .unwrap_or_default();
+    for seed in seeds {
+        let incoming = Quiver {
+            id: seed.id,
+            rect: seed.rect,
+            pointer: seed.pointer,
+            grip: seed.grip,
+        };
+        match bank.iter_mut().find(|quiver| quiver.id == incoming.id) {
+            Some(quiver) => {
+                quiver.rect = incoming.rect;
+                quiver.pointer = incoming.pointer;
+                quiver.grip = quiver.grip.max(incoming.grip);
+            }
+            None => bank.push(incoming),
+        }
+    }
+    bank.retain(|quiver| quiver.grip > QUIVER_EPSILON);
+    bank.sort_by(|a, b| b.grip.total_cmp(&a.grip));
+    bank.iter()
+        .take(crate::frost::QUIVER_SLOTS)
+        .copied()
+        .map(|quiver| quiver.physical(scale))
+        .collect()
 }
 
 pub fn run(ctx: egui::Context, app: Bayonet) -> Result<()> {
@@ -63,6 +116,9 @@ pub fn run(ctx: egui::Context, app: Bayonet) -> Result<()> {
         alarm,
         rig: None,
         epoch: Instant::now(),
+        quivers: Vec::new(),
+        quiver_tick: Instant::now(),
+        quiver_until: None,
     };
     startup("boiler.loop.enter");
     event_loop.run_app(&mut boiler).context("run event loop")
@@ -100,6 +156,9 @@ struct Boiler {
     /// Tide origin: tremor wavetrains phase off seconds since boot, wrapped
     /// well inside f32 precision.
     epoch: Instant,
+    quivers: Vec<Quiver>,
+    quiver_tick: Instant,
+    quiver_until: Option<Instant>,
 }
 
 impl Boiler {
@@ -114,11 +173,28 @@ impl Boiler {
             .handle_platform_output(&rig.window, output.platform_output);
         let primitives = self.ctx.tessellate(output.shapes, output.pixels_per_point);
         let veil = self.app.frost_veil(&self.ctx, output.pixels_per_point);
-        let tensions = take_tensions(&self.ctx, output.pixels_per_point);
+        let tensions = take_tensions(
+            &self.ctx,
+            output.pixels_per_point,
+            &mut self.quivers,
+            &mut self.quiver_tick,
+        );
+        if !tensions.is_empty() {
+            self.quiver_until = Some(Instant::now() + QUIVER_WAKE);
+            rig.window.request_redraw();
+        }
         let lifts = self.app.frost_lift(&self.ctx, output.pixels_per_point);
         let (water, splashes) = self.app.frost_splashes(&self.ctx, output.pixels_per_point);
         let (viewer, touches) = self.app.frost_touches(&self.ctx, output.pixels_per_point);
-        let wake = self.app.frost_wake(&self.ctx);
+        let quiver_wake = self
+            .quiver_until
+            .is_some_and(|until| until > Instant::now());
+        if quiver_wake {
+            rig.window.request_redraw();
+        } else {
+            self.quiver_until = None;
+        }
+        let wake = self.app.frost_wake(&self.ctx) || quiver_wake;
         rig.render(
             &primitives,
             &output.textures_delta,

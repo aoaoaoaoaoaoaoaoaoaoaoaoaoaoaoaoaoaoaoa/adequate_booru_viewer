@@ -195,6 +195,7 @@ pub fn tension(ui: &egui::Ui, response: &egui::Response) {
     ui.ctx().data_mut(|data| {
         data.get_temp_mut_or_default::<Vec<crate::frost::Tension>>(egui::Id::new("tension-field"))
             .push(crate::frost::Tension {
+                id: response.id.value(),
                 rect: response.rect.shrink(1.0),
                 pointer,
                 grip,
