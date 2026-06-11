@@ -894,8 +894,8 @@ const PLATE_FEATHER: f32 = 6.0;
 const PLATE_LIFT_GAIN: f32 = 2.0;
 const PLATE_DRY_GAIN: f32 = 5.0;
 const FIELD_SCALE: f32 = 2.0;
-const FIELD_HEIGHT_CEIL: f32 = 24.0;
-const FIELD_FLOW_CEIL: f32 = 10.0;
+const FIELD_HEIGHT_CEIL: f32 = 48.0;
+const FIELD_FLOW_CEIL: f32 = 18.0;
 
 @group(0) @binding(0) var sharp_tex: texture_2d<f32>;
 @group(0) @binding(1) var blur_tex: texture_2d<f32>;
@@ -1202,13 +1202,14 @@ const SIM_SCALE: f32 = 2.0;
 const DT: f32 = 1.0 / 240.0;
 const LIFT_RADIUS: f32 = 3.0;
 const PLATE_FEATHER: f32 = 6.0;
-const SOURCE_GAIN: f32 = 38.0;
+const SOURCE_GAIN: f32 = 44.0;
 const SOURCE_SIGMA: f32 = 12.0;
-const SOURCE_LIFE: f32 = 0.20;
-const SOURCE_CEIL: f32 = 12.0;
-const H_CEIL: f32 = 24.0;
-const V_CEIL: f32 = 720.0;
-const HEIGHT_BLEED: f32 = 0.9993;
+const SOURCE_LIFE: f32 = 0.22;
+const SHEET_SOURCE_LIFE: f32 = 0.38;
+const SOURCE_CEIL: f32 = 72.0;
+const H_CEIL: f32 = 48.0;
+const V_CEIL: f32 = 1440.0;
+const HEIGHT_BLEED: f32 = 0.99965;
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var dst_tex: texture_storage_2d<rgba16float, write>;
@@ -1231,6 +1232,10 @@ fn island(sd: f32) -> f32 {
 
 fn sane(x: f32, ceil: f32) -> f32 {
     return clamp(select(0.0, x, x == x), -ceil, ceil);
+}
+
+fn soft_limiter(x: f32, ceil: f32) -> f32 {
+    return ceil * x / (abs(x) + ceil);
 }
 
 fn obstacle(px: vec2f) -> f32 {
@@ -1266,7 +1271,9 @@ fn plateau(x: f32, lo: f32, hi: f32) -> f32 {
 }
 
 fn source_shell(px: vec2f, rect: vec4f, age: f32, amp: f32, walls: vec2f) -> f32 {
-    if (amp <= 0.0 || age > SOURCE_LIFE) {
+    let sheet = max(1.0 - walls.x, 1.0 - walls.y);
+    let life = mix(SOURCE_LIFE, SHEET_SOURCE_LIFE, sheet);
+    if (amp <= 0.0 || age > life) {
         return 0.0;
     }
     var shell = 0.0;
@@ -1285,8 +1292,9 @@ fn source_shell(px: vec2f, rect: vec4f, age: f32, amp: f32, walls: vec2f) -> f32
         shell = exp(-0.5 * pow(dx / max(mask.wave_sigma, 1.0), 2.0))
             * plateau(px.y, rect.y, rect.w);
     }
-    let birth = 1.0 - smoothstep(0.0, SOURCE_LIFE, age);
-    return amp * shell * birth;
+    let birth = 1.0 - smoothstep(0.0, life, age);
+    let violence = mix(1.0, 2.8, sheet);
+    return amp * violence * shell * birth;
 }
 
 fn source(px: vec2f) -> f32 {
@@ -1310,7 +1318,7 @@ fn source(px: vec2f) -> f32 {
         let phase = mask.tremor_k * d - mask.tremor_omega * mask.tide;
         drive = drive + mask.tremor_amp * g * shell * sin(phase);
     }
-    return clamp(drive, -SOURCE_CEIL, SOURCE_CEIL);
+    return soft_limiter(drive, SOURCE_CEIL);
 }
 
 @compute @workgroup_size(8, 8, 1)

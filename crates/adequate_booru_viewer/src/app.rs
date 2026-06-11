@@ -93,7 +93,7 @@ impl Default for Surf {
             click_amp: 2.5,
             viewer_life: 8.0,
             surge_quantum: 48.0,
-            surge_amp: 4.8,
+            surge_amp: 7.2,
             surge_tau: 0.10,
             tau_rise: 0.09,
             tau_fall: 0.24,
