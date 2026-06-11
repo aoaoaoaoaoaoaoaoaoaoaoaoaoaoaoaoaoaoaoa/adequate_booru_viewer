@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/booru_bayonet"]
+members = ["crates/adequate_booru_viewer"]
 resolver = "3"
 
 [workspace.package]
