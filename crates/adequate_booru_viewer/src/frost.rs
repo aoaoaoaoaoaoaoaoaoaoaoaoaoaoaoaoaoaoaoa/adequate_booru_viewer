@@ -4,12 +4,8 @@
 //! module composites it to the swapchain with (a) the frosted veil for the
 //! viewer (dual-Kawase blur over a small mip chain, SDF rounded-rect cutouts
 //! kept sharp), (b) the button tension refraction, (c) the grid's lift
-//! plates, (d) splashes — dispersive rings radiating from a plate's hull
-//! across the magic water the screen floats on, partially reflected by the
-//! panel shelf and the window walls — and (e) button quivers: small plates
-//! vibrating at the surface, shedding continuous wavetrains. Scroll inertia
-//! plunges planar surges off the water's edge (app-side). The veil's sharp
-//! cutouts are dry land for the background pond; the viewed image owns a
+//! plates, (d) a persistent damped shallow-water height field excited by
+//! splashes, text, scroll shocks, and button tremors, and (e) the viewer's
 //! separate bounded pond for click ripples. While nothing is live the boiler
 //! bypasses all of this entirely.
 
@@ -18,6 +14,12 @@ use std::f32::consts::TAU;
 
 /// Mip levels in the blur chain: /2, /4, /8 of the surface.
 const LEVELS: usize = 3;
+/// Water simulation decimation. Solver cells are square, in physical pixels.
+const SIM_SCALE: u32 = 2;
+const SIM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+const SIM_BYTES: u32 = 8;
+const SIM_STEPS: usize = 4;
+const SIM_WORKGROUP: u32 = 8;
 /// How many grid tiles may rise/relax at once — the depth of the slosh trail
 /// as the pointer sweeps across the grid.
 pub const LIFT_SLOTS: usize = 4;
@@ -67,14 +69,14 @@ pub struct Brine {
     /// Lift plate: footprint growth at full grip and surfacing brightness.
     pub bulge_px: f32,
     pub lift_bright: f32,
-    /// Splash rings: crest speed, pulse half-width, viscous decay seconds,
-    /// geometric spreading scale.
+    /// Persistent gallery solver + viewer pond waves: crest speed, source
+    /// width, viscous decay seconds, viewer-only geometric spreading scale.
     pub wave_v: f32,
     pub wave_sigma: f32,
     pub wave_damp: f32,
     pub wave_spread: f32,
-    /// Shore: transmission into the shallows, shelf and wall reflectivity,
-    /// boundary feather.
+    /// Shore: chromatic transmission into the shallows, shelf impedance,
+    /// viewer-wall reflectivity, boundary feather.
     pub t_panel: f32,
     pub r_panel: f32,
     pub r_wall: f32,
@@ -162,6 +164,9 @@ pub struct Surge<'a> {
     pub splashes: &'a [Splash],
     pub viewer: egui::Rect,
     pub touches: &'a [Touch],
+    /// Keep the persistent solver ticking while old energy decays, even after
+    /// its one-frame exciters have fallen out of the CPU source lists.
+    pub wake: bool,
     /// Wall-clock seconds (wrapped) driving the tremor wavetrains.
     pub tide: f32,
     pub brine: Brine,
@@ -175,6 +180,7 @@ impl Surge<'_> {
             || !self.lifts.is_empty()
             || !self.splashes.is_empty()
             || !self.touches.is_empty()
+            || self.wake
     }
 }
 
@@ -212,9 +218,11 @@ impl Cut {
 pub struct Frost {
     sample_layout: wgpu::BindGroupLayout,
     composite_layout: wgpu::BindGroupLayout,
+    sim_layout: wgpu::BindGroupLayout,
     down: wgpu::RenderPipeline,
     up: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
+    sim: wgpu::ComputePipeline,
     sampler: wgpu::Sampler,
     mask: wgpu::Buffer,
     format: wgpu::TextureFormat,
@@ -225,7 +233,15 @@ pub struct Frost {
 struct Rig {
     scene: Target,
     chain: Vec<Target>,
-    composite_bind: wgpu::BindGroup,
+    water: Water,
+}
+
+struct Water {
+    size: wgpu::Extent3d,
+    _textures: Vec<wgpu::Texture>,
+    composite_bind: Vec<wgpu::BindGroup>,
+    sim_bind: Vec<wgpu::BindGroup>,
+    phase: usize,
 }
 
 struct Target {
@@ -240,6 +256,10 @@ impl Frost {
             label: Some("frost"),
             source: wgpu::ShaderSource::Wgsl(WGSL.into()),
         });
+        let sim_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("frost-sim"),
+            source: wgpu::ShaderSource::Wgsl(SIM_WGSL.into()),
+        });
         let sample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("frost-sample"),
             entries: &[texture_entry(0), sampler_entry(1)],
@@ -253,6 +273,33 @@ impl Frost {
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(MASK_BYTES),
+                    },
+                    count: None,
+                },
+                unfilterable_texture_entry(4, wgpu::ShaderStages::FRAGMENT),
+            ],
+        });
+        let sim_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("frost-sim"),
+            entries: &[
+                unfilterable_texture_entry(0, wgpu::ShaderStages::COMPUTE),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: SIM_FORMAT,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -308,12 +355,27 @@ impl Frost {
                 cache: None,
             })
         };
+        let sim_layout_handle = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("frost-sim"),
+            bind_group_layouts: &[Some(&sim_layout)],
+            immediate_size: 0,
+        });
+        let sim = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("frost-sim"),
+            layout: Some(&sim_layout_handle),
+            module: &sim_module,
+            entry_point: Some("step"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
         Self {
             down: pipeline("frost-down", &sample_layout, "kawase_down"),
             up: pipeline("frost-up", &sample_layout, "kawase_up"),
             composite: pipeline("frost-composite", &composite_layout, "composite"),
+            sim,
             sample_layout,
             composite_layout,
+            sim_layout,
             sampler,
             mask,
             format,
@@ -321,7 +383,7 @@ impl Frost {
         }
     }
 
-    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+    pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) {
         if width == 0 || height == 0 {
             self.rig = None;
             return;
@@ -363,32 +425,11 @@ impl Frost {
         let chain = (1..=LEVELS as u32)
             .map(|level| target("frost-chain", width >> level, height >> level))
             .collect::<Vec<_>>();
-        let composite_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frost-composite"),
-            layout: &self.composite_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&scene.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&chain[0].view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.mask.as_entire_binding(),
-                },
-            ],
-        });
+        let water = self.water(device, queue, width, height, &scene, &chain[0]);
         self.rig = Some(Rig {
             scene,
             chain,
-            composite_bind,
+            water,
         });
     }
 
@@ -399,16 +440,25 @@ impl Frost {
 
     /// Composites the offscreen scene to `surface` with everything in `surge`.
     pub fn compose(
-        &self,
+        &mut self,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         surface: &wgpu::TextureView,
         surge: &Surge<'_>,
     ) {
-        let Some(rig) = &self.rig else {
+        let Some(rig) = &mut self.rig else {
             return;
         };
         queue.write_buffer(&self.mask, 0, &mask_bytes(surge));
+        for _ in 0..SIM_STEPS {
+            run_compute(
+                encoder,
+                &self.sim,
+                &rig.water.sim_bind[rig.water.phase],
+                rig.water.size,
+            );
+            rig.water.phase ^= 1;
+        }
         if surge.veil.is_some_and(|veil| veil.blur > 0.0) {
             let mut blur = |pipeline, source: &Target, sink: &wgpu::TextureView| {
                 run_pass(encoder, pipeline, &source.bind, sink);
@@ -421,7 +471,126 @@ impl Frost {
                 blur(&self.up, &rig.chain[level], &rig.chain[level - 1].view);
             }
         }
-        run_pass(encoder, &self.composite, &rig.composite_bind, surface);
+        run_pass(
+            encoder,
+            &self.composite,
+            &rig.water.composite_bind[rig.water.phase],
+            surface,
+        );
+    }
+
+    fn water(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        scene: &Target,
+        blur: &Target,
+    ) -> Water {
+        let size = wgpu::Extent3d {
+            width: width.div_ceil(SIM_SCALE).max(1),
+            height: height.div_ceil(SIM_SCALE).max(1),
+            depth_or_array_layers: 1,
+        };
+        let textures = (0..2)
+            .map(|slot| {
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("frost-water"),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: SIM_FORMAT,
+                    usage: wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::STORAGE_BINDING,
+                    view_formats: &[SIM_FORMAT],
+                });
+                let zeros = vec![0_u8; (size.width * size.height * SIM_BYTES) as usize];
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &zeros,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(size.width * SIM_BYTES),
+                        rows_per_image: Some(size.height),
+                    },
+                    size,
+                );
+                (slot, texture)
+            })
+            .collect::<Vec<_>>();
+        let views = textures
+            .iter()
+            .map(|(_, texture)| texture.create_view(&wgpu::TextureViewDescriptor::default()))
+            .collect::<Vec<_>>();
+        let composite_bind = views
+            .iter()
+            .map(|view| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("frost-composite"),
+                    layout: &self.composite_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&scene.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&blur.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.mask.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(view),
+                        },
+                    ],
+                })
+            })
+            .collect::<Vec<_>>();
+        let sim_bind = [(0, 1), (1, 0)]
+            .into_iter()
+            .map(|(src, dst)| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("frost-sim"),
+                    layout: &self.sim_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&views[src]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&views[dst]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.mask.as_entire_binding(),
+                        },
+                    ],
+                })
+            })
+            .collect::<Vec<_>>();
+        Water {
+            size,
+            _textures: textures.into_iter().map(|(_, texture)| texture).collect(),
+            composite_bind,
+            sim_bind,
+            phase: 0,
+        }
     }
 }
 
@@ -452,12 +621,47 @@ fn run_pass(
     pass.draw(0..3, 0..1);
 }
 
+fn run_compute(
+    encoder: &mut wgpu::CommandEncoder,
+    pipeline: &wgpu::ComputePipeline,
+    bind: &wgpu::BindGroup,
+    size: wgpu::Extent3d,
+) {
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("frost-sim"),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind, &[]);
+    pass.dispatch_workgroups(
+        size.width.div_ceil(SIM_WORKGROUP),
+        size.height.div_ceil(SIM_WORKGROUP),
+        1,
+    );
+}
+
 fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::FRAGMENT,
         ty: wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn unfilterable_texture_entry(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
             view_dimension: wgpu::TextureViewDimension::D2,
             multisampled: false,
         },
@@ -689,12 +893,12 @@ const LIFT_RADIUS: f32 = 3.0;
 const PLATE_FEATHER: f32 = 6.0;
 const PLATE_LIFT_GAIN: f32 = 2.0;
 const PLATE_DRY_GAIN: f32 = 5.0;
-const PLATE_REFLECT: f32 = 0.42;
 
 @group(0) @binding(0) var sharp_tex: texture_2d<f32>;
 @group(0) @binding(1) var blur_tex: texture_2d<f32>;
 @group(0) @binding(2) var comp_samp: sampler;
 @group(0) @binding(3) var<uniform> mask: Mask;
+@group(0) @binding(4) var water_tex: texture_2d<f32>;
 
 // Signed distance to a rounded rect: negative inside, in pixels.
 fn sd_cut(px: vec2f, rect_min: vec2f, rect_max: vec2f, radius: f32) -> f32 {
@@ -702,14 +906,6 @@ fn sd_cut(px: vec2f, rect_min: vec2f, rect_max: vec2f, radius: f32) -> f32 {
     let half_size = (rect_max - rect_min) * 0.5 - radius;
     let q = abs(px - center) - half_size;
     return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - radius;
-}
-
-// Outward normal of a rounded rect, analytic for exterior points.
-fn rect_normal(px: vec2f, rect: vec4f) -> vec2f {
-    let center = (rect.xy + rect.zw) * 0.5;
-    let half_size = max((rect.zw - rect.xy) * 0.5 - vec2f(LIFT_RADIUS), vec2f(0.0));
-    let q = max(abs(px - center) - half_size, vec2f(0.0));
-    return normalize(q * sign(px - center) + vec2f(1e-4, 0.0));
 }
 
 // Shore crossing gain: full strength on the source's side of the panel
@@ -746,22 +942,6 @@ fn lift_warp(px: vec2f, rect: vec4f, grow: f32) -> vec2f {
     return away / s - away;
 }
 
-// One wavefront's scalar height-field gradient at px: an expanding iso-contour
-// of the source rect's SDF, damped by age and geometric spreading. Zero inside
-// the source (the surfaced plate is dry) and off the band.
-fn splash_flow(px: vec2f, rect: vec4f, age: f32, amp: f32) -> vec2f {
-    let zero = vec2f(0.0);
-    let d = sd_cut(px, rect.xy, rect.zw, LIFT_RADIUS);
-    let travel = mask.wave_v * age;
-    if (d <= 0.0 || abs(d - travel) > 4.0 * mask.wave_sigma + 0.05 * travel) {
-        return zero;
-    }
-    let a = amp * exp(-age / mask.wave_damp) / sqrt(1.0 + d / mask.wave_spread);
-    let dir = rect_normal(px, rect);
-    let s = (d - travel) / mask.wave_sigma;
-    return dir * (a * s * exp(-s * s * 0.5));
-}
-
 // Fingertip point disturbance inside the viewer pond.
 fn touch_flow(px: vec2f, center: vec2f, age: f32, amp: f32) -> vec2f {
     let zero = vec2f(0.0);
@@ -777,48 +957,18 @@ fn touch_flow(px: vec2f, center: vec2f, age: f32, amp: f32) -> vec2f {
     return dir * (a * s * exp(-s * s * 0.5));
 }
 
-fn side_gate(coord: f32, wall: f32, side: f32) -> f32 {
-    return smoothstep(0.0, PLATE_FEATHER, (coord - wall) * side);
+fn sample_height(coord: vec2i, dims: vec2i) -> f32 {
+    let p = clamp(coord, vec2i(0), dims - vec2i(1));
+    return textureLoad(water_tex, p, 0).x;
 }
 
-fn mirror_x(rect: vec4f, wall: f32) -> vec4f {
-    return vec4f(2.0 * wall - rect.z, rect.y, 2.0 * wall - rect.x, rect.w);
-}
-
-fn mirror_y(rect: vec4f, wall: f32) -> vec4f {
-    return vec4f(rect.x, 2.0 * wall - rect.w, rect.z, 2.0 * wall - rect.y);
-}
-
-// First-order obstacle reflection from a raised image tile. The side gates
-// make the tile act like four one-sided soft walls rather than an absorbing
-// hole: an incident wave reflects on the side it came from, while the smooth
-// plate island still attenuates transmission under the tile.
-fn plate_reflect(px: vec2f, src: vec4f, plate: vec4f, age: f32, amp: f32, grip: f32) -> vec2f {
-    let center = (src.xy + src.zw) * 0.5;
-    let r = amp * grip * PLATE_REFLECT;
-    let left = side_gate(px.x, plate.x, -1.0) * side_gate(center.x, plate.x, -1.0);
-    let right = side_gate(px.x, plate.z, 1.0) * side_gate(center.x, plate.z, 1.0);
-    let top = side_gate(px.y, plate.y, -1.0) * side_gate(center.y, plate.y, -1.0);
-    let bottom = side_gate(px.y, plate.w, 1.0) * side_gate(center.y, plate.w, 1.0);
-    return splash_flow(px, mirror_x(src, plate.x), age, r * left)
-        + splash_flow(px, mirror_x(src, plate.z), age, r * right)
-        + splash_flow(px, mirror_y(src, plate.y), age, r * top)
-        + splash_flow(px, mirror_y(src, plate.w), age, r * bottom);
-}
-
-fn source_flow(px: vec2f, src: vec4f, age: f32, amp: f32) -> vec2f {
-    if (amp <= 0.0) {
-        return vec2f(0.0);
-    }
-    var flow = splash_flow(px, src, age, amp);
-    for (var i = 0u; i < 4u; i = i + 1u) {
-        let grip = mask.lift_grips[i];
-        if (grip <= 0.0) {
-            continue;
-        }
-        flow = flow + plate_reflect(px, src, mask.lift_rects[i], age, amp, grip);
-    }
-    return flow;
+fn field_flow(px: vec2f) -> vec2f {
+    let dims = vec2i(textureDimensions(water_tex));
+    let p = clamp(vec2i(floor(px / 2.0)), vec2i(0), dims - vec2i(1));
+    let dx = 2.0;
+    let hx = sample_height(p + vec2i(1, 0), dims) - sample_height(p - vec2i(1, 0), dims);
+    let hy = sample_height(p + vec2i(0, 1), dims) - sample_height(p - vec2i(0, 1), dims);
+    return -vec2f(hx, hy) * (4.5 / dx);
 }
 
 @fragment
@@ -878,50 +1028,14 @@ fn composite(in: VsOut) -> @location(0) vec4f {
     let tint = 1.0 + tint_num / max(plate_mass, 1e-4) * plate_lift;
     let dry = outside * exp(-PLATE_DRY_GAIN * plate_mass);
 
-    // Waves. Splash rings radiate from their plate's hull, partially
-    // reflected by the panel shelf (method of images, soft) and the window
-    // walls (hard); button quivers shed continuous tremor wavetrains and
-    // refract their content toward the pointer. Everything superposes; each
-    // contribution is gained by its own shore crossing.
-    var water_flow = vec2f(0.0);
-    let lx = mask.water_min.x;
-    let rx = mask.water_max.x;
-    let ty = mask.water_min.y;
-    let by = mask.water_max.y;
-    for (var i = 0u; i < 32u; i = i + 1u) {
-        let splash = mask.splashes[i];
-        let amp = splash.vitals.y;
-        if (amp <= 0.0) {
-            continue;
-        }
-        let age = splash.vitals.x;
-        let r = splash.rect;
-        let walls = splash.vitals.zw;
-        var burst = source_flow(px, r, age, amp);
-        burst = burst
-            + source_flow(px, vec4f(2.0 * lx - r.z, r.y, 2.0 * lx - r.x, r.w), age, amp * mask.r_panel * walls.x);
-        burst = burst
-            + source_flow(px, vec4f(2.0 * rx - r.z, r.y, 2.0 * rx - r.x, r.w), age, amp * mask.r_wall * walls.x);
-        burst = burst
-            + source_flow(px, vec4f(r.x, 2.0 * ty - r.w, r.z, 2.0 * ty - r.y), age, amp * mask.r_wall * walls.y);
-        burst = burst
-            + source_flow(px, vec4f(r.x, 2.0 * by - r.w, r.z, 2.0 * by - r.y), age, amp * mask.r_wall * walls.y);
-        water_flow = water_flow + burst * crossing(shore_px, (r.x + r.z) * 0.5);
-    }
+    // Persistent background water: the compute pass owns the height field;
+    // composite samples its slope and keeps only local meniscus pulls here.
+    var water_flow = field_flow(px) * crossing(shore_px, px.x);
     for (var i = 0u; i < 4u; i = i + 1u) {
         let q = mask.quivers[i];
         let g = q.touch.z;
         if (g <= 0.0) {
             continue;
-        }
-        // Tremor rings.
-        let d = sd_cut(px, q.rect.xy, q.rect.zw, LIFT_RADIUS);
-        if (d > 0.0 && d < mask.tremor_reach) {
-            let damp = mask.tremor_amp * g * exp(-d / mask.tremor_fade)
-                * crossing(shore_px, (q.rect.x + q.rect.z) * 0.5);
-            let dir = rect_normal(px, q.rect);
-            let phase = mask.tremor_k * d - mask.tremor_omega * mask.tide;
-            water_flow = water_flow + dir * (damp * sin(phase));
         }
         // Capillary pull toward the hovering fingertip: still one scalar
         // surface deformation, split chromatically only at the final prism.
@@ -980,5 +1094,208 @@ fn composite(in: VsOut) -> @location(0) vec4f {
     let frosted = vec4f(base.rgb * mask.dim, base.a);
     let veiled = mix(sharp, frosted, mask.strength);
     return mix(sharp, veiled, outside);
+}
+";
+
+const SIM_WGSL: &str = r"
+struct Mask {
+    a_min: vec2f,
+    a_max: vec2f,
+    b_min: vec2f,
+    b_max: vec2f,
+    water_min: vec2f,
+    water_max: vec2f,
+    radius_a: f32,
+    radius_b: f32,
+    strength: f32,
+    dim: f32,
+    blur: f32,
+    tide: f32,
+    _pad0: f32,
+    _pad1: f32,
+    lift_rects: array<vec4f, 4>,
+    lift_grips: vec4f,
+    quivers: array<Quiver, 4>,
+    splashes: array<Splash, 32>,
+    viewer_min: vec2f,
+    viewer_max: vec2f,
+    touches: array<Touch, 12>,
+    reach: f32,
+    meniscus_px: f32,
+    refract_px: f32,
+    ior_spread: f32,
+    quiver_bulge: f32,
+    quiver_pulse: f32,
+    tremor_k: f32,
+    tremor_omega: f32,
+    tremor_amp: f32,
+    tremor_fade: f32,
+    tremor_reach: f32,
+    bulge_px: f32,
+    lift_bright: f32,
+    wave_v: f32,
+    wave_sigma: f32,
+    wave_damp: f32,
+    wave_spread: f32,
+    t_panel: f32,
+    r_panel: f32,
+    r_wall: f32,
+    shore_feather: f32,
+    _pad2: f32,
+    _pad3: f32,
+    _pad4: f32,
+}
+
+struct Quiver {
+    rect: vec4f,
+    touch: vec4f,
+}
+
+struct Splash {
+    rect: vec4f,
+    vitals: vec4f,
+}
+
+struct Touch {
+    wave: vec4f,
+}
+
+const SIM_SCALE: f32 = 2.0;
+const DT: f32 = 1.0 / 240.0;
+const LIFT_RADIUS: f32 = 3.0;
+const PLATE_FEATHER: f32 = 6.0;
+const SOURCE_GAIN: f32 = 38.0;
+const SOURCE_SIGMA: f32 = 12.0;
+const SOURCE_LIFE: f32 = 0.20;
+const HEIGHT_BLEED: f32 = 0.9993;
+
+@group(0) @binding(0) var src_tex: texture_2d<f32>;
+@group(0) @binding(1) var dst_tex: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var<uniform> mask: Mask;
+
+fn cell_px(p: vec2i) -> vec2f {
+    return (vec2f(p) + vec2f(0.5)) * SIM_SCALE;
+}
+
+fn sd_cut(px: vec2f, rect_min: vec2f, rect_max: vec2f, radius: f32) -> f32 {
+    let center = (rect_min + rect_max) * 0.5;
+    let half_size = (rect_max - rect_min) * 0.5 - radius;
+    let q = abs(px - center) - half_size;
+    return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+fn island(sd: f32) -> f32 {
+    return 1.0 - smoothstep(-PLATE_FEATHER, PLATE_FEATHER, sd);
+}
+
+fn obstacle(px: vec2f) -> f32 {
+    var block = max(
+        island(sd_cut(px, mask.a_min, mask.a_max, mask.radius_a)),
+        island(sd_cut(px, mask.b_min, mask.b_max, mask.radius_b)),
+    );
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let g = mask.lift_grips[i];
+        if (g <= 0.0) {
+            continue;
+        }
+        let r = mask.lift_rects[i];
+        block = max(block, island(sd_cut(px, r.xy, r.zw, LIFT_RADIUS)) * g);
+    }
+    return clamp(block, 0.0, 1.0);
+}
+
+fn load_state(p: vec2i, dims: vec2i) -> vec2f {
+    return textureLoad(src_tex, clamp(p, vec2i(0), dims - vec2i(1)), 0).xy;
+}
+
+fn wall_height(p: vec2i, dims: vec2i, h: f32) -> f32 {
+    let q = clamp(p, vec2i(0), dims - vec2i(1));
+    let b = obstacle(cell_px(q));
+    return mix(textureLoad(src_tex, q, 0).x, h, b);
+}
+
+fn plateau(x: f32, lo: f32, hi: f32) -> f32 {
+    return smoothstep(lo - SOURCE_SIGMA, lo + SOURCE_SIGMA, x)
+        * (1.0 - smoothstep(hi - SOURCE_SIGMA, hi + SOURCE_SIGMA, x));
+}
+
+fn source_shell(px: vec2f, rect: vec4f, age: f32, amp: f32, walls: vec2f) -> f32 {
+    if (amp <= 0.0 || age > SOURCE_LIFE) {
+        return 0.0;
+    }
+    var shell = 0.0;
+    if (walls.x > 0.5 && walls.y > 0.5) {
+        let d = sd_cut(px, rect.xy, rect.zw, LIFT_RADIUS);
+        if (d < -PLATE_FEATHER) {
+            return 0.0;
+        }
+        shell = exp(-0.5 * pow(max(d, 0.0) / max(mask.wave_sigma, 1.0), 2.0));
+    } else if (walls.y > 0.5) {
+        let dy = max(max(rect.y - px.y, px.y - rect.w), 0.0);
+        shell = exp(-0.5 * pow(dy / max(mask.wave_sigma, 1.0), 2.0))
+            * plateau(px.x, rect.x, rect.z);
+    } else if (walls.x > 0.5) {
+        let dx = max(max(rect.x - px.x, px.x - rect.z), 0.0);
+        shell = exp(-0.5 * pow(dx / max(mask.wave_sigma, 1.0), 2.0))
+            * plateau(px.y, rect.y, rect.w);
+    }
+    let birth = 1.0 - smoothstep(0.0, SOURCE_LIFE, age);
+    return amp * shell * birth;
+}
+
+fn source(px: vec2f) -> f32 {
+    var drive = 0.0;
+    for (var i = 0u; i < 32u; i = i + 1u) {
+        let splash = mask.splashes[i];
+        drive = drive
+            + source_shell(px, splash.rect, splash.vitals.x, splash.vitals.y, splash.vitals.zw);
+    }
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let q = mask.quivers[i];
+        let g = q.touch.z;
+        if (g <= 0.0) {
+            continue;
+        }
+        let d = sd_cut(px, q.rect.xy, q.rect.zw, LIFT_RADIUS);
+        if (d <= 0.0 || d > mask.tremor_reach) {
+            continue;
+        }
+        let shell = exp(-d / max(mask.tremor_fade, 1.0));
+        let phase = mask.tremor_k * d - mask.tremor_omega * mask.tide;
+        drive = drive + mask.tremor_amp * g * shell * sin(phase);
+    }
+    return drive;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn step(@builtin(global_invocation_id) gid: vec3u) {
+    let dims_u = textureDimensions(src_tex);
+    if (gid.x >= dims_u.x || gid.y >= dims_u.y) {
+        return;
+    }
+    let dims = vec2i(dims_u);
+    let p = vec2i(gid.xy);
+    let px = cell_px(p);
+    let here = load_state(p, dims);
+    let h = here.x;
+
+    let l = wall_height(p + vec2i(-1, 0), dims, h);
+    let r = wall_height(p + vec2i(1, 0), dims, h);
+    let u = wall_height(p + vec2i(0, -1), dims, h);
+    let d = wall_height(p + vec2i(0, 1), dims, h);
+    let lap = (l + r + u + d - 4.0 * h) / (SIM_SCALE * SIM_SCALE);
+
+    let shelf = smoothstep(-mask.shore_feather, mask.shore_feather, px.x - mask.water_min.x);
+    let shelf_speed = clamp((1.0 - mask.r_panel) / (1.0 + mask.r_panel), 0.2, 1.0);
+    let cfl = 0.66 * SIM_SCALE / DT;
+    let c = min(mask.wave_v * mix(shelf_speed, 1.0, shelf), cfl);
+    var v = here.y + c * c * lap * DT + source(px) * SOURCE_GAIN;
+    v = v * exp(-DT / max(mask.wave_damp, 0.08)) * mix(0.985, 1.0, shelf);
+
+    var next_h = (h + v * DT) * HEIGHT_BLEED;
+    let wet = 1.0 - obstacle(px);
+    next_h = next_h * wet;
+    v = v * wet;
+    textureStore(dst_tex, p, vec4f(next_h, v, 0.0, 0.0));
 }
 ";

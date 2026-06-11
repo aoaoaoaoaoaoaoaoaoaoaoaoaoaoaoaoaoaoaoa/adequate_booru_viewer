@@ -118,6 +118,7 @@ impl Boiler {
         let lifts = self.app.frost_lift(&self.ctx, output.pixels_per_point);
         let (water, splashes) = self.app.frost_splashes(&self.ctx, output.pixels_per_point);
         let (viewer, touches) = self.app.frost_touches(&self.ctx, output.pixels_per_point);
+        let wake = self.app.frost_wake(&self.ctx);
         rig.render(
             &primitives,
             &output.textures_delta,
@@ -130,6 +131,7 @@ impl Boiler {
                 splashes: &splashes,
                 viewer,
                 touches: &touches,
+                wake,
                 tide: self.epoch.elapsed().as_secs_f32() % 1000.0,
                 brine: self.app.brine(),
             },
@@ -275,7 +277,7 @@ impl Rig {
         config.view_formats = vec![gpu.target_format];
         surface.configure(&gpu.device, &config);
         let mut frost = Frost::new(&gpu.device, gpu.target_format);
-        frost.resize(&gpu.device, config.width, config.height);
+        frost.resize(&gpu.device, &gpu.queue, config.width, config.height);
         startup("boiler.rig.raised");
         Ok(Self {
             window,
@@ -294,7 +296,8 @@ impl Rig {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.gpu.device, &self.config);
-        self.frost.resize(&self.gpu.device, size.width, size.height);
+        self.frost
+            .resize(&self.gpu.device, &self.gpu.queue, size.width, size.height);
     }
 
     fn render(

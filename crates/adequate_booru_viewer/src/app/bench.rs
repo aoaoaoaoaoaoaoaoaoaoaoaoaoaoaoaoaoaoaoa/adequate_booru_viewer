@@ -76,7 +76,7 @@ impl super::Bayonet {
                             ("enter amp px", &mut surf.enter_amp, 0.0..=12.0),
                             ("exit amp px", &mut surf.exit_amp, 0.0..=12.0),
                             ("click amp px", &mut surf.click_amp, 0.0..=12.0),
-                            ("ring life s", &mut surf.splash_life, 0.5..=10.0),
+                            ("viewer ring life s", &mut surf.viewer_life, 0.5..=10.0),
                         ],
                     ),
                     (

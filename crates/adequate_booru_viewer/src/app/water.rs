@@ -1,5 +1,8 @@
 use super::{scroll::SurgeEdge, *};
 
+const PLUNGE_SOURCE_LIFE: f32 = 0.24;
+const WATER_WAKE: Duration = Duration::from_secs(14);
+
 impl Bayonet {
     /// Hover-lift for the grid, modelled as bang-bang force plates over a
     /// relaxing membrane: the hovered tile's plate targets full press, every
@@ -111,10 +114,7 @@ impl Bayonet {
                 .plunges
                 .iter()
                 .enumerate()
-                .min_by(|(_, a), (_, b)| {
-                    presence(a, self.surf.splash_life)
-                        .total_cmp(&presence(b, self.surf.splash_life))
-                })
+                .min_by(|(_, a), (_, b)| a.amp.abs().total_cmp(&b.amp.abs()))
                 .map_or(0, |(slot, _)| slot);
             let _weakest = self.plunges.remove(victim);
         }
@@ -124,6 +124,7 @@ impl Bayonet {
             amp,
             walls,
         });
+        self.arm_water();
     }
 
     pub(super) fn text_plunge(&mut self, rect: egui::Rect, weight: f32) {
@@ -139,19 +140,22 @@ impl Bayonet {
             born: Instant::now(),
             amp: VIEWER_TOUCH_AMP,
         });
+        self.arm_water();
     }
 
-    /// Live splashes for the compose pass (physical px), plus the water rect
-    /// (the grid viewport; the panel to its left is the shallows). The water
-    /// keeps moving while any ring lives, so keep painting.
+    fn arm_water(&mut self) {
+        self.water_until = Some(Instant::now() + WATER_WAKE);
+    }
+
+    /// Birth exciters for the persistent water solver (physical px), plus the
+    /// water rect (the grid viewport; the panel to its left is the shallows).
     pub fn frost_splashes(
         &mut self,
         ctx: &egui::Context,
         pixels_per_point: f32,
     ) -> (egui::Rect, Vec<crate::frost::Splash>) {
-        let life = self.surf.splash_life;
         self.plunges
-            .retain(|plunge| retire(plunge.born.elapsed().as_secs_f32(), life) > 0.0);
+            .retain(|plunge| plunge.born.elapsed().as_secs_f32() <= PLUNGE_SOURCE_LIFE);
         if !self.plunges.is_empty() {
             ctx.request_repaint();
         }
@@ -174,7 +178,7 @@ impl Bayonet {
                 crate::frost::Splash {
                     rect: scale(plunge.rect),
                     age,
-                    amp: plunge.amp * retire(age, life),
+                    amp: plunge.amp,
                     walls: plunge.walls.into(),
                 }
             })
@@ -187,7 +191,7 @@ impl Bayonet {
         ctx: &egui::Context,
         pixels_per_point: f32,
     ) -> (egui::Rect, Vec<crate::frost::Touch>) {
-        let life = self.surf.splash_life;
+        let life = self.surf.viewer_life;
         self.viewer_touches.retain(|touch| {
             self.zoom.is_some() && retire(touch.born.elapsed().as_secs_f32(), life) > 0.0
         });
@@ -219,6 +223,15 @@ impl Bayonet {
             touches,
         )
     }
+
+    pub fn frost_wake(&mut self, ctx: &egui::Context) -> bool {
+        if self.water_until.is_some_and(|until| until > Instant::now()) {
+            ctx.request_repaint();
+            return true;
+        }
+        self.water_until = None;
+        false
+    }
 }
 
 fn retire(age: f32, life: f32) -> f32 {
@@ -226,10 +239,6 @@ fn retire(age: f32, life: f32) -> f32 {
     let t = ((age - life) / TAIL).clamp(0.0, 1.0);
     let smooth = t * t * (3.0 - 2.0 * t);
     1.0 - smooth
-}
-
-fn presence(plunge: &Plunge, life: f32) -> f32 {
-    plunge.amp.abs() * retire(plunge.born.elapsed().as_secs_f32(), life)
 }
 
 /// One grid tile's membrane plate: its grip relaxes toward 1 while hovered,

@@ -73,8 +73,8 @@ struct Surf {
     enter_amp: f32,
     exit_amp: f32,
     click_amp: f32,
-    /// Rings older than this have dissipated below perception.
-    splash_life: f32,
+    /// The viewer pond still uses analytic point ripples; this is their fade.
+    viewer_life: f32,
     /// Scroll inertia: every quantum px of travel plunges one planar surge.
     surge_quantum: f32,
     surge_amp: f32,
@@ -91,7 +91,7 @@ impl Default for Surf {
             enter_amp: 3.0,
             exit_amp: 1.4,
             click_amp: 5.0,
-            splash_life: 8.0,
+            viewer_life: 8.0,
             surge_quantum: 48.0,
             surge_amp: 4.8,
             surge_tau: 0.10,
@@ -145,6 +145,7 @@ pub struct Bayonet {
     splash_memo: Option<(PostId, egui::Rect)>,
     plunges: Vec<Plunge>,
     viewer_touches: Vec<TouchPlunge>,
+    water_until: Option<Instant>,
     viewer_pond: egui::Rect,
     water_rect: egui::Rect,
     scroll: ScrollSea,
@@ -246,6 +247,7 @@ impl Bayonet {
             splash_memo: None,
             plunges: Vec::new(),
             viewer_touches: Vec::new(),
+            water_until: None,
             viewer_pond: egui::Rect::ZERO,
             water_rect: egui::Rect::ZERO,
             scroll: ScrollSea::default(),
