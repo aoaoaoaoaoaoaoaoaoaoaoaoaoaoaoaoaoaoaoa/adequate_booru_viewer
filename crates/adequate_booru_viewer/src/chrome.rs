@@ -241,30 +241,52 @@ pub fn text_wake(
     if !response.changed() {
         return None;
     }
-    let old = before.chars().count();
-    let new = after.chars().count();
-    if new <= old {
+    let before = before.chars().collect::<Vec<_>>();
+    let after = after.chars().collect::<Vec<_>>();
+    if before == after {
         return None;
     }
-    let added = new.saturating_sub(old).min(8);
-    let weight = after
-        .chars()
+    let head = before
+        .iter()
+        .zip(&after)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let tail = before[head..]
+        .iter()
         .rev()
-        .take(added)
-        .map(glyph_weight)
+        .zip(after[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let removed = &before[head..before.len().saturating_sub(tail)];
+    let inserted = &after[head..after.len().saturating_sub(tail)];
+    let (sign, glyphs, measure) = if inserted.is_empty() {
+        (-1.0, removed, &before[..head + removed.len()])
+    } else {
+        (1.0, inserted, &after[..head + inserted.len()])
+    };
+    if glyphs.is_empty() {
+        return None;
+    }
+    let mass = glyphs
+        .iter()
+        .rev()
+        .take(8)
+        .map(|ch| glyph_weight(*ch))
         .sum::<f32>()
         .max(0.25);
     let font = egui::TextStyle::Body.resolve(ui.style());
-    let text = ui
-        .painter()
-        .layout_no_wrap(after.to_owned(), font, Color32::PLACEHOLDER);
+    let text = ui.painter().layout_no_wrap(
+        measure.iter().collect::<String>(),
+        font,
+        Color32::PLACEHOLDER,
+    );
     let rect = response.rect;
     let x = (rect.left() + 6.0 + text.size().x).clamp(rect.left() + 6.0, rect.right() - 6.0);
     let h = (rect.height() * 0.62).clamp(8.0, 18.0);
-    let w = (4.0 + weight * 3.5).clamp(5.0, rect.width() * 0.35);
+    let w = (4.0 + mass * 3.5).clamp(5.0, rect.width() * 0.35);
     Some((
         egui::Rect::from_center_size(egui::pos2(x, rect.center().y), egui::vec2(w, h)),
-        weight,
+        sign * mass,
     ))
 }
 

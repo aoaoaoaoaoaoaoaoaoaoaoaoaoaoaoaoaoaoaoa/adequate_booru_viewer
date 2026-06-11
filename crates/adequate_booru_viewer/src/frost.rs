@@ -1290,7 +1290,7 @@ fn plateau(x: f32, lo: f32, hi: f32) -> f32 {
 fn source_shell(px: vec2f, rect: vec4f, age: f32, amp: f32, walls: vec2f) -> f32 {
     let sheet = max(1.0 - walls.x, 1.0 - walls.y);
     let life = mix(SOURCE_LIFE, SHEET_SOURCE_LIFE, sheet);
-    if (amp <= 0.0 || age > life) {
+    if (abs(amp) <= 0.001 || age > life) {
         return 0.0;
     }
     var shell = 0.0;
