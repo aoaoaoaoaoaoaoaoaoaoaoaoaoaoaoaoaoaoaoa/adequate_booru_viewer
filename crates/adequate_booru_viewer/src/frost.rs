@@ -42,7 +42,7 @@ pub const TOUCH_SLOTS: usize = 12;
 const MASK_BYTES: u64 = 1616;
 
 /// The water's chemistry: every shader-side tunable, runtime-adjustable via
-/// the tide bench (F12). Defaults are the shipped feel. Physical px at 1x.
+/// the water bench (F12). Defaults are the shipped feel. Physical px at 1x.
 #[derive(Clone, Copy, Debug)]
 pub struct Brine {
     /// Gaussian reach of the chromatic pull around the pointer.
@@ -70,11 +70,17 @@ pub struct Brine {
     pub bulge_px: f32,
     pub lift_bright: f32,
     /// Persistent gallery solver + viewer pond waves: crest speed, source
-    /// width, viscous decay seconds, viewer-only geometric spreading scale.
+    /// width, viscous decay seconds, viewer-only geometric spreading scale,
+    /// source-to-velocity gain, per-step height retention, and velocity
+    /// diffusion. Diffusion is the real viscosity knob: it kills high
+    /// frequency chatter faster than long swells.
     pub wave_v: f32,
     pub wave_sigma: f32,
     pub wave_damp: f32,
     pub wave_spread: f32,
+    pub source_gain: f32,
+    pub height_retention: f32,
+    pub viscosity: f32,
     /// Shore: chromatic transmission into the shallows, shelf impedance,
     /// viewer-wall reflectivity, boundary feather.
     pub t_panel: f32,
@@ -103,6 +109,9 @@ impl Default for Brine {
             wave_sigma: 14.0,
             wave_damp: 2.4,
             wave_spread: 480.0,
+            source_gain: 44.0,
+            height_retention: 0.99965,
+            viscosity: 90.0,
             t_panel: 0.12,
             r_panel: 0.35,
             r_wall: 0.6,
@@ -750,7 +759,7 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
     }
     // brine @ byte 1520 (lane 380): the runtime-tunable water chemistry.
     let brine = &surge.brine;
-    lanes[380..401].copy_from_slice(&[
+    lanes[380..404].copy_from_slice(&[
         brine.reach,
         brine.meniscus_px,
         brine.refract_px,
@@ -768,6 +777,9 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
         brine.wave_sigma,
         brine.wave_damp,
         brine.wave_spread,
+        brine.source_gain,
+        brine.height_retention,
+        brine.viscosity,
         brine.t_panel,
         brine.r_panel,
         brine.r_wall,
@@ -862,13 +874,13 @@ struct Mask {
     wave_sigma: f32,
     wave_damp: f32,
     wave_spread: f32,
+    source_gain: f32,
+    height_retention: f32,
+    viscosity: f32,
     t_panel: f32,
     r_panel: f32,
     r_wall: f32,
     shore_feather: f32,
-    _pad2: f32,
-    _pad3: f32,
-    _pad4: f32,
 }
 
 // touch.xy = pointer, touch.z = grip; .w pad.
@@ -1176,13 +1188,13 @@ struct Mask {
     wave_sigma: f32,
     wave_damp: f32,
     wave_spread: f32,
+    source_gain: f32,
+    height_retention: f32,
+    viscosity: f32,
     t_panel: f32,
     r_panel: f32,
     r_wall: f32,
     shore_feather: f32,
-    _pad2: f32,
-    _pad3: f32,
-    _pad4: f32,
 }
 
 struct Quiver {
@@ -1203,14 +1215,12 @@ const SIM_SCALE: f32 = 2.0;
 const DT: f32 = 1.0 / 240.0;
 const LIFT_RADIUS: f32 = 3.0;
 const PLATE_FEATHER: f32 = 6.0;
-const SOURCE_GAIN: f32 = 44.0;
 const SOURCE_SIGMA: f32 = 12.0;
 const SOURCE_LIFE: f32 = 0.22;
 const SHEET_SOURCE_LIFE: f32 = 0.38;
 const SOURCE_CEIL: f32 = 72.0;
 const H_CEIL: f32 = 48.0;
 const V_CEIL: f32 = 1440.0;
-const HEIGHT_BLEED: f32 = 0.99965;
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var dst_tex: texture_storage_2d<rgba16float, write>;
@@ -1264,6 +1274,12 @@ fn wall_height(p: vec2i, dims: vec2i, h: f32) -> f32 {
     let q = clamp(p, vec2i(0), dims - vec2i(1));
     let b = obstacle(cell_px(q));
     return mix(load_state(q, dims).x, h, b);
+}
+
+fn wall_velocity(p: vec2i, dims: vec2i, v: f32) -> f32 {
+    let q = clamp(p, vec2i(0), dims - vec2i(1));
+    let b = obstacle(cell_px(q));
+    return mix(load_state(q, dims).y, v, b);
 }
 
 fn plateau(x: f32, lo: f32, hi: f32) -> f32 {
@@ -1339,17 +1355,24 @@ fn step(@builtin(global_invocation_id) gid: vec3u) {
     let u = wall_height(p + vec2i(0, -1), dims, h);
     let d = wall_height(p + vec2i(0, 1), dims, h);
     let lap = (l + r + u + d - 4.0 * h) / (SIM_SCALE * SIM_SCALE);
+    let vl = wall_velocity(p + vec2i(-1, 0), dims, here.y);
+    let vr = wall_velocity(p + vec2i(1, 0), dims, here.y);
+    let vu = wall_velocity(p + vec2i(0, -1), dims, here.y);
+    let vd = wall_velocity(p + vec2i(0, 1), dims, here.y);
+    let v_lap = (vl + vr + vu + vd - 4.0 * here.y) / (SIM_SCALE * SIM_SCALE);
 
     let shelf = smoothstep(-mask.shore_feather, mask.shore_feather, px.x - mask.water_min.x);
     let shelf_speed = clamp((1.0 - mask.r_panel) / (1.0 + mask.r_panel), 0.2, 1.0);
     let cfl = 0.66 * SIM_SCALE / DT;
     let c = min(mask.wave_v * mix(shelf_speed, 1.0, shelf), cfl);
-    var v = here.y + c * c * lap * DT + source(px) * SOURCE_GAIN;
+    var v = here.y + c * c * lap * DT + source(px) * mask.source_gain;
+    v = v + clamp(mask.viscosity, 0.0, 220.0) * v_lap * DT;
     v = v * exp(-DT / max(mask.wave_damp, 0.08)) * mix(0.985, 1.0, shelf);
 
     let block = obstacle(px);
     v = mix(v, 0.0, block);
-    var next_h = mix((h + v * DT) * HEIGHT_BLEED, h * HEIGHT_BLEED, block);
+    let keep = clamp(mask.height_retention, 0.95, 1.0);
+    var next_h = mix((h + v * DT) * keep, h * keep, block);
     v = sane(v, V_CEIL);
     next_h = sane(next_h, H_CEIL);
     textureStore(dst_tex, p, vec4f(next_h, v, 0.0, 0.0));

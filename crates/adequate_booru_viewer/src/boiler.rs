@@ -23,7 +23,6 @@ use std::{
 use crate::{app::Bayonet, frost::Frost, trace::startup};
 
 const WINDOW_SIZE: LogicalSize<f64> = LogicalSize::new(1440.0, 920.0);
-const QUIVER_RELEASE: f32 = 0.48;
 const QUIVER_WAKE: Duration = Duration::from_secs(8);
 const QUIVER_EPSILON: f32 = 0.012;
 
@@ -66,12 +65,13 @@ fn take_tensions(
     scale: f32,
     bank: &mut Vec<Quiver>,
     then: &mut Instant,
+    release: f32,
 ) -> Vec<crate::frost::Tension> {
     let now = Instant::now();
     let dt = now.duration_since(*then).as_secs_f32().clamp(0.0, 0.12);
     *then = now;
     for quiver in bank.iter_mut() {
-        quiver.grip *= (-dt / QUIVER_RELEASE).exp();
+        quiver.grip *= (-dt / release.max(0.03)).exp();
     }
     let seeds = ctx
         .data_mut(|data| {
@@ -178,6 +178,7 @@ impl Boiler {
             output.pixels_per_point,
             &mut self.quivers,
             &mut self.quiver_tick,
+            self.app.quiver_release(),
         );
         if !tensions.is_empty() {
             self.quiver_until = Some(Instant::now() + QUIVER_WAKE);

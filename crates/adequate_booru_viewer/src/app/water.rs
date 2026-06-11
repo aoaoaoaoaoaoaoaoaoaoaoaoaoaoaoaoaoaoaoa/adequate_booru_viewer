@@ -97,8 +97,8 @@ impl Bayonet {
             )
         };
         let rect = match edge {
-            SurgeEdge::Top => strip(water.top() - 48.0, water.top() - 6.0),
-            SurgeEdge::Bottom => strip(water.bottom() + 6.0, water.bottom() + 48.0),
+            SurgeEdge::Top => strip(water.top() + 4.0, water.top() + 56.0),
+            SurgeEdge::Bottom => strip(water.bottom() - 56.0, water.bottom() - 4.0),
         };
         self.plunge_with_walls(rect, amp * f32::from(count).sqrt(), WallSet::Vertical);
     }
@@ -128,7 +128,7 @@ impl Bayonet {
     }
 
     pub(super) fn text_plunge(&mut self, rect: egui::Rect, weight: f32) {
-        self.plunge(rect, (TEXT_WAKE_AMP * weight).clamp(0.75, 6.6));
+        self.plunge(rect, (self.surf.text_amp * weight).clamp(0.75, 6.6));
     }
 
     pub(super) fn touch_viewer(&mut self, center: egui::Pos2) {
@@ -138,7 +138,7 @@ impl Bayonet {
         self.viewer_touches.push(TouchPlunge {
             center,
             born: Instant::now(),
-            amp: VIEWER_TOUCH_AMP,
+            amp: self.surf.viewer_amp,
         });
         self.arm_water();
     }

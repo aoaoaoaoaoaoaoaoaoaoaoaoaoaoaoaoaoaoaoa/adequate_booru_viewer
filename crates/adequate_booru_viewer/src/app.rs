@@ -53,8 +53,6 @@ const MAX_IMAGES_PER_ROW: u16 = 12;
 const MIN_TILE_EDGE: f32 = 72.0;
 const GAP: f32 = 12.0;
 const VIEWER_CHROME: f32 = 40.0;
-const TEXT_WAKE_AMP: f32 = 1.02;
-const VIEWER_TOUCH_AMP: f32 = 1.6;
 const MAX_GROUP_DEPTH: usize = 8;
 const PLATE_PAD: f32 = 4.0;
 const PREFETCH_DWELL: Duration = Duration::from_millis(120);
@@ -65,7 +63,7 @@ const VEIL_FALL: f32 = 0.06;
 const ZOOM_DIM: f32 = 0.78;
 const MENU_DIM: f32 = 0.62;
 /// The CPU-side water tunables, sibling to `frost::Brine` (the shader side);
-/// both adjustable live via the tide bench (F12). Defaults are the shipped
+/// both adjustable live via the water bench (F12). Defaults are the shipped
 /// feel.
 struct Surf {
     /// Splash amplitudes: surfacing throws a wave, sinking sheds a softer
@@ -74,7 +72,11 @@ struct Surf {
     exit_amp: f32,
     click_amp: f32,
     /// The viewer pond still uses analytic point ripples; this is their fade.
+    text_amp: f32,
+    viewer_amp: f32,
     viewer_life: f32,
+    /// Button plates ring down in the boiler after pointer contact leaves.
+    quiver_release: f32,
     /// Scroll inertia: every quantum px of travel plunges one planar surge.
     surge_quantum: f32,
     surge_amp: f32,
@@ -91,9 +93,12 @@ impl Default for Surf {
             enter_amp: 1.5,
             exit_amp: 0.7,
             click_amp: 2.5,
+            text_amp: 1.02,
+            viewer_amp: 1.6,
             viewer_life: 8.0,
-            surge_quantum: 48.0,
-            surge_amp: 7.2,
+            quiver_release: 0.48,
+            surge_quantum: 32.0,
+            surge_amp: 14.0,
             surge_tau: 0.10,
             tau_rise: 0.09,
             tau_fall: 0.24,
@@ -314,6 +319,10 @@ impl Bayonet {
     /// The water chemistry for the compose pass.
     pub fn brine(&self) -> crate::frost::Brine {
         self.brine
+    }
+
+    pub fn quiver_release(&self) -> f32 {
+        self.surf.quiver_release
     }
 
     /// Frost parameters for the boiler's blur pass, in physical pixels.
