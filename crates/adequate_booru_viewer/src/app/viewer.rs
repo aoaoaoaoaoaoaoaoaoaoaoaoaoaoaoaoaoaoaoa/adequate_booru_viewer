@@ -1,5 +1,7 @@
 use super::*;
 
+const GUTTER: f32 = 8.0;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ViewerAction {
     Copy,
@@ -142,7 +144,8 @@ impl Bayonet {
         self.viewer_pond = egui::Rect::ZERO;
         let screen = ctx.content_rect();
         let tags = self.viewer_tags_open;
-        let drawer = if tags { TAG_MENU_WIDTH + 18.0 } else { 0.0 };
+        let gutter = if tags { GUTTER } else { 0.0 };
+        let drawer = if tags { TAG_MENU_WIDTH + gutter } else { 0.0 };
         let image_box = full_image_box(&post, self.full.get(&post.id), screen.size(), drawer);
         let body = egui::vec2(image_box.x + drawer, image_box.y + VIEWER_CHROME);
         // fixed_size is re-asserted every frame: egui persists window sizes by Id,
@@ -167,7 +170,7 @@ impl Bayonet {
                     egui::vec2(body.x, image_box.y),
                     egui::Layout::left_to_right(egui::Align::Min),
                     |ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.spacing_mut().item_spacing.x = gutter;
                         if let Some(texture) = self.full.get(&post.id) {
                             let response = ui.add(
                                 egui::Image::new(texture)

@@ -153,12 +153,8 @@ impl Bayonet {
         }
         let dirty = self.stats_pulse.is_dirty();
         self.stats_pulse = AsyncPulse::Idle;
-        if !dirty
-            && serial == self.stats_serial
-            && let Some(stats) = stats
-        {
+        if let Some(stats) = stats {
             self.cache_status = cache_status(&stats);
-            self.cache_stats = stats;
             ctx.request_repaint();
         }
         if dirty {

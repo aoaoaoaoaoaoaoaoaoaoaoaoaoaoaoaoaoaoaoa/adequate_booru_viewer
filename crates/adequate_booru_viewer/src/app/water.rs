@@ -7,11 +7,11 @@ const GROUP_SELECT_AMP: f32 = 0.45;
 const FOLD_OPEN_AMP: f32 = -0.32;
 const FOLD_CLOSE_AMP: f32 = 0.42;
 const WATER_WAKE: Duration = Duration::from_secs(14);
-const RAFT_RATE: f32 = 1.15;
-const RAFT_RISE: Duration = Duration::from_millis(80);
+const RAFT_RATE: f32 = 1.7;
+const RAFT_RISE: Duration = Duration::from_millis(70);
 const RAFT_SINK_TAU: f32 = 0.5;
-const RAFT_PEAK_MIN: f32 = 7.0;
-const RAFT_PEAK_SPAN: f32 = 5.5;
+const RAFT_PEAK_MIN: f32 = 13.0;
+const RAFT_PEAK_SPAN: f32 = 10.0;
 
 impl Bayonet {
     /// Hover-lift for the grid, modelled as bang-bang force plates over a

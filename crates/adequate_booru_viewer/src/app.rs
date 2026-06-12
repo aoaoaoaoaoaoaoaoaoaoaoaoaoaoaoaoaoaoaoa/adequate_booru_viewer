@@ -33,6 +33,7 @@ use crate::{
 };
 
 mod bench;
+mod loading;
 mod palette;
 mod panels;
 mod refresh;
@@ -53,8 +54,6 @@ const MIN_IMAGES_PER_ROW: u16 = 1;
 const MAX_IMAGES_PER_ROW: u16 = 12;
 const MIN_TILE_EDGE: f32 = 72.0;
 const GAP: f32 = 12.0;
-const LOADING_CARD_W: f32 = 250.0;
-const LOADING_CARD_H: f32 = 150.0;
 const VIEWER_CHROME: f32 = 40.0;
 const MAX_GROUP_DEPTH: usize = 8;
 const PLATE_PAD: f32 = 4.0;
@@ -206,8 +205,8 @@ pub struct Bayonet {
     prefetch_on_hover: bool,
     prefetched: HashSet<PostId>,
     hover_arm: Option<(PostId, Instant)>,
+    empty_since: Option<Instant>,
     config_dirty: Option<Instant>,
-    cache_stats: CacheStats,
     cache_status: String,
     warm_status: String,
     crawl_status: String,
@@ -315,8 +314,8 @@ impl Bayonet {
             prefetch_on_hover: config.prefetch_on_hover,
             prefetched: HashSet::new(),
             hover_arm: None,
+            empty_since: None,
             config_dirty: None,
-            cache_stats: CacheStats::default(),
             cache_status: "cache measuring".to_owned(),
             warm_status: "query warm idle".to_owned(),
             startup_probe: StartupProbe::from_env(),
@@ -907,72 +906,14 @@ impl Bayonet {
             }
         });
         if posts.is_empty() {
-            self.loading_card(ui, arena);
+            self.empty_gallery(ui, arena);
         } else {
+            self.empty_since = None;
             self.loading_raft.hide();
         }
         self.heave(ui.ctx(), scroll.state.offset.y, ui.ctx().pixels_per_point());
         self.hit.posts = posts;
         menu_opened
-    }
-
-    fn loading_card(&mut self, ui: &mut egui::Ui, arena: egui::Rect) {
-        let size = egui::vec2(
-            LOADING_CARD_W.min((arena.width() - 24.0).max(120.0)),
-            LOADING_CARD_H.min((arena.height() - 24.0).max(96.0)),
-        );
-        let rect = egui::Rect::from_center_size(arena.center(), size);
-        if self.water_ui.wet() {
-            self.loading_raft.show(ui.ctx(), rect);
-            self.arm_water();
-        } else {
-            self.loading_raft.hide();
-        }
-
-        let painter = ui.painter();
-        let _fill = painter.rect_filled(rect, 2.0, chrome::SURFACE);
-        let _stroke = painter.rect_stroke(
-            rect,
-            2.0,
-            egui::Stroke::new(1.0, chrome::EDGE_STRONG),
-            egui::StrokeKind::Inside,
-        );
-        let title_font = egui::FontId::new(25.0, egui::FontFamily::Proportional);
-        let percent_font = egui::FontId::new(38.0, egui::FontFamily::Proportional);
-        let title = "LOADING";
-        let percent = self.loading_percent();
-        let title_galley =
-            painter.layout_no_wrap(title.to_owned(), title_font.clone(), chrome::HOT);
-        let percent_galley =
-            painter.layout_no_wrap(percent.clone(), percent_font.clone(), chrome::TEXT);
-        let title_at = egui::pos2(
-            rect.center().x - title_galley.size().x * 0.5,
-            rect.top() + 28.0,
-        );
-        let percent_at = egui::pos2(
-            rect.center().x - percent_galley.size().x * 0.5,
-            rect.center().y + 7.0,
-        );
-        let _title = painter.text(
-            title_at,
-            egui::Align2::LEFT_TOP,
-            title,
-            title_font,
-            chrome::HOT,
-        );
-        let _percent = painter.text(
-            percent_at,
-            egui::Align2::LEFT_TOP,
-            percent,
-            percent_font,
-            chrome::TEXT,
-        );
-    }
-
-    fn loading_percent(&self) -> String {
-        self.cache_stats
-            .rough_crawl_percent()
-            .map_or_else(|| "—".to_owned(), rough_percent)
     }
 
     fn tile(&mut self, ui: &mut egui::Ui, post: &PostRecord, tile: f32) -> bool {
@@ -1390,15 +1331,6 @@ fn paint_tile_text(ui: &egui::Ui, rect: egui::Rect, text: &str) {
         egui::TextStyle::Body.resolve(ui.style()),
         ui.visuals().text_color(),
     );
-}
-
-fn rough_percent(value: f32) -> String {
-    let value = value.clamp(0.0, 100.0);
-    if value < 10.0 {
-        format!("{value:.3}%")
-    } else {
-        format!("{value:.2}%")
-    }
 }
 
 fn fit(image: egui::Vec2, bounds: egui::Vec2) -> egui::Vec2 {

@@ -344,7 +344,8 @@ fn composite(in: VsOut) -> @location(0) vec4f {
     let g = textureSample(sharp_tex, comp_samp, uv_g).g;
     let b = textureSample(sharp_tex, comp_samp, uv_b).b;
     let a = textureSample(sharp_tex, comp_samp, in.uv + lift_flow / size).a;
-    let floored = pool_floor(vec3f(r, g, b), px, water_flow, shore_px);
+    let floor_gate = shore_px * outside * (1.0 - viewer_wet);
+    let floored = pool_floor(vec3f(r, g, b), px, water_flow, floor_gate);
     let sharp = vec4f(floored * mix(1.0, tint, outside), a);
 
     let blurred = textureSample(blur_tex, comp_samp, in.uv);

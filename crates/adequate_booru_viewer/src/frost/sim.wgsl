@@ -65,7 +65,7 @@ const SOURCE_CEIL: f32 = 72.0;
 const H_CEIL: f32 = 48.0;
 const V_CEIL: f32 = 1440.0;
 const TILT_CEIL: f32 = 36.0;
-const RAFT_STIFFNESS: f32 = 220.0;
+const RAFT_STIFFNESS: f32 = 420.0;
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var dst_tex: texture_storage_2d<rgba16float, write>;
