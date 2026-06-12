@@ -222,6 +222,7 @@ impl Boiler {
                 wake,
                 tide: self.epoch.elapsed().as_secs_f32() % 1000.0,
                 brine: self.app.brine(),
+                guard: self.app.water_guard(),
             },
         );
         if let Some(viewport) = output.viewport_output.get(&egui::ViewportId::ROOT) {
@@ -489,13 +490,24 @@ impl Rig {
                 .render(&mut pass, primitives, &screen);
         }
         if frosted {
-            self.frost
-                .compose(&self.gpu.queue, &mut encoder, &surface_view, surge);
+            self.frost.compose(
+                &self.gpu.device,
+                &self.gpu.queue,
+                &mut encoder,
+                &surface_view,
+                surge,
+            );
         }
         let _submission = self
             .gpu
             .queue
             .submit(user_cmds.into_iter().chain([encoder.finish()]));
+        if self
+            .frost
+            .after_submit(&self.gpu.device, &self.gpu.queue, surge.guard)
+        {
+            self.window.request_redraw();
+        }
         self.window.pre_present_notify();
         frame.present();
         // Free only after submit: destroying a texture the just-recorded

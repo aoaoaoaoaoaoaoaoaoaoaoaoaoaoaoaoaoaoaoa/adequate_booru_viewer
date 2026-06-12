@@ -6,6 +6,7 @@ use std::f32::consts::TAU;
 
 #[cfg(test)]
 mod audit;
+mod guard;
 
 const LEVELS: usize = 3;
 const SIM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -218,6 +219,7 @@ pub struct Surge<'a> {
     /// Wall-clock seconds (wrapped) driving the tremor wavetrains.
     pub tide: f32,
     pub brine: Brine,
+    pub guard: bool,
 }
 
 impl Surge<'_> {
@@ -276,6 +278,7 @@ pub struct Frost {
     format: wgpu::TextureFormat,
     definition: Definition,
     rig: Option<Rig>,
+    sentinel: guard::Sentinel,
 }
 
 struct Pipes {
@@ -293,13 +296,6 @@ struct Rig {
 
 struct Water {
     size: wgpu::Extent3d,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "bind groups hold the views; this owns the backing textures, and tests read them"
-        )
-    )]
     textures: Vec<wgpu::Texture>,
     composite_bind: Vec<wgpu::BindGroup>,
     sim_bind: Vec<wgpu::BindGroup>,
@@ -466,6 +462,7 @@ impl Frost {
             format,
             definition: Definition::default(),
             rig: None,
+            sentinel: guard::Sentinel::default(),
         }
     }
 
@@ -543,6 +540,7 @@ impl Frost {
     /// Composites the offscreen scene to `surface` with everything in `surge`.
     pub fn compose(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         surface: &wgpu::TextureView,
@@ -580,6 +578,26 @@ impl Frost {
             &rig.water.composite_bind[rig.water.phase],
             surface,
         );
+        if surge.guard {
+            self.sentinel.encode(device, encoder, &rig.water);
+        }
+    }
+
+    pub fn after_submit(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        guard: bool,
+    ) -> bool {
+        let Some(rig) = &self.rig else {
+            return false;
+        };
+        if guard {
+            self.sentinel.after_submit(device, queue, &rig.water)
+        } else {
+            self.sentinel.disarm();
+            false
+        }
     }
 
     fn water(
@@ -1326,6 +1344,7 @@ const SOURCE_LIFE: f32 = 0.22;
 const SOURCE_CEIL: f32 = 72.0;
 const H_CEIL: f32 = 48.0;
 const V_CEIL: f32 = 1440.0;
+const TILT_CEIL: f32 = 36.0;
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var dst_tex: texture_storage_2d<rgba16float, write>;
@@ -1437,7 +1456,7 @@ fn tilt_drive(px: vec2f, h: f32) -> f32 {
         mask.water_min.x + mask.shore_feather,
         px.x,
     );
-    let desired = -mask.scroll_tilt * ramp;
+    let desired = -clamp(mask.scroll_tilt, -TILT_CEIL, TILT_CEIL) * ramp;
     return (desired - h) * max(mask.tilt_gain, 0.0) * x_gate * y_gate;
 }
 

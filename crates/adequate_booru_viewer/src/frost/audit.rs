@@ -22,6 +22,25 @@ fn poisoned_water_cells_are_extinguished() -> Result<()> {
 }
 
 #[test]
+fn water_guard_resets_poisoned_field() -> Result<()> {
+    pollster::block_on(async {
+        let Some(mut bench) = Bench::make().await? else {
+            return Ok(());
+        };
+        bench.poison(37, 29)?;
+        if bench.field()?.assert_clean().is_ok() {
+            bail!("water poison write did not land");
+        }
+        if !bench.guard()? {
+            bail!("water guard did not report a reset");
+        }
+        let field = bench.field()?;
+        field.assert_clean()?;
+        field.assert_quiet(37, 29, 0.25)
+    })
+}
+
+#[test]
 fn aggressive_water_script_never_writes_nonfinite_state() -> Result<()> {
     pollster::block_on(async {
         let Some(mut bench) = Bench::make().await? else {
@@ -152,6 +171,35 @@ impl Bench {
     fn field(&self) -> Result<Field> {
         let rig = self.frost.rig.as_ref().context("missing frost rig")?;
         Field::read(&self.device, &self.queue, &rig.water)
+    }
+
+    fn guard(&mut self) -> Result<bool> {
+        let rig = self.frost.rig.as_ref().context("missing frost rig")?;
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("water-audit-guard"),
+            });
+        self.frost
+            .sentinel
+            .encode(&self.device, &mut encoder, &rig.water);
+        let submitted = self.queue.submit([encoder.finish()]);
+        if self.frost.after_submit(&self.device, &self.queue, true) {
+            return Ok(true);
+        }
+        for _ in 0..20 {
+            let _drained = self
+                .device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(submitted.clone()),
+                    timeout: Some(Duration::from_millis(50)),
+                })
+                .context("wait water guard readback")?;
+            if self.frost.after_submit(&self.device, &self.queue, true) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn definition(&mut self, definition: Definition) {
@@ -285,6 +333,7 @@ fn quiet(tide: f32) -> Surge<'static> {
         wake: true,
         tide,
         brine: Brine::default(),
+        guard: true,
     }
 }
 
@@ -352,6 +401,7 @@ impl Script {
             wake: true,
             tide,
             brine: Brine::default(),
+            guard: true,
         }
     }
 }

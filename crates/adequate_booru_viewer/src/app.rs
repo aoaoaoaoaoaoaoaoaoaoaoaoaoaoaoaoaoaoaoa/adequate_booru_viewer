@@ -81,6 +81,8 @@ struct Surf {
     /// persistent solver performs the ensuing slosh.
     scroll_coupling: f32,
     scroll_tau: f32,
+    /// Debug guard: periodically read the water field and zero it if poisoned.
+    poison_sweep: bool,
     /// First-order relaxation of the lift plates: rise a little faster than
     /// sink, so the slosh settles slowly.
     tau_rise: f32,
@@ -130,6 +132,7 @@ impl Default for Surf {
             quiver_release: 0.48,
             scroll_coupling: 0.0028,
             scroll_tau: 0.11,
+            poison_sweep: true,
             tau_rise: 0.09,
             tau_fall: 0.24,
         }
@@ -365,6 +368,10 @@ impl Bayonet {
 
     pub fn quiver_release(&self) -> f32 {
         self.surf.quiver_release
+    }
+
+    pub fn water_guard(&self) -> bool {
+        self.surf.poison_sweep
     }
 
     /// Frost parameters for the boiler's blur pass, in physical pixels.

@@ -70,8 +70,11 @@ impl super::Bayonet {
                     );
                 });
                 section(ui, "SCROLL SLOSH", |ui| {
-                    knob(ui, "tilt per px/s", &mut surf.scroll_coupling, 0.0..=0.08);
+                    knob(ui, "tilt per px/s", &mut surf.scroll_coupling, 0.0..=0.02);
                     knob(ui, "tray memory s", &mut surf.scroll_tau, 0.02..=0.8);
+                });
+                section(ui, "FIELD GUARD", |ui| {
+                    let _guard = ui.checkbox(&mut surf.poison_sweep, "poison sweep + reset");
                 });
                 section(ui, "BOUNDARIES", |ui| {
                     knob(ui, "shelf reflection", &mut brine.r_panel, 0.0..=1.0);

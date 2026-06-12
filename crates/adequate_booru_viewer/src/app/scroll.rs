@@ -1,6 +1,7 @@
 /// A scroll jump larger than this is navigation, not momentum.
 const TILT_TELEPORT: f32 = 2500.0;
-const TILT_CEIL: f32 = 180.0;
+const TILT_SPEED_CEIL: f32 = 14_000.0;
+const TILT_CEIL: f32 = 36.0;
 const TILT_EPSILON: f32 = 0.015;
 
 /// Linearized tray tilt: scroll velocity tips the water tray, while the
@@ -45,9 +46,10 @@ impl TrayTilt {
             *height = 0.0;
             return 0.0;
         }
-        let sample = delta / dt;
+        let sample = (delta / dt).clamp(-TILT_SPEED_CEIL, TILT_SPEED_CEIL);
         let alpha = 1.0 - (-dt / tau.max(0.02)).exp();
         *velocity += (sample - *velocity) * alpha;
+        *velocity = velocity.clamp(-TILT_SPEED_CEIL, TILT_SPEED_CEIL);
         *height += ((*velocity * coupling).clamp(-TILT_CEIL, TILT_CEIL) - *height) * alpha;
         if height.abs() < TILT_EPSILON && sample.abs() < 1.0 {
             *height = 0.0;
