@@ -89,6 +89,7 @@ const ANCHOR_GAP: Duration = Duration::from_secs(30);
 
 /// Decoded postings the vault may hold; eviction scans are O(cap) and rare.
 const VAULT_CAP: usize = 96;
+const RECORD_VAULT_CAP: usize = 4096;
 
 /// Cache of decoded posting bitmaps for the merged tables. Hot tags skip the
 /// redb chunk scan and roaring deserialization on every query; the merge loop
@@ -150,11 +151,53 @@ impl Vault {
     }
 }
 
+struct RecordVault {
+    slots: std::collections::HashMap<PostId, (PostRecord, u64)>,
+    clock: u64,
+}
+
+impl RecordVault {
+    fn new() -> Self {
+        Self {
+            slots: std::collections::HashMap::new(),
+            clock: 0,
+        }
+    }
+
+    fn get(&mut self, id: PostId) -> Option<PostRecord> {
+        self.clock += 1;
+        let clock = self.clock;
+        self.slots.get_mut(&id).map(|(post, stamp)| {
+            *stamp = clock;
+            post.clone()
+        })
+    }
+
+    fn put(&mut self, post: PostRecord) {
+        if self.slots.len() >= RECORD_VAULT_CAP
+            && let Some(coldest) = self
+                .slots
+                .iter()
+                .min_by_key(|(_, (_, stamp))| *stamp)
+                .map(|(id, _)| *id)
+        {
+            let _evicted = self.slots.remove(&coldest);
+        }
+        self.clock += 1;
+        let _old = self.slots.insert(post.id, (post, self.clock));
+    }
+
+    fn evict(&mut self, id: PostId) {
+        let _old = self.slots.remove(&id);
+    }
+}
+
 #[derive(Clone)]
 pub struct Index {
     db: Arc<Database>,
     anchor: Arc<Mutex<Instant>>,
     vault: Arc<Mutex<Vault>>,
+    records: Arc<Mutex<RecordVault>>,
 }
 
 impl Index {
@@ -166,6 +209,7 @@ impl Index {
             db: Arc::new(db),
             anchor: Arc::new(Mutex::new(Instant::now())),
             vault: Arc::new(Mutex::new(Vault::new())),
+            records: Arc::new(Mutex::new(RecordVault::new())),
         };
         index.prime()?;
         startup("index.prime.done");
@@ -175,7 +219,9 @@ impl Index {
     pub fn absorb(&self, posts: &[PostRecord]) -> Result<()> {
         let tx = self.begin_quick_write("begin index write")?;
         Self::absorb_into(&tx, posts)?;
-        tx.commit().context("commit index write")
+        tx.commit().context("commit index write")?;
+        self.evict_records(posts);
+        Ok(())
     }
 
     /// One transaction per crawl page: posts and the advanced cursor land
@@ -189,7 +235,16 @@ impl Index {
                 .insert(DANBOORU_CRAWL_BEFORE, u64::from(before.0))
                 .context("write Danbooru crawl cursor")?;
         }
-        tx.commit().context("commit crawl write")
+        tx.commit().context("commit crawl write")?;
+        self.evict_records(posts);
+        Ok(())
+    }
+
+    fn evict_records(&self, posts: &[PostRecord]) {
+        let mut records = lock_record_vault(&self.records);
+        for post in posts {
+            records.evict(post.id);
+        }
     }
 
     fn absorb_into(tx: &redb::WriteTransaction, posts: &[PostRecord]) -> Result<()> {
@@ -466,8 +521,13 @@ impl Index {
 
         let mut hydrated = Vec::with_capacity(ids.len());
         for id in ids {
+            let id = PostId(id);
+            if let Some(post) = lock_record_vault(&self.records).get(id) {
+                hydrated.push(post);
+                continue;
+            }
             if let Some(post) = posts
-                .get(u64::from(id))
+                .get(u64::from(id.0))
                 .context("hydrate post")?
                 .map(|guard| decode_record(guard.value()))
                 .transpose()?
@@ -475,6 +535,7 @@ impl Index {
                 // Media-less records predating the ingestion ban wash out here
                 // until a re-crawl purges them.
                 if post.blade_url().is_some() {
+                    lock_record_vault(&self.records).put(post.clone());
                     hydrated.push(post);
                 }
             }
@@ -1031,6 +1092,13 @@ fn tag_post_count(
 }
 
 fn lock_vault(vault: &Mutex<Vault>) -> std::sync::MutexGuard<'_, Vault> {
+    match vault.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn lock_record_vault(vault: &Mutex<RecordVault>) -> std::sync::MutexGuard<'_, RecordVault> {
     match vault.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
