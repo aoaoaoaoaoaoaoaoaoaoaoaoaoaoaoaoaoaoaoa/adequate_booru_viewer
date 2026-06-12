@@ -38,6 +38,19 @@ fn aggressive_water_script_never_writes_nonfinite_state() -> Result<()> {
     })
 }
 
+#[test]
+fn hd_water_allocates_one_cell_per_physical_pixel() -> Result<()> {
+    pollster::block_on(async {
+        let Some(mut bench) = Bench::make().await? else {
+            return Ok(());
+        };
+        bench.definition(Definition::Sd);
+        bench.assert_size(W.div_ceil(2), H.div_ceil(2))?;
+        bench.definition(Definition::Hd);
+        bench.assert_size(W, H)
+    })
+}
+
 struct Bench {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -139,6 +152,25 @@ impl Bench {
     fn field(&self) -> Result<Field> {
         let rig = self.frost.rig.as_ref().context("missing frost rig")?;
         Field::read(&self.device, &self.queue, &rig.water)
+    }
+
+    fn definition(&mut self, definition: Definition) {
+        self.frost
+            .set_definition(&self.device, &self.queue, W, H, definition);
+    }
+
+    fn assert_size(&self, width: u32, height: u32) -> Result<()> {
+        let rig = self.frost.rig.as_ref().context("missing frost rig")?;
+        let size = rig.water.size;
+        if (size.width, size.height) != (width, height) {
+            bail!(
+                "{:?} water is {}×{}, expected {width}×{height}",
+                rig.definition,
+                size.width,
+                size.height
+            );
+        }
+        Ok(())
     }
 }
 

@@ -342,7 +342,7 @@ impl Frost {
                     },
                     count: None,
                 },
-                unfilterable_texture_entry(4, wgpu::ShaderStages::FRAGMENT),
+                texture_entry(4),
             ],
         });
         let sim_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1101,29 +1101,25 @@ fn sane_height(x: f32) -> f32 {
     return clamp(select(0.0, x, finite(x)), -FIELD_HEIGHT_CEIL, FIELD_HEIGHT_CEIL);
 }
 
-fn cell_px(coord: vec2i) -> vec2f {
-    return (vec2f(coord) + vec2f(0.5)) * FIELD_SCALE;
+fn field_uv(px: vec2f) -> vec2f {
+    let dims = vec2f(textureDimensions(water_tex));
+    return clamp(px / (dims * FIELD_SCALE), vec2f(0.0), vec2f(1.0));
 }
 
-fn sample_height(coord: vec2i, dims: vec2i) -> f32 {
-    let p = clamp(coord, vec2i(0), dims - vec2i(1));
-    return sane_height(textureLoad(water_tex, p, 0).x);
+fn sample_height(px: vec2f) -> f32 {
+    return sane_height(textureSampleLevel(water_tex, comp_samp, field_uv(px), 0.0).x);
 }
 
-fn sample_visible_height(coord: vec2i, dims: vec2i, center_h: f32) -> f32 {
-    let p = clamp(coord, vec2i(0), dims - vec2i(1));
-    let block = field_obstacle(cell_px(p));
-    return mix(sample_height(p, dims), center_h, block);
+fn sample_visible_height(px: vec2f, center_h: f32) -> f32 {
+    return mix(sample_height(px), center_h, field_obstacle(px));
 }
 
 fn field_flow(px: vec2f) -> vec2f {
-    let dims = vec2i(textureDimensions(water_tex));
-    let p = clamp(vec2i(floor(px / FIELD_SCALE)), vec2i(0), dims - vec2i(1));
-    let center_h = sample_height(p, dims);
-    let hx = sample_visible_height(p + vec2i(1, 0), dims, center_h)
-        - sample_visible_height(p - vec2i(1, 0), dims, center_h);
-    let hy = sample_visible_height(p + vec2i(0, 1), dims, center_h)
-        - sample_visible_height(p - vec2i(0, 1), dims, center_h);
+    let center_h = sample_height(px);
+    let hx = sample_visible_height(px + vec2f(FIELD_SCALE, 0.0), center_h)
+        - sample_visible_height(px - vec2f(FIELD_SCALE, 0.0), center_h);
+    let hy = sample_visible_height(px + vec2f(0.0, FIELD_SCALE), center_h)
+        - sample_visible_height(px - vec2f(0.0, FIELD_SCALE), center_h);
     var flow = -vec2f(hx, hy) * (4.5 / FIELD_SCALE);
     let mag = length(flow);
     flow = flow * min(1.0, FIELD_FLOW_CEIL / max(mag, 1e-4));
