@@ -5,7 +5,8 @@ use redb::{
 };
 use roaring::RoaringBitmap;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
     path::Path,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -222,6 +223,53 @@ impl SortHeadVault {
     }
 }
 
+#[derive(Default)]
+struct SortKeyVault {
+    score: Option<Arc<Vec<u64>>>,
+    favs: Option<Arc<Vec<u64>>>,
+}
+
+impl SortKeyVault {
+    fn get(&self, sort: Sort) -> Option<Arc<Vec<u64>>> {
+        match sort {
+            Sort::Score => self.score.clone(),
+            Sort::Favorites => self.favs.clone(),
+            Sort::Newest => None,
+        }
+    }
+
+    fn put(&mut self, sort: Sort, keys: Arc<Vec<u64>>) {
+        match sort {
+            Sort::Score => self.score = Some(keys),
+            Sort::Favorites => self.favs = Some(keys),
+            Sort::Newest => {}
+        }
+    }
+
+    fn refresh(&mut self, posts: &[PostRecord]) {
+        if let Some(keys) = &mut self.score {
+            let keys = Arc::make_mut(keys);
+            for post in posts {
+                set_sort_key(
+                    keys,
+                    post.id,
+                    post.indexable().then(|| sort_key_i32(post.score, post.id)),
+                );
+            }
+        }
+        if let Some(keys) = &mut self.favs {
+            let keys = Arc::make_mut(keys);
+            for post in posts {
+                set_sort_key(
+                    keys,
+                    post.id,
+                    post.indexable().then(|| sort_key_u32(post.favs, post.id)),
+                );
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Index {
     db: Arc<Database>,
@@ -229,6 +277,7 @@ pub struct Index {
     vault: Arc<Mutex<Vault>>,
     records: Arc<Mutex<RecordVault>>,
     sort_heads: Arc<Mutex<SortHeadVault>>,
+    sort_keys: Arc<Mutex<SortKeyVault>>,
 }
 
 impl Index {
@@ -242,6 +291,7 @@ impl Index {
             vault: Arc::new(Mutex::new(Vault::new())),
             records: Arc::new(Mutex::new(RecordVault::new())),
             sort_heads: Arc::new(Mutex::new(SortHeadVault::default())),
+            sort_keys: Arc::new(Mutex::new(SortKeyVault::default())),
         };
         index.prime()?;
         startup("index.prime.done");
@@ -254,6 +304,7 @@ impl Index {
         tx.commit().context("commit index write")?;
         self.evict_records(posts);
         self.clear_sort_heads();
+        self.refresh_sort_keys(posts);
         Ok(())
     }
 
@@ -271,6 +322,7 @@ impl Index {
         tx.commit().context("commit crawl write")?;
         self.evict_records(posts);
         self.clear_sort_heads();
+        self.refresh_sort_keys(posts);
         Ok(())
     }
 
@@ -283,6 +335,10 @@ impl Index {
 
     fn clear_sort_heads(&self) {
         lock_sort_heads(&self.sort_heads).clear();
+    }
+
+    fn refresh_sort_keys(&self, posts: &[PostRecord]) {
+        lock_sort_keys(&self.sort_keys).refresh(posts);
     }
 
     fn absorb_into(tx: &redb::WriteTransaction, posts: &[PostRecord]) -> Result<()> {
@@ -528,7 +584,7 @@ impl Index {
                 self.ranked_ids(&tx, sort, Some(candidate), limit)?
             }
             (Some(Candidate::Finite(bitmap)), Sort::Score | Sort::Favorites) => {
-                local_sorted_ids(&posts, bitmap.as_ref(), sort, limit)?
+                self.local_sorted_ids(&tx, &posts, bitmap.as_ref(), sort, limit)?
             }
         };
         startup("index.search.ids");
@@ -608,6 +664,44 @@ impl Index {
         }
         heads.put(sort, Arc::clone(&ids));
         Ok(ids)
+    }
+
+    fn local_sorted_ids(
+        &self,
+        tx: &redb::ReadTransaction,
+        posts: &impl redb::ReadableTable<u64, &'static [u8]>,
+        bitmap: &RoaringBitmap,
+        sort: Sort,
+        limit: usize,
+    ) -> Result<Vec<u32>> {
+        match sort {
+            Sort::Score | Sort::Favorites => {
+                let keys = self.sort_keys(tx, sort)?;
+                Ok(local_sorted_ids_from_keys(bitmap, &keys, limit))
+            }
+            Sort::Newest => local_sorted_ids(posts, bitmap, sort, limit),
+        }
+    }
+
+    fn sort_keys(&self, tx: &redb::ReadTransaction, sort: Sort) -> Result<Arc<Vec<u64>>> {
+        if let Some(keys) = lock_sort_keys(&self.sort_keys).get(sort) {
+            return Ok(keys);
+        }
+        let keys = Arc::new(match sort {
+            Sort::Score => {
+                lane_sort_keys(&tx.open_table(SCORE_POSTS).context("open score_posts")?)?
+            }
+            Sort::Favorites => {
+                lane_sort_keys(&tx.open_table(FAV_POSTS).context("open fav_posts")?)?
+            }
+            Sort::Newest => unreachable!("newest has no dense sort-key cache"),
+        });
+        let mut vault = lock_sort_keys(&self.sort_keys);
+        if let Some(raced) = vault.get(sort) {
+            return Ok(raced);
+        }
+        vault.put(sort, Arc::clone(&keys));
+        Ok(keys)
     }
 
     fn prime(&self) -> Result<()> {
@@ -1175,6 +1269,13 @@ fn lock_sort_heads(vault: &Mutex<SortHeadVault>) -> std::sync::MutexGuard<'_, So
     }
 }
 
+fn lock_sort_keys(vault: &Mutex<SortKeyVault>) -> std::sync::MutexGuard<'_, SortKeyVault> {
+    match vault.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 fn read_posting_bitmap(
     chunks: &impl redb::ReadableTable<&'static str, &'static [u8]>,
     pending: &FactBatch,
@@ -1365,6 +1466,52 @@ fn head_ids(head: &[u32], candidate: Option<&Candidate>, limit: usize) -> Option
         }
     }
     (candidate.is_none() && ids.len() == limit).then_some(ids)
+}
+
+fn lane_sort_keys(table: &impl redb::ReadableTable<u64, u32>) -> Result<Vec<u64>> {
+    let mut keys = Vec::new();
+    for row in table.range(0_u64..=u64::MAX).context("range sort keys")? {
+        let (key, id) = row.context("read sort-key row")?;
+        set_sort_key(&mut keys, PostId(id.value()), Some(key.value()));
+    }
+    Ok(keys)
+}
+
+fn set_sort_key(keys: &mut Vec<u64>, id: PostId, key: Option<u64>) {
+    let slot = id.0 as usize;
+    if keys.len() <= slot {
+        keys.resize(slot + 1, 0);
+    }
+    keys[slot] = key.unwrap_or(0);
+}
+
+fn local_sorted_ids_from_keys(bitmap: &RoaringBitmap, keys: &[u64], limit: usize) -> Vec<u32> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut heap = BinaryHeap::<Reverse<(u64, u32)>>::with_capacity(limit + 1);
+    for id in bitmap {
+        let Some(&key) = keys.get(id as usize) else {
+            continue;
+        };
+        if key == 0 {
+            continue;
+        }
+        let item = (key, id);
+        if heap.len() < limit {
+            heap.push(Reverse(item));
+        } else if let Some(mut cold) = heap.peek_mut()
+            && item > cold.0
+        {
+            *cold = Reverse(item);
+        }
+    }
+    let mut keyed = heap
+        .into_iter()
+        .map(|Reverse(item)| item)
+        .collect::<Vec<_>>();
+    keyed.sort_unstable_by(|a, b| b.cmp(a));
+    keyed.into_iter().map(|(_, id)| id).collect()
 }
 
 fn local_sorted_ids(
