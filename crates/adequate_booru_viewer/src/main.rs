@@ -1,3 +1,8 @@
+#![expect(
+    unused_crate_dependencies,
+    reason = "the GUI binary is module-owned; the sibling retrieval library exists for benchmark tooling"
+)]
+
 mod app;
 mod boiler;
 mod booru;
