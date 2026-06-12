@@ -58,15 +58,12 @@ fn aggressive_water_script_never_writes_nonfinite_state() -> Result<()> {
 }
 
 #[test]
-fn hd_water_allocates_one_cell_per_physical_pixel() -> Result<()> {
+fn water_allocates_half_resolution_field() -> Result<()> {
     pollster::block_on(async {
-        let Some(mut bench) = Bench::make().await? else {
+        let Some(bench) = Bench::make().await? else {
             return Ok(());
         };
-        bench.definition(Definition::Sd);
-        bench.assert_size(W.div_ceil(2), H.div_ceil(2))?;
-        bench.definition(Definition::Hd);
-        bench.assert_size(W, H)
+        bench.assert_size(W.div_ceil(2), H.div_ceil(2))
     })
 }
 
@@ -111,16 +108,15 @@ impl Bench {
         let rig = self.frost.rig.as_mut().context("missing frost rig")?;
         self.queue
             .write_buffer(&self.frost.mask, 0, &mask_bytes(surge));
-        let pipes = &self.frost.pipes[rig.definition.slot()];
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("water-audit-step"),
             });
-        for _ in 0..rig.definition.spec().steps {
+        for _ in 0..SIM_STEPS {
             run_compute(
                 &mut encoder,
-                &pipes.sim,
+                &self.frost.pipes.sim,
                 &rig.water.sim_bind[rig.water.phase],
                 rig.water.size,
             );
@@ -202,18 +198,12 @@ impl Bench {
         Ok(false)
     }
 
-    fn definition(&mut self, definition: Definition) {
-        self.frost
-            .set_definition(&self.device, &self.queue, W, H, definition);
-    }
-
     fn assert_size(&self, width: u32, height: u32) -> Result<()> {
         let rig = self.frost.rig.as_ref().context("missing frost rig")?;
         let size = rig.water.size;
         if (size.width, size.height) != (width, height) {
             bail!(
-                "{:?} water is {}×{}, expected {width}×{height}",
-                rig.definition,
+                "water is {}×{}, expected {width}×{height}",
                 size.width,
                 size.height
             );

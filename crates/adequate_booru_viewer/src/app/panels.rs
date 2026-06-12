@@ -240,32 +240,9 @@ impl Bayonet {
                 .clicked()
                 && !wet
             {
-                self.water_ui = WaterUi::Wet(Definition::Sd);
+                self.water_ui = WaterUi::Wet;
                 changed = true;
             }
-        });
-        let wet = self.water_ui.wet();
-        let sd = self.water_ui.is(Definition::Sd);
-        let hd = self.water_ui.is(Definition::Hd);
-        let _quality = ui.add_enabled_ui(wet, |ui| {
-            let _row = ui.horizontal_wrapped(|ui| {
-                if chrome::glyph(ui, "SD", sd)
-                    .on_hover_text("2 px water cells")
-                    .clicked()
-                    && !sd
-                {
-                    self.water_ui = WaterUi::Wet(Definition::Sd);
-                    changed = true;
-                }
-                if chrome::glyph(ui, "HD", hd)
-                    .on_hover_text("1 px water cells")
-                    .clicked()
-                    && !hd
-                {
-                    self.water_ui = WaterUi::Wet(Definition::Hd);
-                    changed = true;
-                }
-            });
         });
         if changed {
             self.save_config();

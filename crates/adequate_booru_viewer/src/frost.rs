@@ -12,48 +12,9 @@ const LEVELS: usize = 3;
 const SIM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const SIM_BYTES: u32 = 8;
 const SIM_WORKGROUP: u32 = 8;
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum Definition {
-    #[default]
-    Sd,
-    Hd,
-}
-
-#[derive(Clone, Copy)]
-struct Spec {
-    scale: u32,
-    steps: usize,
-    dt: f32,
-}
-
-impl Definition {
-    fn spec(self) -> Spec {
-        match self {
-            Self::Sd => Spec {
-                scale: 2,
-                steps: 4,
-                dt: 1.0 / 240.0,
-            },
-            Self::Hd => Spec {
-                scale: 1,
-                steps: 8,
-                dt: 1.0 / 480.0,
-            },
-        }
-    }
-
-    fn slot(self) -> usize {
-        self as usize
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Sd => "sd",
-            Self::Hd => "hd",
-        }
-    }
-}
+const FIELD_SCALE: u32 = 2;
+const SIM_STEPS: usize = 4;
+const SIM_DT: f32 = 1.0 / 240.0;
 
 pub const LIFT_SLOTS: usize = 4;
 
@@ -271,11 +232,10 @@ pub struct Frost {
     sim_layout: wgpu::BindGroupLayout,
     down: wgpu::RenderPipeline,
     up: wgpu::RenderPipeline,
-    pipes: [Pipes; 2],
+    pipes: Pipes,
     sampler: wgpu::Sampler,
     mask: wgpu::Buffer,
     format: wgpu::TextureFormat,
-    definition: Definition,
     rig: Option<Rig>,
     sentinel: guard::Sentinel,
 }
@@ -290,7 +250,6 @@ struct Rig {
     scene: Target,
     chain: Vec<Target>,
     water: Water,
-    definition: Definition,
 }
 
 struct Water {
@@ -422,62 +381,39 @@ impl Frost {
             bind_group_layouts: &[Some(&sim_layout)],
             immediate_size: 0,
         });
-        let pipes = |definition: Definition| {
-            let label = definition.label();
-            let spec = definition.spec();
-            let field = [("FIELD_SCALE", f64::from(spec.scale))];
-            let impulse = 4.0 / spec.steps as f64;
-            let sim_consts = [
-                ("SIM_SCALE", f64::from(spec.scale)),
-                ("DT", f64::from(spec.dt)),
-                ("IMPULSE_GAIN", impulse),
-            ];
-            let composite_label = format!("frost-composite-{label}");
-            let sim_label = format!("frost-sim-{label}");
-            Pipes {
-                composite: pipeline(&composite_label, &composite_layout, "composite", &field),
-                sim: device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(&sim_label),
-                    layout: Some(&sim_layout_handle),
-                    module: &sim_module,
-                    entry_point: Some("step"),
-                    compilation_options: wgpu::PipelineCompilationOptions {
-                        constants: &sim_consts,
-                        ..Default::default()
-                    },
-                    cache: None,
-                }),
-            }
+        let field = [("FIELD_SCALE", f64::from(FIELD_SCALE))];
+        let sim_consts = [
+            ("SIM_SCALE", f64::from(FIELD_SCALE)),
+            ("DT", f64::from(SIM_DT)),
+            ("IMPULSE_GAIN", 4.0 / SIM_STEPS as f64),
+        ];
+        let pipes = Pipes {
+            composite: pipeline("frost-composite", &composite_layout, "composite", &field),
+            sim: device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("frost-sim"),
+                layout: Some(&sim_layout_handle),
+                module: &sim_module,
+                entry_point: Some("step"),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &sim_consts,
+                    ..Default::default()
+                },
+                cache: None,
+            }),
         };
         Self {
             down: pipeline("frost-down", &sample_layout, "kawase_down", &[]),
             up: pipeline("frost-up", &sample_layout, "kawase_up", &[]),
-            pipes: [pipes(Definition::Sd), pipes(Definition::Hd)],
+            pipes,
             sample_layout,
             composite_layout,
             sim_layout,
             sampler,
             mask,
             format,
-            definition: Definition::default(),
             rig: None,
             sentinel: guard::Sentinel::default(),
         }
-    }
-
-    pub fn set_definition(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        width: u32,
-        height: u32,
-        definition: Definition,
-    ) {
-        if self.definition == definition {
-            return;
-        }
-        self.definition = definition;
-        self.resize(device, queue, width, height);
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) {
@@ -527,7 +463,6 @@ impl Frost {
             scene,
             chain,
             water,
-            definition: self.definition,
         });
     }
 
@@ -549,12 +484,11 @@ impl Frost {
             return;
         };
         queue.write_buffer(&self.mask, 0, &mask_bytes(surge));
-        let pipes = &self.pipes[rig.definition.slot()];
         if surge.sim_live() {
-            for _ in 0..rig.definition.spec().steps {
+            for _ in 0..SIM_STEPS {
                 run_compute(
                     encoder,
-                    &pipes.sim,
+                    &self.pipes.sim,
                     &rig.water.sim_bind[rig.water.phase],
                     rig.water.size,
                 );
@@ -575,7 +509,7 @@ impl Frost {
         }
         run_pass(
             encoder,
-            &pipes.composite,
+            &self.pipes.composite,
             &rig.water.composite_bind[rig.water.phase],
             surface,
         );
@@ -610,10 +544,9 @@ impl Frost {
         scene: &Target,
         blur: &Target,
     ) -> Water {
-        let scale = self.definition.spec().scale;
         let size = wgpu::Extent3d {
-            width: width.div_ceil(scale).max(1),
-            height: height.div_ceil(scale).max(1),
+            width: width.div_ceil(FIELD_SCALE).max(1),
+            height: height.div_ceil(FIELD_SCALE).max(1),
             depth_or_array_layers: 1,
         };
         let textures = (0..2)

@@ -121,7 +121,6 @@ pub struct Slate {
     pub images_per_row: u16,
     #[serde(default = "water_wet_default")]
     pub water_wet: bool,
-    pub water_hd: bool,
     pub viewer_tags_open: bool,
 }
 
@@ -134,7 +133,6 @@ impl Default for Slate {
             sort: Sort::Score,
             images_per_row: 5,
             water_wet: true,
-            water_hd: false,
             viewer_tags_open: false,
         }
     }
@@ -265,7 +263,6 @@ mod tests {
             sort: Sort::Newest,
             images_per_row: 7,
             water_wet: false,
-            water_hd: true,
             viewer_tags_open: true,
         };
         let text = toml::to_string_pretty(&slate)?;
@@ -274,21 +271,19 @@ mod tests {
         assert!(roundtrip.closed_folders.contains("trips"));
         assert_eq!(roundtrip.images_per_row, 7);
         assert!(!roundtrip.water_wet);
-        assert!(roundtrip.water_hd);
         assert!(roundtrip.viewer_tags_open);
         Ok(())
     }
 
     #[test]
-    fn slate_defaults_to_wet_sd() {
+    fn slate_defaults_to_wet() {
         let slate = Slate::default();
         assert!(slate.water_wet);
-        assert!(!slate.water_hd);
         assert!(!slate.viewer_tags_open);
     }
 
     #[test]
-    fn slate_without_water_fields_defaults_to_wet_sd() -> Result<()> {
+    fn slate_without_water_field_defaults_to_wet() -> Result<()> {
         let slate = toml::from_str::<Slate>(
             r#"
 sort = "score"
@@ -299,7 +294,6 @@ active_group = []
 "#,
         )?;
         assert!(slate.water_wet);
-        assert!(!slate.water_hd);
         assert!(!slate.viewer_tags_open);
         Ok(())
     }

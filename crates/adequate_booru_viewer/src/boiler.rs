@@ -208,7 +208,6 @@ impl Boiler {
             &primitives,
             &output.textures_delta,
             output.pixels_per_point,
-            self.app.water_definition(),
             &crate::frost::Surge {
                 dry: !self.app.water_wet(),
                 veil,
@@ -405,20 +404,12 @@ impl Rig {
         primitives: &[egui::ClippedPrimitive],
         delta: &egui::TexturesDelta,
         pixels_per_point: f32,
-        definition: crate::frost::Definition,
         surge: &crate::frost::Surge<'_>,
     ) {
         let screen = ScreenDescriptor {
             size_in_pixels: [self.config.width, self.config.height],
             pixels_per_point,
         };
-        self.frost.set_definition(
-            &self.gpu.device,
-            &self.gpu.queue,
-            self.config.width,
-            self.config.height,
-            definition,
-        );
         let mut encoder = self
             .gpu
             .device
