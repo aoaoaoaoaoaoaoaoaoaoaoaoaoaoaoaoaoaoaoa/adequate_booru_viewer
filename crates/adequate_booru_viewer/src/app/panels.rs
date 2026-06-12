@@ -89,11 +89,14 @@ impl Bayonet {
         self.panel_section(ui, "gallery-controls", "gallery", false, |this, ui| {
             this.gallery_panel(ui);
         });
-        self.panel_section(ui, "index-status", "index status", false, |this, ui| {
-            this.index_status_panel(ui);
-        });
         self.panel_section(ui, "ui-controls", "ui", false, |this, ui| {
             this.ui_panel(ui);
+        });
+        self.panel_section(ui, "help", "help", false, |_, ui| {
+            Self::help_panel(ui);
+        });
+        self.panel_section(ui, "index-status", "index status", false, |this, ui| {
+            this.index_status_panel(ui);
         });
     }
 
@@ -265,6 +268,26 @@ impl Bayonet {
         if changed {
             self.save_config();
             ui.ctx().request_repaint();
+        }
+    }
+
+    fn help_panel(ui: &mut egui::Ui) {
+        for line in [
+            "enter: add typed tag(s) to highlighted group",
+            "-tag: add a negative tag atom",
+            "rating:q: query rating meta-tags",
+            "right-click thumbnail: inspect tags",
+            "thumbnail tag menu: + require, - exclude, × remove",
+            "click thumbnail: open full viewer",
+            "viewer tab / tags: toggle image tags",
+            "viewer ← / →: previous / next result",
+            "viewer click image: touch water",
+            "viewer right-click / esc: close",
+            "viewer copy / save: export full image",
+            "ctrl-wheel gallery: images per row",
+            "f12: water physics bench",
+        ] {
+            let _line = chrome::note(ui, line);
         }
     }
 

@@ -122,17 +122,16 @@ impl Bayonet {
     }
 
     pub(super) fn full_frame(&mut self, ctx: &egui::Context) {
+        if self.zoom.is_some() && tab_pressed(ctx) {
+            self.toggle_viewer_tags();
+        }
         if self.zoom.is_some() && !ctx.egui_wants_keyboard_input() {
             let step = ctx.input(|input| {
                 i32::from(input.key_pressed(egui::Key::ArrowRight))
                     - i32::from(input.key_pressed(egui::Key::ArrowLeft))
             });
-            let tags = ctx.input(|input| input.key_pressed(egui::Key::Tab));
             if step != 0 {
                 self.step_zoom(step);
-            }
-            if tags {
-                self.toggle_viewer_tags();
             }
         }
         let Some(post) = self.zoom.clone() else {
@@ -164,32 +163,36 @@ impl Bayonet {
                         ViewerAction::Close => close = true,
                     }
                 }
-                let _row = ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    if let Some(texture) = self.full.get(&post.id) {
-                        let response = ui.add(
-                            egui::Image::new(texture)
-                                .fit_to_exact_size(image_box)
-                                .sense(egui::Sense::click()),
-                        );
-                        self.viewer_pond = response.rect;
-                        if response.clicked_by(egui::PointerButton::Primary)
-                            && let Some(pos) = response.interact_pointer_pos()
-                        {
-                            self.touch_viewer(pos);
+                let _row = ui.allocate_ui_with_layout(
+                    egui::vec2(body.x, image_box.y),
+                    egui::Layout::left_to_right(egui::Align::Min),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        if let Some(texture) = self.full.get(&post.id) {
+                            let response = ui.add(
+                                egui::Image::new(texture)
+                                    .fit_to_exact_size(image_box)
+                                    .sense(egui::Sense::click()),
+                            );
+                            self.viewer_pond = response.rect;
+                            if response.clicked_by(egui::PointerButton::Primary)
+                                && let Some(pos) = response.interact_pointer_pos()
+                            {
+                                self.touch_viewer(pos);
+                            }
+                            if response.secondary_clicked() {
+                                close = true;
+                            }
+                        } else if self.full_faults.contains(&post.id) {
+                            centered_box(ui, image_box, "full image failed");
+                        } else {
+                            centered_box(ui, image_box, "loading full image");
                         }
-                        if response.secondary_clicked() {
-                            close = true;
+                        if self.viewer_tags_open {
+                            self.viewer_tag_drawer(ui, &post, image_box.y);
                         }
-                    } else if self.full_faults.contains(&post.id) {
-                        centered_box(ui, image_box, "full image failed");
-                    } else {
-                        centered_box(ui, image_box, "loading full image");
-                    }
-                    if self.viewer_tags_open {
-                        self.viewer_tag_drawer(ui, &post, image_box.y);
-                    }
-                });
+                    },
+                );
             });
         if let Some(window) = &window {
             self.zoom_rect = Some(window.response.rect);
@@ -282,6 +285,22 @@ fn full_image_box(
         (screen.y * 0.9 - VIEWER_CHROME).max(64.0),
     );
     fit(image, bounds)
+}
+
+fn tab_pressed(ctx: &egui::Context) -> bool {
+    ctx.input(|input| {
+        input.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::Tab,
+                    pressed: true,
+                    repeat: false,
+                    ..
+                }
+            )
+        })
+    })
 }
 
 fn post_image_size(post: &PostRecord) -> egui::Vec2 {

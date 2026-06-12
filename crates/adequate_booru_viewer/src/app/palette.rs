@@ -50,15 +50,21 @@ impl Bayonet {
         let groups = self.cached_viewer_groups(post);
         let mut strikes = Vec::new();
         let mut pulses = Vec::new();
-        let _frame = egui::Frame::new()
-            .fill(chrome::SURFACE)
-            .stroke(egui::Stroke::new(1.0, chrome::EDGE))
-            .inner_margin(egui::Margin::symmetric(7, 6))
-            .show(ui, |ui| {
-                ui.set_width(TAG_MENU_WIDTH);
-                ui.set_height(height);
-                palette_body(ui, &groups, &self.query, height, &mut strikes, &mut pulses);
-            });
+        let _slot = ui.allocate_ui_with_layout(
+            egui::vec2(TAG_MENU_WIDTH, height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_min_size(egui::vec2(TAG_MENU_WIDTH, height));
+                let _frame = egui::Frame::new()
+                    .fill(chrome::SURFACE)
+                    .stroke(egui::Stroke::new(1.0, chrome::EDGE))
+                    .inner_margin(egui::Margin::symmetric(7, 6))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        palette_body(ui, &groups, &self.query, height, &mut strikes, &mut pulses);
+                    });
+            },
+        );
         for rect in pulses {
             self.bump_plunge(rect);
         }
