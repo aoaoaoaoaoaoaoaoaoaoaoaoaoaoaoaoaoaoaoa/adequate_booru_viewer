@@ -42,6 +42,7 @@ struct Quiver {
     rect: egui::Rect,
     pointer: egui::Pos2,
     grip: f32,
+    omega: f32,
 }
 
 impl Quiver {
@@ -54,6 +55,7 @@ impl Quiver {
             ),
             pointer: (self.pointer.to_vec2() * scale).to_pos2(),
             grip: self.grip,
+            omega: self.omega,
         }
     }
 }
@@ -84,12 +86,14 @@ fn take_tensions(
             rect: seed.rect,
             pointer: seed.pointer,
             grip: seed.grip,
+            omega: seed.omega,
         };
         match bank.iter_mut().find(|quiver| quiver.id == incoming.id) {
             Some(quiver) => {
                 quiver.rect = incoming.rect;
                 quiver.pointer = incoming.pointer;
                 quiver.grip = quiver.grip.max(incoming.grip);
+                quiver.omega = incoming.omega;
             }
             None => bank.push(incoming),
         }

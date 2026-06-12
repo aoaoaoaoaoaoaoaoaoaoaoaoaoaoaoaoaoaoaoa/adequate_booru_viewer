@@ -1,3 +1,4 @@
+use std::f32::consts::TAU;
 use std::sync::Arc;
 
 use egui::{Color32, FontData, FontDefinitions, FontFamily, RichText, Sense, Stroke, Vec2};
@@ -175,22 +176,51 @@ pub fn glyph_button(text: impl Into<String>, selected: bool) -> egui::Button<'st
 /// creeping up linearly.
 const TENSION_TIME: f32 = 0.09;
 const SHALLOW_GRIP: f32 = 0.42;
+const TEXT_GRIP: f32 = 0.36;
+const TEXT_PULSE_HZ: f32 = 0.3;
 
 /// Puts a hovered widget "in tension": records a seed the frost composite
 /// turns into a refraction toward the pointer (blue bent hardest). The seed
 /// is per-frame temp data; the boiler consumes it after the UI pass.
 pub fn tension(ui: &egui::Ui, response: &egui::Response) {
-    tension_with_grip(ui, response, 1.0);
+    tension_with_grip(
+        ui,
+        response,
+        response.hovered() || response.has_focus(),
+        1.0,
+        0.0,
+    );
 }
 
 /// A gentler plate, for text-like controls that should breathe without
 /// becoming full buttons in the water.
 pub fn shallow_tension(ui: &egui::Ui, response: &egui::Response) {
-    tension_with_grip(ui, response, SHALLOW_GRIP);
+    tension_with_grip(
+        ui,
+        response,
+        response.hovered() || response.has_focus(),
+        SHALLOW_GRIP,
+        0.0,
+    );
 }
 
-fn tension_with_grip(ui: &egui::Ui, response: &egui::Response, grip_scale: f32) {
-    let held = response.hovered() || response.has_focus();
+fn text_tension(ui: &egui::Ui, response: &egui::Response) {
+    tension_with_grip(
+        ui,
+        response,
+        response.has_focus(),
+        TEXT_GRIP,
+        TEXT_PULSE_HZ * TAU,
+    );
+}
+
+fn tension_with_grip(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    held: bool,
+    grip_scale: f32,
+    omega: f32,
+) {
     let grip = ui.ctx().animate_bool_with_time_and_easing(
         response.id.with("tension"),
         held,
@@ -211,6 +241,7 @@ fn tension_with_grip(ui: &egui::Ui, response: &egui::Response, grip_scale: f32) 
                 rect: response.rect.shrink(1.0),
                 pointer,
                 grip,
+                omega,
             });
     });
 }
@@ -277,6 +308,7 @@ pub fn text_wake(
     before: &str,
     after: &str,
 ) -> Option<TextWake> {
+    text_tension(ui, response);
     if !response.changed() {
         return None;
     }

@@ -1,18 +1,12 @@
-//! The water under the UI: one composite pass that owns every shader effect.
-//!
-//! The boiler renders the whole UI into an offscreen `scene` texture; this
-//! module composites it to the swapchain with (a) the frosted veil for the
-//! viewer (dual-Kawase blur over a small mip chain, SDF rounded-rect cutouts
-//! kept sharp), (b) the button tension refraction, (c) the grid's lift
-//! plates, (d) a persistent damped shallow-water height field excited by
-//! splashes, text, scroll shocks, and button tremors, and (e) the viewer's
-//! separate bounded pond for click ripples. While nothing is live the boiler
-//! bypasses all of this entirely.
+//! The water under the UI: frost veil, lift plates, persistent shallow-water
+//! field, control quivers, and the viewer pond.
 
 use egui_wgpu::wgpu;
 use std::f32::consts::TAU;
 
-/// Mip levels in the blur chain: /2, /4, /8 of the surface.
+#[cfg(test)]
+mod audit;
+
 const LEVELS: usize = 3;
 const SIM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const SIM_BYTES: u32 = 8;
@@ -60,66 +54,36 @@ impl Definition {
     }
 }
 
-/// How many grid tiles may rise/relax at once — the depth of the slosh trail
-/// as the pointer sweeps across the grid.
 pub const LIFT_SLOTS: usize = 4;
 
-/// How many splashes ride the water at once; the weakest old ring dies first.
 pub const SPLASH_SLOTS: usize = 32;
-/// How many small control quivers (hovered + still fading) the mask carries.
 pub const QUIVER_SLOTS: usize = 4;
-/// Hard ceiling on the lift bulge. The shader also smooth-blends plate islands,
-/// so this is a taste bound rather than a brittle overlap guard.
 pub const BULGE_CEIL: f32 = 12.0;
-/// Fingertip ripples inside the full-image viewer.
 pub const TOUCH_SLOTS: usize = 12;
 
-/// Mask uniform layout (all offsets 16-aligned where arrays demand it):
-/// vec2f block @0..48 (cuts a/b, water), scalars @48..80 (radii, strength,
-/// dim, blur, tide, 2 pad), `lift_rects` @80, `lift_grips` @144, quivers @160
-/// (rect + pointer/grip per slot), splashes @288, viewer rect @1312,
-/// touches @1328, brine @1520. 404 f32 lanes = 1616 bytes, matching WGSL.
 const MASK_BYTES: u64 = 1616;
 
-/// The water's chemistry: every shader-side tunable, runtime-adjustable via
-/// the water bench (F12). Defaults are the shipped feel. Physical px at 1x.
 #[derive(Clone, Copy, Debug)]
 pub struct Brine {
-    /// Gaussian reach of the chromatic pull around the pointer.
     pub reach: f32,
-    /// Capillary meniscus pull at full grip; one scalar field, later split by
-    /// the refractive-index spread below.
     pub meniscus_px: f32,
-    /// Global multiplier turning the height-field gradient into sample-space
-    /// displacement.
     pub refract_px: f32,
-    /// Magic booru-fluid differential refractive index. Red bends by
-    /// `1 - spread`, blue by `1 + spread`; green is the reference ray.
     pub ior_spread: f32,
-    /// The quiver's small bulge and how hard it pulses with the tremor.
     pub quiver_bulge: f32,
     pub quiver_pulse: f32,
-    /// Tremor wavetrain: wavenumber k = 2π/λ, angular rate ω, amplitude,
-    /// exponential fade, and hard range cutoff.
     pub tremor_k: f32,
     pub tremor_omega: f32,
     pub tremor_amp: f32,
     pub tremor_fade: f32,
     pub tremor_reach: f32,
-    /// Lift plate: footprint growth at full grip and surfacing brightness.
     pub bulge_px: f32,
     pub lift_bright: f32,
-    /// Persistent gallery solver + viewer pond waves: crest speed, source
-    /// width, viscous decay seconds, viewer-only geometric spreading scale,
-    /// source-to-velocity gain, and per-step height retention.
     pub wave_v: f32,
     pub wave_sigma: f32,
     pub wave_damp: f32,
     pub wave_spread: f32,
     pub source_gain: f32,
     pub height_retention: f32,
-    /// Shore: chromatic transmission into the shallows, shelf impedance,
-    /// viewer-wall reflectivity, boundary feather.
     pub t_panel: f32,
     pub r_panel: f32,
     pub r_wall: f32,
@@ -137,7 +101,7 @@ impl Default for Brine {
             quiver_pulse: 0.2,
             tremor_k: 0.2417,
             tremor_omega: 0.9 * TAU,
-            tremor_amp: 0.55,
+            tremor_amp: 0.18,
             tremor_fade: 55.0,
             tremor_reach: 150.0,
             bulge_px: 10.0,
@@ -165,6 +129,9 @@ pub struct Tension {
     pub rect: egui::Rect,
     pub pointer: egui::Pos2,
     pub grip: f32,
+    /// Per-control angular pulse rate. Zero means "use the global button
+    /// tremor" so old/default seeds stay compact.
+    pub omega: f32,
 }
 
 /// A raised pane in the water. Surface panes are image tiles hauled up to the
@@ -326,7 +293,14 @@ struct Rig {
 
 struct Water {
     size: wgpu::Extent3d,
-    _textures: Vec<wgpu::Texture>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "bind groups hold the views; this owns the backing textures, and tests read them"
+        )
+    )]
+    textures: Vec<wgpu::Texture>,
     composite_bind: Vec<wgpu::BindGroup>,
     sim_bind: Vec<wgpu::BindGroup>,
     phase: usize,
@@ -633,6 +607,7 @@ impl Frost {
                     dimension: wgpu::TextureDimension::D2,
                     format: SIM_FORMAT,
                     usage: wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::COPY_SRC
                         | wgpu::TextureUsages::TEXTURE_BINDING
                         | wgpu::TextureUsages::STORAGE_BINDING,
                     view_formats: &[SIM_FORMAT],
@@ -716,7 +691,7 @@ impl Frost {
             .collect::<Vec<_>>();
         Water {
             size,
-            _textures: textures.into_iter().map(|(_, texture)| texture).collect(),
+            textures: textures.into_iter().map(|(_, texture)| texture).collect(),
             composite_bind,
             sim_bind,
             phase: 0,
@@ -843,10 +818,10 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
         ]);
         lanes[36 + slot] = lift.packed_grip();
     }
-    // quivers @ byte 160 (lane 40): rect, then pointer + grip + pad.
+    // quivers @ byte 160 (lane 40): rect, then pointer + grip + omega.
     for (slot, quiver) in surge.tensions.iter().take(QUIVER_SLOTS).enumerate() {
         let at = 40 + slot * 8;
-        lanes[at..at + 7].copy_from_slice(&[
+        lanes[at..at + 8].copy_from_slice(&[
             quiver.rect.min.x,
             quiver.rect.min.y,
             quiver.rect.max.x,
@@ -854,6 +829,7 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
             quiver.pointer.x,
             quiver.pointer.y,
             quiver.grip.clamp(0.0, 1.0),
+            quiver.omega.max(0.0),
         ]);
     }
     // splashes @ byte 288 (lane 72): rect, then age + amp + x/y wall mask.
@@ -1002,7 +978,7 @@ struct Mask {
     _pad4: f32,
 }
 
-// touch.xy = pointer, touch.z = grip; .w pad.
+// touch.xy = pointer, touch.z = grip, touch.w = optional angular pulse rate.
 struct Quiver {
     rect: vec4f,
     touch: vec4f,
@@ -1063,6 +1039,10 @@ fn prism(flow: vec2f) -> mat3x2f {
     return mat3x2f(g * max(0.0, 1.0 - spread), g, g * (1.0 + spread));
 }
 
+fn finite(x: f32) -> bool {
+    return x == x && abs(x) < 1e20;
+}
+
 // C¹ island membership from a signed distance field: 1 well inside, 0 outside,
 // and smooth across the shore. Every plate/wave operation consumes this
 // instead of step tests, so field composition is order-independent.
@@ -1096,6 +1076,10 @@ fn lift_warp(px: vec2f, rect: vec4f, grow: f32) -> vec2f {
     return away / s - away;
 }
 
+fn quiver_omega(q: Quiver) -> f32 {
+    return select(mask.tremor_omega, q.touch.w, q.touch.w > 0.0);
+}
+
 // Fingertip point disturbance inside the viewer pond.
 fn touch_flow(px: vec2f, center: vec2f, age: f32, amp: f32) -> vec2f {
     let zero = vec2f(0.0);
@@ -1112,7 +1096,7 @@ fn touch_flow(px: vec2f, center: vec2f, age: f32, amp: f32) -> vec2f {
 }
 
 fn sane_height(x: f32) -> f32 {
-    return clamp(select(0.0, x, x == x), -FIELD_HEIGHT_CEIL, FIELD_HEIGHT_CEIL);
+    return clamp(select(0.0, x, finite(x)), -FIELD_HEIGHT_CEIL, FIELD_HEIGHT_CEIL);
 }
 
 fn cell_px(coord: vec2i) -> vec2f {
@@ -1189,7 +1173,7 @@ fn composite(in: VsOut) -> @location(0) vec4f {
         if (g <= 0.0) {
             continue;
         }
-        let grow = g * mask.quiver_bulge * (1.0 + mask.quiver_pulse * sin(mask.tremor_omega * mask.tide));
+        let grow = g * mask.quiver_bulge * (1.0 + mask.quiver_pulse * sin(quiver_omega(q) * mask.tide));
         let emin = q.rect.xy - vec2f(grow);
         let emax = q.rect.zw + vec2f(grow);
         let bd = sd_cut(px, emin, emax, LIFT_RADIUS + grow);
@@ -1366,12 +1350,20 @@ fn island(sd: f32) -> f32 {
     return 1.0 - smoothstep(-PLATE_FEATHER, PLATE_FEATHER, sd);
 }
 
+fn finite(x: f32) -> bool {
+    return x == x && abs(x) < 1e20;
+}
+
 fn sane(x: f32, ceil: f32) -> f32 {
-    return clamp(select(0.0, x, x == x), -ceil, ceil);
+    return clamp(select(0.0, x, finite(x)), -ceil, ceil);
 }
 
 fn soft_limiter(x: f32, ceil: f32) -> f32 {
     return ceil * x / (abs(x) + ceil);
+}
+
+fn quiver_omega(q: Quiver) -> f32 {
+    return select(mask.tremor_omega, q.touch.w, q.touch.w > 0.0);
 }
 
 fn obstacle(px: vec2f) -> f32 {
@@ -1451,7 +1443,7 @@ fn source(px: vec2f) -> f32 {
             continue;
         }
         let shell = exp(-d / max(mask.tremor_fade, 1.0));
-        let phase = mask.tremor_k * d - mask.tremor_omega * mask.tide;
+        let phase = mask.tremor_k * d - quiver_omega(q) * mask.tide;
         drive = drive + mask.tremor_amp * g * shell * sin(phase);
     }
     return soft_limiter(drive, SOURCE_CEIL);
