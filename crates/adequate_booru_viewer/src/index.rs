@@ -1093,6 +1093,9 @@ fn append_facts(tx: &redb::WriteTransaction, facts: &FactBatch) -> Result<()> {
 }
 
 fn pending_facts(table: &impl redb::ReadableTable<u64, &'static [u8]>) -> Result<FactBatch> {
+    if table.len().context("count pending posting facts")? == 0 {
+        return Ok(FactBatch::default());
+    }
     let mut out = FactBatch::default();
     for row in table
         .range(0_u64..=u64::MAX)
