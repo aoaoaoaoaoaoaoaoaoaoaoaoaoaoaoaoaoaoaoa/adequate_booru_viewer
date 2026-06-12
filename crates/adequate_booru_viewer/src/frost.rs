@@ -187,6 +187,20 @@ pub struct Splash {
     pub rect: egui::Rect,
     pub age: f32,
     pub amp: f32,
+    pub shape: SplashShape,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SplashShape {
+    #[default]
+    Ring,
+    Basin,
+}
+
+impl SplashShape {
+    fn code(self) -> f32 {
+        self as u8 as f32
+    }
 }
 
 /// A fingertip ripple inside the full-image viewer. Unlike `Splash`, this is
@@ -851,7 +865,7 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
             quiver.omega.max(0.0),
         ]);
     }
-    // splashes @ byte 288 (lane 72): rect, then age + amp + pad.
+    // splashes @ byte 288 (lane 72): rect, then age + amp + shape + pad.
     for (slot, splash) in surge.splashes.iter().take(SPLASH_SLOTS).enumerate() {
         let at = 72 + slot * 8;
         lanes[at..at + 8].copy_from_slice(&[
@@ -861,7 +875,7 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
             splash.rect.max.y,
             splash.age,
             splash.amp,
-            0.0,
+            splash.shape.code(),
             0.0,
         ]);
     }
@@ -999,21 +1013,13 @@ struct Mask {
 }
 
 // touch.xy = pointer, touch.z = grip, touch.w = optional angular pulse rate.
-struct Quiver {
-    rect: vec4f,
-    touch: vec4f,
-}
+struct Quiver { rect: vec4f, touch: vec4f }
 
-// vitals.x = age seconds, vitals.y = amplitude px, vitals.zw = pad.
-struct Splash {
-    rect: vec4f,
-    vitals: vec4f,
-}
+// vitals.x = age seconds, vitals.y = amplitude px, vitals.z = shape.
+struct Splash { rect: vec4f, vitals: vec4f }
 
 // wave.xy = center, wave.z = age seconds, wave.w = amplitude px.
-struct Touch {
-    wave: vec4f,
-}
+struct Touch { wave: vec4f }
 
 // The water's chemistry lives in the mask's brine block (runtime-tunable);
 // only the rounded-rect corner radius is baked in.
@@ -1321,19 +1327,11 @@ struct Mask {
     shore_feather: f32,
 }
 
-struct Quiver {
-    rect: vec4f,
-    touch: vec4f,
-}
+struct Quiver { rect: vec4f, touch: vec4f }
 
-struct Splash {
-    rect: vec4f,
-    vitals: vec4f,
-}
+struct Splash { rect: vec4f, vitals: vec4f }
 
-struct Touch {
-    wave: vec4f,
-}
+struct Touch { wave: vec4f }
 
 override SIM_SCALE: f32 = 2.0;
 override DT: f32 = 1.0 / 240.0;
@@ -1341,6 +1339,7 @@ override IMPULSE_GAIN: f32 = 1.0;
 const LIFT_RADIUS: f32 = 3.0;
 const PLATE_FEATHER: f32 = 6.0;
 const SOURCE_LIFE: f32 = 0.22;
+const BASIN_TAPER: f32 = 28.0; const BASIN_GAIN: f32 = 0.5;
 const SOURCE_CEIL: f32 = 72.0;
 const H_CEIL: f32 = 48.0;
 const V_CEIL: f32 = 1440.0;
@@ -1361,25 +1360,15 @@ fn sd_cut(px: vec2f, rect_min: vec2f, rect_max: vec2f, radius: f32) -> f32 {
     return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - radius;
 }
 
-fn island(sd: f32) -> f32 {
-    return 1.0 - smoothstep(-PLATE_FEATHER, PLATE_FEATHER, sd);
-}
+fn island(sd: f32) -> f32 { return 1.0 - smoothstep(-PLATE_FEATHER, PLATE_FEATHER, sd); }
 
-fn finite(x: f32) -> bool {
-    return x == x && abs(x) < 1e20;
-}
+fn finite(x: f32) -> bool { return x == x && abs(x) < 1e20; }
 
-fn sane(x: f32, ceil: f32) -> f32 {
-    return clamp(select(0.0, x, finite(x)), -ceil, ceil);
-}
+fn sane(x: f32, ceil: f32) -> f32 { return clamp(select(0.0, x, finite(x)), -ceil, ceil); }
 
-fn soft_limiter(x: f32, ceil: f32) -> f32 {
-    return ceil * x / (abs(x) + ceil);
-}
+fn soft_limiter(x: f32, ceil: f32) -> f32 { return ceil * x / (abs(x) + ceil); }
 
-fn quiver_omega(q: Quiver) -> f32 {
-    return select(mask.tremor_omega, q.touch.w, q.touch.w > 0.0);
-}
+fn quiver_omega(q: Quiver) -> f32 { return select(mask.tremor_omega, q.touch.w, q.touch.w > 0.0); }
 
 fn obstacle(px: vec2f) -> f32 {
     var block = max(
@@ -1421,11 +1410,22 @@ fn source_shell(px: vec2f, rect: vec4f, age: f32, amp: f32) -> f32 {
     return amp * shell * birth;
 }
 
+fn source_basin(px: vec2f, rect: vec4f, age: f32, amp: f32) -> f32 {
+    if (amp == 0.0 || age > SOURCE_LIFE) {
+        return 0.0;
+    }
+    let d = sd_cut(px, rect.xy, rect.zw, LIFT_RADIUS); let taper = max(BASIN_TAPER, mask.wave_sigma * 1.6);
+    let prism = 1.0 - smoothstep(-taper, 0.0, d);
+    let birth = 1.0 - smoothstep(0.0, SOURCE_LIFE, age);
+    return amp * prism * birth * BASIN_GAIN;
+}
+
 fn source(px: vec2f) -> f32 {
     var drive = 0.0;
     for (var i = 0u; i < 32u; i = i + 1u) {
         let splash = mask.splashes[i];
-        drive = drive + source_shell(px, splash.rect, splash.vitals.x, splash.vitals.y);
+        if (splash.vitals.z > 0.5) { drive = drive + source_basin(px, splash.rect, splash.vitals.x, splash.vitals.y); }
+        else { drive = drive + source_shell(px, splash.rect, splash.vitals.x, splash.vitals.y); }
     }
     for (var i = 0u; i < 4u; i = i + 1u) {
         let q = mask.quivers[i];

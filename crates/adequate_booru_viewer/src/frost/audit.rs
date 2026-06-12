@@ -378,6 +378,7 @@ impl Script {
                 rect,
                 age: (i as f32 % 11.0) * 0.023,
                 amp: 10.0 + i as f32 % 7.0,
+                shape: SplashShape::Ring,
             });
         }
         Self {

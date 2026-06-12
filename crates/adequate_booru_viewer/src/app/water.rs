@@ -4,8 +4,8 @@ const PLUNGE_SOURCE_LIFE: f32 = 0.24;
 const TOOLTIP_GRIP: f32 = 0.72;
 const HOVER_BUMP_AMP: f32 = 0.55;
 const GROUP_SELECT_AMP: f32 = 0.9;
-const FOLD_OPEN_AMP: f32 = -1.35;
-const FOLD_CLOSE_AMP: f32 = 1.75;
+const FOLD_OPEN_AMP: f32 = -0.32;
+const FOLD_CLOSE_AMP: f32 = 0.42;
 const WATER_WAKE: Duration = Duration::from_secs(14);
 
 impl Bayonet {
@@ -116,6 +116,10 @@ impl Bayonet {
 
     /// Drops a plate into the water: one ring, radiating from `rect`'s hull.
     pub(super) fn plunge(&mut self, rect: egui::Rect, amp: f32) {
+        self.plunge_as(rect, amp, crate::frost::SplashShape::Ring);
+    }
+
+    fn plunge_as(&mut self, rect: egui::Rect, amp: f32, shape: crate::frost::SplashShape) {
         if amp.abs() <= f32::EPSILON {
             return;
         }
@@ -132,6 +136,7 @@ impl Bayonet {
             rect,
             born: Instant::now(),
             amp,
+            shape,
         });
         self.arm_water();
     }
@@ -152,7 +157,7 @@ impl Bayonet {
             chrome::FoldFlux::Open => FOLD_OPEN_AMP,
             chrome::FoldFlux::Close => FOLD_CLOSE_AMP,
         };
-        self.plunge(wake.rect, amp);
+        self.plunge_as(wake.rect, amp, crate::frost::SplashShape::Basin);
     }
 
     pub(super) fn text_plunge(&mut self, wake: chrome::TextWake) {
@@ -210,6 +215,7 @@ impl Bayonet {
                     rect: scale(plunge.rect),
                     age,
                     amp: plunge.amp,
+                    shape: plunge.shape,
                 }
             })
             .collect();
@@ -284,6 +290,7 @@ pub(super) struct Plunge {
     pub rect: egui::Rect,
     pub born: Instant,
     pub amp: f32,
+    pub shape: crate::frost::SplashShape,
 }
 
 /// Fingertip ripple inside the full-image viewer pond.
