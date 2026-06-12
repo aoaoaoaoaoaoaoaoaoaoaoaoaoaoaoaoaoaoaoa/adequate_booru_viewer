@@ -430,7 +430,11 @@ impl Rig {
         let surface_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let frosted = surge.live() && self.frost.scene_view().is_some();
+        let live_water = surge.live();
+        if !live_water {
+            self.frost.becalm(&self.gpu.queue);
+        }
+        let frosted = live_water && self.frost.scene_view().is_some();
         {
             let target = if frosted {
                 self.frost.scene_view().unwrap_or(&surface_view)

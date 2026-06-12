@@ -255,10 +255,11 @@ struct Rig {
 
 struct Water {
     size: wgpu::Extent3d,
-    _textures: Vec<wgpu::Texture>,
+    textures: Vec<wgpu::Texture>,
     composite_bind: Vec<wgpu::BindGroup>,
     sim_bind: Vec<wgpu::BindGroup>,
     phase: usize,
+    muddy: bool,
 }
 
 struct Target {
@@ -508,6 +509,7 @@ impl Frost {
             );
             rig.water.phase ^= 1;
         }
+        rig.water.muddy = true;
         if surge.veil.is_some_and(|veil| veil.blur > 0.0) {
             let mut blur = |pipeline, source: &Target, sink: &wgpu::TextureView| {
                 run_pass(encoder, pipeline, &source.bind, sink);
@@ -526,6 +528,38 @@ impl Frost {
             &rig.water.composite_bind[rig.water.phase],
             surface,
         );
+    }
+
+    /// The renderer may bypass the frost pass entirely while the UI is dry.
+    /// That must also mean the next wet frame starts from a flat pond, not
+    /// from whatever tiny half-float scars were left when the solver stopped.
+    pub fn becalm(&mut self, queue: &wgpu::Queue) {
+        let Some(rig) = &mut self.rig else {
+            return;
+        };
+        if !rig.water.muddy {
+            return;
+        }
+        let zeros = vec![0_u8; (rig.water.size.width * rig.water.size.height * SIM_BYTES) as usize];
+        for texture in &rig.water.textures {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &zeros,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(rig.water.size.width * SIM_BYTES),
+                    rows_per_image: Some(rig.water.size.height),
+                },
+                rig.water.size,
+            );
+        }
+        rig.water.phase = 0;
+        rig.water.muddy = false;
     }
 
     fn water(
@@ -636,10 +670,11 @@ impl Frost {
             .collect::<Vec<_>>();
         Water {
             size,
-            _textures: textures.into_iter().map(|(_, texture)| texture).collect(),
+            textures: textures.into_iter().map(|(_, texture)| texture).collect(),
             composite_bind,
             sim_bind,
             phase: 0,
+            muddy: false,
         }
     }
 }
@@ -1429,7 +1464,12 @@ fn step(@builtin(global_invocation_id) gid: vec3u) {
     let cfl = 0.66 * scale / DT;
     let c = min(mask.wave_v * mix(shelf_speed, 1.0, shelf), cfl);
     var v = here.y + c * c * lap * DT + source(px) * mask.source_gain;
-    v = v + clamp(mask.viscosity, 0.0, 220.0) * v_lap * DT;
+    // Explicit diffusion must obey ν·dt/dx² ≤ 1/4. SQ happened to sit below
+    // the bound; HQ halves dx and would otherwise explode into chromatic
+    // pixel confetti. Clamp the physical viscosity to the grid's stability
+    // limit instead of trusting a UI knob to know the finite-difference law.
+    let viscosity = min(clamp(mask.viscosity, 0.0, 220.0), 0.23 * scale * scale / DT);
+    v = v + viscosity * v_lap * DT;
     v = v * exp(-DT / max(mask.wave_damp, 0.08)) * mix(0.985, 1.0, shelf);
 
     let block = obstacle(px);
