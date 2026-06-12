@@ -553,7 +553,7 @@ impl Index {
         startup("index.search.tx");
         let posts = tx.open_table(POSTS).context("open posts")?;
 
-        let candidate = self.candidate_set(&tx, query)?;
+        let candidate = self.candidate_set(&tx, query, &posts)?;
         startup("index.search.candidate");
         let posts_len = posts.len().context("count posts")?;
         let candidates = candidate
@@ -768,6 +768,7 @@ impl Index {
         &self,
         tx: &redb::ReadTransaction,
         query: &Query,
+        posts: &impl redb::ReadableTable<u64, &'static [u8]>,
     ) -> Result<Option<Candidate>> {
         if query.is_empty() {
             return Ok(None);
@@ -777,9 +778,8 @@ impl Index {
         let rating_chunks = tx.open_table(RATING_CHUNKS).context("open rating chunks")?;
         let facts = tx.open_table(POSTING_FACTS).context("open posting facts")?;
         let pending = pending_facts(&facts)?;
-        let posts = tx.open_table(POSTS).context("open posts")?;
         BitmapEval {
-            posts: &posts,
+            posts,
             tags: &tag_chunks,
             ratings: &rating_chunks,
             pending: &pending,
