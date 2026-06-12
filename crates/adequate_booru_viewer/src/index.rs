@@ -555,10 +555,14 @@ impl Index {
 
         let candidate = self.candidate_set(&tx, query, &posts)?;
         startup("index.search.candidate");
-        let posts_len = posts.len().context("count posts")?;
-        let candidates = candidate
-            .as_ref()
-            .map_or(posts_len, |candidate| candidate.len(posts_len));
+        let candidates = match &candidate {
+            None => posts.len().context("count posts")?,
+            Some(Candidate::Finite(bitmap)) => bitmap.len(),
+            Some(Candidate::Cofinite(excluded)) => posts
+                .len()
+                .context("count posts")?
+                .saturating_sub(excluded.len()),
+        };
         startup("index.search.candidates.len");
 
         let ids = match (&candidate, sort) {
@@ -850,13 +854,6 @@ impl BitmapCow {
 }
 
 impl Candidate {
-    fn len(&self, universe: u64) -> u64 {
-        match self {
-            Self::Finite(bitmap) => bitmap.len(),
-            Self::Cofinite(excluded) => universe.saturating_sub(excluded.len()),
-        }
-    }
-
     fn contains(&self, id: u32) -> bool {
         match self {
             Self::Finite(bitmap) => bitmap.contains(id),
