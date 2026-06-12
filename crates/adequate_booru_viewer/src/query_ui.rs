@@ -217,48 +217,55 @@ fn render_atom(
     tag_kind: &mut impl FnMut(&QueryAtom) -> TagKind,
 ) {
     let Some((parent, child)) = parent else {
-        atom_row(ui, atom, negated, None, actions, tag_kind);
+        let _row = ui.horizontal(|ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+            atom_label(ui, atom, negated, tag_kind);
+        });
         return;
     };
-    let drag = AtomDrag { parent, child };
-    let id = ui.make_persistent_id(("query-atom-drag", &drag.parent, drag.child));
-    let _row = ui.dnd_drag_source(id, drag.clone(), |ui| {
-        atom_row(
-            ui,
-            atom,
-            negated,
-            Some((drag.parent.clone(), drag.child)),
-            actions,
-            tag_kind,
-        );
+    let drag = AtomDrag {
+        parent: parent.clone(),
+        child,
+    };
+    let id = ui.make_persistent_id(("query-atom-drag", &parent, child));
+    let _row = ui.horizontal(|ui| {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+        if remove_atom_button(ui, parent.clone(), child, actions) {
+            return;
+        }
+        let _drag = ui.dnd_drag_source(id, drag, |ui| {
+            atom_label(ui, atom, negated, tag_kind);
+        });
     });
 }
 
-fn atom_row(
+fn remove_atom_button(
+    ui: &mut egui::Ui,
+    parent: Vec<usize>,
+    child: usize,
+    actions: &mut Vec<QueryAction>,
+) -> bool {
+    let button = chrome::small_still(ui, "×").on_hover_text("remove from query");
+    if chrome::hover_started(ui, &button) {
+        actions.push(QueryAction::Pulse(button.rect));
+    }
+    if button.clicked() {
+        actions.push(QueryAction::RemoveChild { parent, child });
+        true
+    } else {
+        false
+    }
+}
+
+fn atom_label(
     ui: &mut egui::Ui,
     atom: &QueryAtom,
     negated: bool,
-    parent: Option<(Vec<usize>, usize)>,
-    actions: &mut Vec<QueryAction>,
     tag_kind: &mut impl FnMut(&QueryAtom) -> TagKind,
 ) {
-    let _row = ui.horizontal(|ui| {
-        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-        if let Some((parent, child)) = parent
-            && {
-                let button = chrome::small_still(ui, "×").on_hover_text("remove from query");
-                if chrome::hover_started(ui, &button) {
-                    actions.push(QueryAction::Pulse(button.rect));
-                }
-                button.clicked()
-            }
-        {
-            actions.push(QueryAction::RemoveChild { parent, child });
-        }
-        let _label = ui
-            .label(tag_chroma::atom(atom, tag_kind(atom), negated))
-            .on_hover_text(atom.term());
-    });
+    let _label = ui
+        .label(tag_chroma::atom(atom, tag_kind(atom), negated))
+        .on_hover_text(atom.term());
 }
 
 fn op_blurb(op: BoolOp) -> &'static str {
