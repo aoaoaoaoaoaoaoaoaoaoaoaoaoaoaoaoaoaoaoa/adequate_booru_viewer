@@ -392,6 +392,18 @@ impl Bayonet {
                     self.install_query_at(query, parent);
                 }
             }
+            QueryAction::MoveAtom {
+                parent,
+                child,
+                target,
+                rect,
+            } => {
+                let mut query = self.query.clone();
+                if let Some(target) = query.move_atom(&parent, child, &target) {
+                    self.bump_plunge(rect);
+                    self.install_query_at(query, target);
+                }
+            }
             QueryAction::AddGroup { op } => {
                 if self.active_group.len() >= MAX_GROUP_DEPTH {
                     self.status = format!("group nesting is capped at {MAX_GROUP_DEPTH}");

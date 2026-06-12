@@ -147,6 +147,7 @@ fn palette_body(
                 for tag in tags {
                     let active = query.polarity(tag);
                     let _row = ui.horizontal(|ui| {
+                        remove_slot(ui, active.is_some(), tag, strikes, pulses);
                         let require = chrome::small_still(ui, "+").on_hover_text("require tag");
                         if chrome::hover_started(ui, &require) {
                             pulses.push(require.rect);
@@ -161,18 +162,6 @@ fn palette_body(
                         if exclude.clicked() {
                             strikes.push(TagStrike::Exclude(tag.clone()));
                         }
-                        if active.is_some() {
-                            let remove =
-                                chrome::small_still(ui, "×").on_hover_text("remove from query");
-                            if chrome::hover_started(ui, &remove) {
-                                pulses.push(remove.rect);
-                            }
-                            if remove.clicked() {
-                                strikes.push(TagStrike::Remove(tag.clone()));
-                            }
-                        } else {
-                            ui.add_space(18.0);
-                        }
                         let _tag = ui
                             .add(egui::Label::new(tag_chroma::text(tag.as_str(), *kind)).truncate())
                             .on_hover_text(tag.as_str());
@@ -180,4 +169,30 @@ fn palette_body(
                 }
             }
         });
+}
+
+fn remove_slot(
+    ui: &mut egui::Ui,
+    active: bool,
+    tag: &Tag,
+    strikes: &mut Vec<TagStrike>,
+    pulses: &mut Vec<egui::Rect>,
+) {
+    const REMOVE_COL: f32 = 20.0;
+    let _slot = ui.allocate_ui_with_layout(
+        egui::vec2(REMOVE_COL, ui.spacing().interact_size.y),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            if !active {
+                return;
+            }
+            let remove = chrome::small_still(ui, "×").on_hover_text("remove from query");
+            if chrome::hover_started(ui, &remove) {
+                pulses.push(remove.rect);
+            }
+            if remove.clicked() {
+                strikes.push(TagStrike::Remove(tag.clone()));
+            }
+        },
+    );
 }

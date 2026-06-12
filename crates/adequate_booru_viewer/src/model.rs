@@ -304,6 +304,28 @@ impl Query {
         true
     }
 
+    pub fn move_atom(
+        &mut self,
+        parent: &[usize],
+        child: usize,
+        target: &[usize],
+    ) -> Option<Vec<usize>> {
+        if parent == target || self.group(target).is_none() {
+            return None;
+        }
+        let term = self
+            .group(parent)?
+            .children
+            .get(child)
+            .and_then(QueryExpr::term)?;
+        let target = target_after_child_removal(parent, child, target)?;
+        if !self.remove_child(parent, child) {
+            return None;
+        }
+        self.push_atom(&target, term.atom, term.polarity)
+            .then_some(target)
+    }
+
     pub fn remove_atom(&mut self, atom: &QueryAtom) {
         self.root.remove_atom(atom);
         self.sort_atoms();
@@ -588,6 +610,24 @@ impl QueryExpr {
             }
         }
     }
+}
+
+fn target_after_child_removal(
+    parent: &[usize],
+    child: usize,
+    target: &[usize],
+) -> Option<Vec<usize>> {
+    let mut target = target.to_vec();
+    if target.starts_with(parent)
+        && let Some(slot) = target.get_mut(parent.len())
+    {
+        match (*slot).cmp(&child) {
+            std::cmp::Ordering::Less => {}
+            std::cmp::Ordering::Equal => return None,
+            std::cmp::Ordering::Greater => *slot -= 1,
+        }
+    }
+    Some(target)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1130,6 +1170,64 @@ mod tests {
             TagPolarity::Positive
         ));
         assert_eq!(query.root.to_text(), "∧(alpha ∨(left right) zeta)");
+        Ok(())
+    }
+
+    #[test]
+    fn atoms_move_between_groups_then_sort_at_destination() -> Result<()> {
+        let mut query = Query::default();
+        let left = query.push_group(&[], BoolOp::And).context("left group")?;
+        let right = query.push_group(&[], BoolOp::Or).context("right group")?;
+        assert!(query.push_atom(
+            &left,
+            QueryAtom::parse("red_hair").context("red hair")?,
+            TagPolarity::Positive
+        ));
+        assert!(query.push_atom(
+            &right,
+            QueryAtom::parse("zeta").context("zeta")?,
+            TagPolarity::Positive
+        ));
+        assert!(query.push_atom(
+            &right,
+            QueryAtom::parse("alpha").context("alpha")?,
+            TagPolarity::Positive
+        ));
+
+        assert_eq!(query.move_atom(&left, 0, &right), Some(right.clone()));
+
+        assert_eq!(query.root.to_text(), "∧(∧() ∨(alpha red_hair zeta))");
+        Ok(())
+    }
+
+    #[test]
+    fn atom_move_returns_shifted_destination_path() -> Result<()> {
+        let mut query = Query::default();
+        assert!(query.push_atom(
+            &[],
+            QueryAtom::parse("red_hair").context("red hair")?,
+            TagPolarity::Positive
+        ));
+        let target = query.push_group(&[], BoolOp::And).context("target group")?;
+
+        let shifted = query.move_atom(&[], 0, &target).context("move atom")?;
+
+        assert_eq!(shifted, vec![0]);
+        assert_eq!(query.root.to_text(), "∧(∧(red_hair))");
+        Ok(())
+    }
+
+    #[test]
+    fn atom_move_inside_own_group_is_noop() -> Result<()> {
+        let mut query = Query::default();
+        assert!(query.push_atom(
+            &[],
+            QueryAtom::parse("red_hair").context("red hair")?,
+            TagPolarity::Positive
+        ));
+
+        assert_eq!(query.move_atom(&[], 0, &[]), None);
+        assert_eq!(query.root.to_text(), "∧(red_hair)");
         Ok(())
     }
 

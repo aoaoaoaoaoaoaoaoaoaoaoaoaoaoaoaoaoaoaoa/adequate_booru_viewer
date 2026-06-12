@@ -6,12 +6,37 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub enum QueryAction {
-    Select { path: Vec<usize>, rect: egui::Rect },
-    SetOp { path: Vec<usize>, op: BoolOp },
-    ToggleNot { path: Vec<usize> },
-    RemoveChild { parent: Vec<usize>, child: usize },
-    AddGroup { op: BoolOp },
+    Select {
+        path: Vec<usize>,
+        rect: egui::Rect,
+    },
+    SetOp {
+        path: Vec<usize>,
+        op: BoolOp,
+    },
+    ToggleNot {
+        path: Vec<usize>,
+    },
+    RemoveChild {
+        parent: Vec<usize>,
+        child: usize,
+    },
+    MoveAtom {
+        parent: Vec<usize>,
+        child: usize,
+        target: Vec<usize>,
+        rect: egui::Rect,
+    },
+    AddGroup {
+        op: BoolOp,
+    },
     Pulse(egui::Rect),
+}
+
+#[derive(Clone, Debug)]
+struct AtomDrag {
+    parent: Vec<usize>,
+    child: usize,
 }
 
 pub fn render_query_tree(
@@ -145,6 +170,26 @@ fn render_group(
             let _old = path.pop();
         }
     });
+    if let Some(drag) = frame.response.dnd_hover_payload::<AtomDrag>()
+        && drag.parent.as_slice() != path.as_slice()
+    {
+        let _stroke = ui.painter().rect_stroke(
+            frame.response.rect.expand(1.0),
+            2.0,
+            egui::Stroke::new(1.5, chrome::HOT),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if let Some(drag) = frame.response.dnd_release_payload::<AtomDrag>()
+        && drag.parent.as_slice() != path.as_slice()
+    {
+        actions.push(QueryAction::MoveAtom {
+            parent: drag.parent.clone(),
+            child: drag.child,
+            target: path.clone(),
+            rect: frame.response.rect,
+        });
+    }
     if select || (actions.len() == baseline && primary_click_inside(ui, frame.response.rect)) {
         actions.push(QueryAction::Select {
             path: path.clone(),
@@ -164,6 +209,32 @@ fn primary_click_inside(ui: &egui::Ui, rect: egui::Rect) -> bool {
 }
 
 fn render_atom(
+    ui: &mut egui::Ui,
+    atom: &QueryAtom,
+    negated: bool,
+    parent: Option<(Vec<usize>, usize)>,
+    actions: &mut Vec<QueryAction>,
+    tag_kind: &mut impl FnMut(&QueryAtom) -> TagKind,
+) {
+    let Some((parent, child)) = parent else {
+        atom_row(ui, atom, negated, None, actions, tag_kind);
+        return;
+    };
+    let drag = AtomDrag { parent, child };
+    let id = ui.make_persistent_id(("query-atom-drag", &drag.parent, drag.child));
+    let _row = ui.dnd_drag_source(id, drag.clone(), |ui| {
+        atom_row(
+            ui,
+            atom,
+            negated,
+            Some((drag.parent.clone(), drag.child)),
+            actions,
+            tag_kind,
+        );
+    });
+}
+
+fn atom_row(
     ui: &mut egui::Ui,
     atom: &QueryAtom,
     negated: bool,
