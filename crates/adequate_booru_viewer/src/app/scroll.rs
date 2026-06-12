@@ -1,11 +1,12 @@
 /// A scroll jump larger than this is navigation, not momentum.
 const TILT_TELEPORT: f32 = 2500.0;
 const TILT_SPEED_CEIL: f32 = 14_000.0;
-const TILT_CEIL: f32 = 48.0;
-const TILT_EPSILON: f32 = 0.015;
+const FORCE_CEIL: f32 = 48.0;
+const FORCE_EPSILON: f32 = 0.015;
 
-/// Linearized tray tilt: scroll velocity tips the water tray, while the
-/// persistent solver performs the pile-up, release, reflection, and damping.
+/// Linearized tray shove: scroll velocity becomes a bounded body force over
+/// the water. The persistent solver, not this CPU filter, performs pile-up,
+/// release, reflection, and damping.
 #[derive(Default)]
 pub(super) enum TrayTilt {
     #[default]
@@ -13,7 +14,6 @@ pub(super) enum TrayTilt {
     Awake {
         offset: f32,
         velocity: f32,
-        height: f32,
     },
 }
 
@@ -29,13 +29,11 @@ impl TrayTilt {
         let Self::Awake {
             offset: last,
             velocity,
-            height,
         } = self
         else {
             *self = Self::Awake {
                 offset,
                 velocity: 0.0,
-                height: 0.0,
             };
             return 0.0;
         };
@@ -43,17 +41,35 @@ impl TrayTilt {
         *last = offset;
         if delta.abs() > TILT_TELEPORT {
             *velocity = 0.0;
-            *height = 0.0;
             return 0.0;
         }
         let sample = (delta / dt).clamp(-TILT_SPEED_CEIL, TILT_SPEED_CEIL);
         let alpha = 1.0 - (-dt / tau.max(0.02)).exp();
         *velocity += (sample - *velocity) * alpha;
         *velocity = velocity.clamp(-TILT_SPEED_CEIL, TILT_SPEED_CEIL);
-        *height += ((*velocity * coupling).clamp(-TILT_CEIL, TILT_CEIL) - *height) * alpha;
-        if height.abs() < TILT_EPSILON && sample.abs() < 1.0 {
-            *height = 0.0;
+        if velocity.abs() < FORCE_EPSILON / coupling.max(1.0e-6) && sample.abs() < 1.0 {
+            *velocity = 0.0;
         }
-        *height
+        (*velocity * coupling).clamp(-FORCE_CEIL, FORCE_CEIL)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_scroll_frame_hits_force_ceiling_without_second_lowpass() {
+        let mut tray = TrayTilt::default();
+        let _virgin = tray.sway(0.0, 1.0, 1.0 / 60.0, 0.08, 0.11);
+        let force = tray.sway(100.0, 1.0, 1.0 / 60.0, 0.08, 0.11);
+        assert!(force > 40.0, "force was {force}");
+    }
+
+    #[test]
+    fn teleport_is_navigation_not_force() {
+        let mut tray = TrayTilt::default();
+        let _virgin = tray.sway(0.0, 1.0, 1.0 / 60.0, 0.08, 0.11);
+        assert!(tray.sway(3000.0, 1.0, 1.0 / 60.0, 0.08, 0.11).abs() <= f32::EPSILON);
     }
 }

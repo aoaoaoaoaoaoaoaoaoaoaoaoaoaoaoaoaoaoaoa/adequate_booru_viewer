@@ -65,7 +65,7 @@ const BASIN_GAIN: f32 = 0.5;
 const SOURCE_CEIL: f32 = 72.0;
 const H_CEIL: f32 = 48.0;
 const V_CEIL: f32 = 1440.0;
-const TILT_CEIL: f32 = 48.0;
+const TILT_FORCE_CEIL: f32 = 48.0;
 const RAFT_STIFFNESS: f32 = 420.0;
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
@@ -167,7 +167,7 @@ fn source(px: vec2f) -> f32 {
     return soft_limiter(drive, SOURCE_CEIL);
 }
 
-fn tilt_drive(px: vec2f, h: f32) -> f32 {
+fn tilt_drive(px: vec2f) -> f32 {
     let span = max(mask.water_max.y - mask.water_min.y, 1.0);
     let y = clamp((px.y - mask.water_min.y) / span, 0.0, 1.0);
     let ramp = y * 2.0 - 1.0;
@@ -179,8 +179,8 @@ fn tilt_drive(px: vec2f, h: f32) -> f32 {
         mask.water_min.x + mask.shore_feather,
         px.x,
     );
-    let desired = -clamp(mask.scroll_tilt, -TILT_CEIL, TILT_CEIL) * ramp;
-    return (desired - h) * max(mask.tilt_gain, 0.0) * x_gate * y_gate;
+    let force = -clamp(mask.scroll_tilt, -TILT_FORCE_CEIL, TILT_FORCE_CEIL) * ramp;
+    return force * max(mask.tilt_gain, 0.0) * x_gate * y_gate;
 }
 
 fn raft_height(px: vec2f) -> f32 {
@@ -226,7 +226,7 @@ fn step(@builtin(global_invocation_id) gid: vec3u) {
     var v = here.y
         + c * c * lap * DT
         + source(px) * mask.source_gain * IMPULSE_GAIN
-        + (tilt_drive(px, h) + raft_drive(px, h)) * DT;
+        + (tilt_drive(px) + raft_drive(px, h)) * DT;
     v = v * exp(-DT / max(mask.wave_damp, 0.08)) * mix(0.985, 1.0, shelf);
 
     let block = obstacle(px);

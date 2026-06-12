@@ -97,9 +97,9 @@ impl Bayonet {
         lifts
     }
 
-    /// Scroll inertia: the gallery tray tilts under filtered scroll velocity.
-    /// The shader sees a zero-mean target slope; pile-up and release are left
-    /// to the persistent wave field instead of injected as synthetic strips.
+    /// Scroll inertia: the gallery tray shoves the water under filtered scroll
+    /// velocity. The shader sees a zero-mean body force; pile-up and release
+    /// are left to the persistent wave field instead of injected as strips.
     pub(super) fn heave(&mut self, ctx: &egui::Context, offset: f32, pixels_per_point: f32) {
         if !self.water_rect.is_positive() {
             self.scroll_tilt = 0.0;
