@@ -90,38 +90,20 @@ struct Surf {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WaterUi {
     Dry,
-    Wet(WaterQuality),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WaterQuality {
-    Standard,
-    High,
+    Wet,
 }
 
 impl WaterUi {
-    fn from_slate(wet: bool, hq: bool) -> Self {
-        if wet {
-            Self::Wet(if hq {
-                WaterQuality::High
-            } else {
-                WaterQuality::Standard
-            })
-        } else {
-            Self::Dry
-        }
+    fn from_slate(wet: bool, _hq: bool) -> Self {
+        if wet { Self::Wet } else { Self::Dry }
     }
 
     fn wet(self) -> bool {
-        matches!(self, Self::Wet(_))
-    }
-
-    fn high(self) -> bool {
-        matches!(self, Self::Wet(WaterQuality::High))
+        matches!(self, Self::Wet)
     }
 
     fn standard(self) -> bool {
-        matches!(self, Self::Wet(WaterQuality::Standard))
+        self.wet()
     }
 }
 
@@ -1090,7 +1072,7 @@ impl Bayonet {
             sort: self.sort,
             images_per_row: self.images_per_row,
             water_wet: self.water_ui.wet(),
-            water_hq: self.water_ui.high(),
+            water_hq: false,
         };
         let written = config
             .save(&self.lair.config_path())

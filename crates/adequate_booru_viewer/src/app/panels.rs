@@ -211,13 +211,12 @@ impl Bayonet {
                 .clicked()
                 && !wet
             {
-                self.water_ui = WaterUi::Wet(WaterQuality::Standard);
+                self.water_ui = WaterUi::Wet;
                 changed = true;
             }
         });
         let wet = self.water_ui.wet();
         let standard = self.water_ui.standard();
-        let high = self.water_ui.high();
         let _quality = ui.add_enabled_ui(wet, |ui| {
             let _row = ui.horizontal_wrapped(|ui| {
                 if chrome::glyph(ui, "SQ", standard)
@@ -225,19 +224,14 @@ impl Bayonet {
                     .clicked()
                     && !standard
                 {
-                    self.water_ui = WaterUi::Wet(WaterQuality::Standard);
+                    self.water_ui = WaterUi::Wet;
                     changed = true;
                 }
-                if chrome::glyph(ui, "HQ", high)
+                let _parked = ui
+                    .add_enabled(false, chrome::glyph_button("HQ", false))
                     .on_hover_text(
                         "parked until the water solver grows a real multiresolution field",
-                    )
-                    .clicked()
-                    && !high
-                {
-                    self.water_ui = WaterUi::Wet(WaterQuality::High);
-                    changed = true;
-                }
+                    );
             });
         });
         if changed {
