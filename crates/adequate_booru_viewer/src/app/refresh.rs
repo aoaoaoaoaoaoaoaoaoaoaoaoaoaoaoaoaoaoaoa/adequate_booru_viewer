@@ -158,6 +158,7 @@ impl Bayonet {
             && let Some(stats) = stats
         {
             self.cache_status = cache_status(&stats);
+            self.cache_stats = stats;
             ctx.request_repaint();
         }
         if dirty {

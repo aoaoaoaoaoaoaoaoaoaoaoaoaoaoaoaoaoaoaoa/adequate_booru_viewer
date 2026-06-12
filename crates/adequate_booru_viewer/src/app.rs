@@ -207,6 +207,7 @@ pub struct Bayonet {
     prefetched: HashSet<PostId>,
     hover_arm: Option<(PostId, Instant)>,
     config_dirty: Option<Instant>,
+    cache_stats: CacheStats,
     cache_status: String,
     warm_status: String,
     crawl_status: String,
@@ -315,6 +316,7 @@ impl Bayonet {
             prefetched: HashSet::new(),
             hover_arm: None,
             config_dirty: None,
+            cache_stats: CacheStats::default(),
             cache_status: "cache measuring".to_owned(),
             warm_status: "query warm idle".to_owned(),
             startup_probe: StartupProbe::from_env(),
@@ -935,33 +937,42 @@ impl Bayonet {
             egui::Stroke::new(1.0, chrome::EDGE_STRONG),
             egui::StrokeKind::Inside,
         );
-        let mut at = rect.min + egui::vec2(14.0, 15.0);
+        let title_font = egui::FontId::new(25.0, egui::FontFamily::Proportional);
+        let percent_font = egui::FontId::new(38.0, egui::FontFamily::Proportional);
+        let title = "LOADING";
+        let percent = self.loading_percent();
+        let title_galley =
+            painter.layout_no_wrap(title.to_owned(), title_font.clone(), chrome::HOT);
+        let percent_galley =
+            painter.layout_no_wrap(percent.clone(), percent_font.clone(), chrome::TEXT);
+        let title_at = egui::pos2(
+            rect.center().x - title_galley.size().x * 0.5,
+            rect.top() + 28.0,
+        );
+        let percent_at = egui::pos2(
+            rect.center().x - percent_galley.size().x * 0.5,
+            rect.center().y + 7.0,
+        );
         let _title = painter.text(
-            at,
+            title_at,
             egui::Align2::LEFT_TOP,
-            "INDEXING",
-            egui::TextStyle::Button.resolve(ui.style()),
+            title,
+            title_font,
             chrome::HOT,
         );
-        at.y += 30.0;
-        for line in self.loading_status_lines() {
-            let _line = painter.text(
-                at,
-                egui::Align2::LEFT_TOP,
-                line,
-                egui::TextStyle::Small.resolve(ui.style()),
-                chrome::MUTED,
-            );
-            at.y += 22.0;
-        }
+        let _percent = painter.text(
+            percent_at,
+            egui::Align2::LEFT_TOP,
+            percent,
+            percent_font,
+            chrome::TEXT,
+        );
     }
 
-    fn loading_status_lines(&self) -> [String; 3] {
-        [
-            elide_status(&self.warm_status, 34),
-            elide_status(&self.crawl_status, 34),
-            elide_status(&self.cache_status, 34),
-        ]
+    fn loading_percent(&self) -> String {
+        self.cache_stats
+            .rough_crawl_percent()
+            .map_or_else(|| "—".to_owned(), rough_percent)
     }
 
     fn tile(&mut self, ui: &mut egui::Ui, post: &PostRecord, tile: f32) -> bool {
@@ -1381,16 +1392,13 @@ fn paint_tile_text(ui: &egui::Ui, rect: egui::Rect, text: &str) {
     );
 }
 
-fn elide_status(text: &str, max: usize) -> String {
-    let mut out = String::new();
-    for (slot, ch) in text.chars().enumerate() {
-        if slot + 1 >= max {
-            out.push('…');
-            return out;
-        }
-        out.push(ch);
+fn rough_percent(value: f32) -> String {
+    let value = value.clamp(0.0, 100.0);
+    if value < 10.0 {
+        format!("{value:.3}%")
+    } else {
+        format!("{value:.2}%")
     }
-    out
 }
 
 fn fit(image: egui::Vec2, bounds: egui::Vec2) -> egui::Vec2 {
