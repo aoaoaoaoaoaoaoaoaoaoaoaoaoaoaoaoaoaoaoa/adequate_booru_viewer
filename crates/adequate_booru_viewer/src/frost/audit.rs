@@ -328,6 +328,7 @@ fn quiet(tide: f32) -> Surge<'static> {
         water: water_rect(),
         scroll_tilt: 0.0,
         splashes: &[],
+        raft: None,
         viewer: far_rect(),
         touches: &[],
         wake: true,
@@ -341,6 +342,7 @@ struct Script {
     tensions: Vec<Tension>,
     lifts: Vec<Lift>,
     splashes: Vec<Splash>,
+    raft: Option<Raft>,
 }
 
 impl Script {
@@ -381,10 +383,23 @@ impl Script {
                 shape: SplashShape::Ring,
             });
         }
+        let raft = frame.is_multiple_of(3).then(|| {
+            let rect = egui::Rect::from_min_size(egui::pos2(240.0, 96.0), egui::vec2(180.0, 96.0));
+            Raft {
+                rect,
+                corners: [
+                    1.0 + (frame as f32 * 0.07).sin() * 4.0,
+                    2.0 + (frame as f32 * 0.11).cos() * 3.5,
+                    3.0 + (frame as f32 * 0.13).sin() * 3.0,
+                    1.5 + (frame as f32 * 0.17).cos() * 4.5,
+                ],
+            }
+        });
         Self {
             tensions,
             lifts,
             splashes,
+            raft,
         }
     }
 
@@ -397,6 +412,7 @@ impl Script {
             water: water_rect(),
             scroll_tilt: ((tide * 2.3).sin() * 14.0).clamp(-18.0, 18.0),
             splashes: &self.splashes,
+            raft: self.raft,
             viewer: far_rect(),
             touches: &[],
             wake: true,

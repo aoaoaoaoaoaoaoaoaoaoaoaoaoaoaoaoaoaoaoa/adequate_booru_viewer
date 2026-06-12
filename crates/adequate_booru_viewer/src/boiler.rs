@@ -192,7 +192,7 @@ impl Boiler {
         let lifts = self
             .app
             .frost_lift(&self.ctx, output.pixels_per_point, &tooltip_rects);
-        let (water, scroll_tilt, splashes) =
+        let (water, scroll_tilt, splashes, raft) =
             self.app.frost_splashes(&self.ctx, output.pixels_per_point);
         let (viewer, touches) = self.app.frost_touches(&self.ctx, output.pixels_per_point);
         let quiver_wake = self
@@ -217,6 +217,7 @@ impl Boiler {
                 water,
                 scroll_tilt,
                 splashes: &splashes,
+                raft,
                 viewer,
                 touches: &touches,
                 wake,

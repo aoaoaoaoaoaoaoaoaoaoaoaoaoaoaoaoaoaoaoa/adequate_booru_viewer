@@ -62,7 +62,7 @@ pub const QUIVER_SLOTS: usize = 4;
 pub const BULGE_CEIL: f32 = 12.0;
 pub const TOUCH_SLOTS: usize = 12;
 
-const MASK_BYTES: u64 = 1616;
+const MASK_BYTES: u64 = 1648;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Brine {
@@ -123,23 +123,15 @@ impl Default for Brine {
     }
 }
 
-/// One quivering control: a small plate vibrating at the surface. Drives the
-/// chromatic pull toward the pointer, a small pulsing bulge, and a continuous
-/// tremor wavetrain. Physical pixels; `grip` is the 0..=1 engagement.
 #[derive(Clone, Copy, Debug)]
 pub struct Tension {
     pub id: u64,
     pub rect: egui::Rect,
     pub pointer: egui::Pos2,
     pub grip: f32,
-    /// Per-control angular pulse rate. Zero means "use the global button
-    /// tremor" so old/default seeds stay compact.
     pub omega: f32,
 }
 
-/// A raised pane in the water. Surface panes are image tiles hauled up to the
-/// air; shallow panes are readable UI glass just below the surface. Physical
-/// pixels; `grip` is the 0..=1 engagement.
 #[derive(Clone, Copy, Debug)]
 pub struct Lift {
     pub rect: egui::Rect,
@@ -179,9 +171,6 @@ impl Lift {
     }
 }
 
-/// One ring radiating from a plate's hull: the wavefront is an expanding
-/// iso-contour of the rect's SDF, so the plate's own face is never lensed.
-/// Physical pixels; `age` in seconds since the plunge.
 #[derive(Clone, Copy, Debug)]
 pub struct Splash {
     pub rect: egui::Rect,
@@ -203,9 +192,12 @@ impl SplashShape {
     }
 }
 
-/// A fingertip ripple inside the full-image viewer. Unlike `Splash`, this is
-/// a point disturbance living inside a bounded pond whose image rect reflects
-/// it.
+#[derive(Clone, Copy, Debug)]
+pub struct Raft {
+    pub rect: egui::Rect,
+    pub corners: [f32; 4],
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Touch {
     pub center: egui::Pos2,
@@ -213,10 +205,6 @@ pub struct Touch {
     pub amp: f32,
 }
 
-/// Everything the composite pass draws in one frame: the viewer veil, the
-/// hovered button's tension, the risen lift plates, and the splashes rippling
-/// across the water (whose surface is `water`, in physical px — the panel to
-/// its left is the shallows).
 pub struct Surge<'a> {
     pub dry: bool,
     pub veil: Option<Veil>,
@@ -225,6 +213,7 @@ pub struct Surge<'a> {
     pub water: egui::Rect,
     pub scroll_tilt: f32,
     pub splashes: &'a [Splash],
+    pub raft: Option<Raft>,
     pub viewer: egui::Rect,
     pub touches: &'a [Touch],
     /// Keep the persistent solver ticking while old energy decays, even after
@@ -237,29 +226,23 @@ pub struct Surge<'a> {
 }
 
 impl Surge<'_> {
-    /// Is the water disturbed at all? When false the frost pass is skipped.
     pub fn live(&self) -> bool {
         !self.dry
             && (self.veil.is_some()
                 || !self.tensions.is_empty()
                 || !self.lifts.is_empty()
                 || !self.splashes.is_empty()
+                || self.raft.is_some()
                 || !self.touches.is_empty()
                 || self.wake)
     }
 }
 
-/// Composite parameters, in physical pixels.
 #[derive(Clone, Copy, Debug)]
 pub struct Veil {
-    /// Rounded-rect cutouts kept sharp (viewer window; clicked tile + menu).
     pub cuts: [Cut; 2],
-    /// 0..=1 mix toward the frosted backdrop.
     pub strength: f32,
-    /// How hard the frosted region is dimmed toward black.
     pub dim: f32,
-    /// 0..=1 share of blur in the backdrop; at zero the Kawase chain is skipped
-    /// entirely and the veil is a pure dim.
     pub blur: f32,
 }
 
@@ -914,6 +897,15 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
         brine.r_wall,
         brine.shore_feather,
     ]);
+    if let Some(raft) = surge.raft {
+        lanes[404..408].copy_from_slice(&[
+            raft.rect.min.x,
+            raft.rect.min.y,
+            raft.rect.max.x,
+            raft.rect.max.y,
+        ]);
+        lanes[408..412].copy_from_slice(&raft.corners);
+    }
     let mut bytes = [0_u8; MASK_BYTES as usize];
     for (slot, lane) in lanes.iter().enumerate() {
         bytes[slot * 4..slot * 4 + 4].copy_from_slice(&lane.to_le_bytes());
@@ -1010,19 +1002,16 @@ struct Mask {
     r_panel: f32,
     r_wall: f32,
     shore_feather: f32,
+    raft_rect: vec4f,
+    raft_corners: vec4f,
 }
 
-// touch.xy = pointer, touch.z = grip, touch.w = optional angular pulse rate.
 struct Quiver { rect: vec4f, touch: vec4f }
 
-// vitals.x = age seconds, vitals.y = amplitude px, vitals.z = shape.
 struct Splash { rect: vec4f, vitals: vec4f }
 
-// wave.xy = center, wave.z = age seconds, wave.w = amplitude px.
 struct Touch { wave: vec4f }
 
-// The water's chemistry lives in the mask's brine block (runtime-tunable);
-// only the rounded-rect corner radius is baked in.
 const LIFT_RADIUS: f32 = 3.0;
 const PLATE_FEATHER: f32 = 6.0;
 const PLATE_LIFT_GAIN: f32 = 2.0;
@@ -1040,7 +1029,6 @@ const FIELD_FLOW_CEIL: f32 = 18.0;
 @group(0) @binding(3) var<uniform> mask: Mask;
 @group(0) @binding(4) var water_tex: texture_2d<f32>;
 
-// Signed distance to a rounded rect: negative inside, in pixels.
 fn sd_cut(px: vec2f, rect_min: vec2f, rect_max: vec2f, radius: f32) -> f32 {
     let center = (rect_min + rect_max) * 0.5;
     let half_size = (rect_max - rect_min) * 0.5 - radius;
@@ -1048,17 +1036,12 @@ fn sd_cut(px: vec2f, rect_min: vec2f, rect_max: vec2f, radius: f32) -> f32 {
     return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - radius;
 }
 
-// Shore crossing gain: full strength on the source's side of the panel
-// shelf, a faint transmitted remnant across the depth step.
 fn crossing(shore_px: f32, src_x: f32) -> f32 {
     let src_water = step(mask.water_min.x, src_x);
     let same = 1.0 - abs(shore_px - src_water);
     return mix(mask.t_panel, 1.0, same);
 }
 
-// Split a single physical refraction vector through the booru-fluid's
-// wavelength-dependent index of refraction. There is one water surface; RGB
-// merely bend through it by slightly different amounts.
 fn prism(flow: vec2f) -> mat3x2f {
     let g = flow * mask.refract_px;
     let spread = mask.ior_spread;
@@ -1069,9 +1052,6 @@ fn finite(x: f32) -> bool {
     return x == x && abs(x) < 1e20;
 }
 
-// C¹ island membership from a signed distance field: 1 well inside, 0 outside,
-// and smooth across the shore. Every plate/wave operation consumes this
-// instead of step tests, so field composition is order-independent.
 fn island(sd: f32) -> f32 {
     return 1.0 - smoothstep(-PLATE_FEATHER, PLATE_FEATHER, sd);
 }
@@ -1106,7 +1086,6 @@ fn quiver_omega(q: Quiver) -> f32 {
     return select(mask.tremor_omega, q.touch.w, q.touch.w > 0.0);
 }
 
-// Fingertip point disturbance inside the viewer pond.
 fn touch_flow(px: vec2f, center: vec2f, age: f32, amp: f32) -> vec2f {
     let zero = vec2f(0.0);
     let ray = px - center;
@@ -1156,18 +1135,12 @@ fn composite(in: VsOut) -> @location(0) vec4f {
     let px = in.uv * size;
     let shore_px = smoothstep(-mask.shore_feather, mask.shore_feather, px.x - mask.water_min.x);
 
-    // The veil's sharp cutouts are dry land: no wave or pull reaches the
-    // viewed image (or the tag menu). 0 inside a cut, 1 in open water.
     let dist = min(
         sd_cut(px, mask.a_min, mask.a_max, mask.radius_a),
         sd_cut(px, mask.b_min, mask.b_max, mask.radius_b),
     );
     let outside = smoothstep(-1.0, 1.0, dist);
 
-    // Plates at the surface: image lifts (big) and button quivers (small,
-    // pulsing at the tremor rate). Achromatic — a surfaced plate is dry.
-    // They superpose as smooth islands; no step-function holes, no ordering
-    // dependence, no wavefront getting guillotined by a tile edge.
     var flow_num = vec2f(0.0);
     var tint_num = 0.0;
     var plate_mass = 0.0;
@@ -1209,8 +1182,6 @@ fn composite(in: VsOut) -> @location(0) vec4f {
     let tint = 1.0 + tint_num / max(plate_mass, 1e-4) * plate_lift;
     let dry = outside * exp(-PLATE_DRY_GAIN * plate_mass);
 
-    // Persistent background water: the compute pass owns the height field;
-    // composite samples its slope and keeps only local meniscus pulls here.
     var water_flow = field_flow(px) * crossing(shore_px, px.x);
     for (var i = 0u; i < 4u; i = i + 1u) {
         let q = mask.quivers[i];
@@ -1254,9 +1225,6 @@ fn composite(in: VsOut) -> @location(0) vec4f {
         sd_cut(px, mask.viewer_min, mask.viewer_max, 0.0),
     );
 
-    // One wavelength-split sampler: lift flow achromatic, waves and tension
-    // chromatic. Background waves halt inside veil cutouts; viewer touches
-    // are a separate bounded pond inside the full image.
     let lift_flow = flow * outside;
     let wet = prism(water_flow) * dry + prism(viewer_flow) * viewer_wet;
     let uv_r = in.uv + (lift_flow + wet[0]) / size;
@@ -1269,8 +1237,6 @@ fn composite(in: VsOut) -> @location(0) vec4f {
     let sharp = vec4f(vec3f(r, g, b) * mix(1.0, tint, outside), a);
 
     let blurred = textureSample(blur_tex, comp_samp, in.uv);
-    // Feather inward (fully frosted at the boundary) so the cutout's own
-    // border hides the transition and no sharp fringe leaks outside.
     let base = mix(sharp, blurred, mask.blur);
     let frosted = vec4f(base.rgb * mask.dim, base.a);
     let veiled = mix(sharp, frosted, mask.strength);
@@ -1325,6 +1291,8 @@ struct Mask {
     r_panel: f32,
     r_wall: f32,
     shore_feather: f32,
+    raft_rect: vec4f,
+    raft_corners: vec4f,
 }
 
 struct Quiver { rect: vec4f, touch: vec4f }
@@ -1344,6 +1312,7 @@ const SOURCE_CEIL: f32 = 72.0;
 const H_CEIL: f32 = 48.0;
 const V_CEIL: f32 = 1440.0;
 const TILT_CEIL: f32 = 36.0;
+const RAFT_STIFFNESS: f32 = 220.0;
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var dst_tex: texture_storage_2d<rgba16float, write>;
@@ -1460,6 +1429,24 @@ fn tilt_drive(px: vec2f, h: f32) -> f32 {
     return (desired - h) * max(mask.tilt_gain, 0.0) * x_gate * y_gate;
 }
 
+fn raft_height(px: vec2f) -> f32 {
+    let r = mask.raft_rect;
+    let size = r.zw - r.xy;
+    if (size.x <= 1.0 || size.y <= 1.0) {
+        return 0.0;
+    }
+    let uv = clamp((px - r.xy) / size, vec2f(0.0), vec2f(1.0));
+    let top = mix(mask.raft_corners.x, mask.raft_corners.y, uv.x);
+    let bottom = mix(mask.raft_corners.w, mask.raft_corners.z, uv.x);
+    let sheet = mix(top, bottom, uv.y);
+    let gate = island(sd_cut(px, r.xy, r.zw, LIFT_RADIUS));
+    return sheet * gate;
+}
+
+fn raft_drive(px: vec2f, h: f32) -> f32 {
+    return (raft_height(px) - h) * RAFT_STIFFNESS;
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn step(@builtin(global_invocation_id) gid: vec3u) {
     let dims_u = textureDimensions(src_tex);
@@ -1485,7 +1472,7 @@ fn step(@builtin(global_invocation_id) gid: vec3u) {
     var v = here.y
         + c * c * lap * DT
         + source(px) * mask.source_gain * IMPULSE_GAIN
-        + tilt_drive(px, h) * DT;
+        + (tilt_drive(px, h) + raft_drive(px, h)) * DT;
     v = v * exp(-DT / max(mask.wave_damp, 0.08)) * mix(0.985, 1.0, shelf);
 
     let block = obstacle(px);

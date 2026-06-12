@@ -43,7 +43,7 @@ mod water;
 use refresh::{AsyncPulse, PulseGate};
 use scroll::TrayTilt;
 use viewer::ZoomGate;
-use water::{LiftPlate, Plunge, TouchPlunge};
+use water::{LiftPlate, LoadingRaft, Plunge, TouchPlunge};
 
 const RESULT_LIMIT: usize = 360;
 const EVENT_BUDGET: usize = 12;
@@ -53,6 +53,8 @@ const MIN_IMAGES_PER_ROW: u16 = 1;
 const MAX_IMAGES_PER_ROW: u16 = 12;
 const MIN_TILE_EDGE: f32 = 72.0;
 const GAP: f32 = 12.0;
+const LOADING_CARD_W: f32 = 250.0;
+const LOADING_CARD_H: f32 = 150.0;
 const VIEWER_CHROME: f32 = 40.0;
 const MAX_GROUP_DEPTH: usize = 8;
 const PLATE_PAD: f32 = 4.0;
@@ -187,6 +189,7 @@ pub struct Bayonet {
     splash_memo: Option<(PostId, egui::Rect)>,
     plunges: Vec<Plunge>,
     viewer_touches: Vec<TouchPlunge>,
+    loading_raft: LoadingRaft,
     water_until: Option<Instant>,
     viewer_pond: egui::Rect,
     water_rect: egui::Rect,
@@ -294,6 +297,7 @@ impl Bayonet {
             splash_memo: None,
             plunges: Vec::new(),
             viewer_touches: Vec::new(),
+            loading_raft: LoadingRaft::new(),
             water_until: None,
             viewer_pond: egui::Rect::ZERO,
             water_rect: egui::Rect::ZERO,
@@ -886,7 +890,8 @@ impl Bayonet {
         let row_height = tile + GAP;
         let mut menu_opened = false;
         self.hover_tile = None;
-        self.water_rect = ui.max_rect();
+        let arena = ui.max_rect();
+        self.water_rect = arena;
         let scroll = egui::ScrollArea::vertical().show_rows(ui, row_height, rows, |ui, range| {
             ui.spacing_mut().item_spacing.x = GAP;
             for row in range {
@@ -899,9 +904,64 @@ impl Bayonet {
                 });
             }
         });
+        if posts.is_empty() {
+            self.loading_card(ui, arena);
+        } else {
+            self.loading_raft.hide();
+        }
         self.heave(ui.ctx(), scroll.state.offset.y, ui.ctx().pixels_per_point());
         self.hit.posts = posts;
         menu_opened
+    }
+
+    fn loading_card(&mut self, ui: &mut egui::Ui, arena: egui::Rect) {
+        let size = egui::vec2(
+            LOADING_CARD_W.min((arena.width() - 24.0).max(120.0)),
+            LOADING_CARD_H.min((arena.height() - 24.0).max(96.0)),
+        );
+        let rect = egui::Rect::from_center_size(arena.center(), size);
+        if self.water_ui.wet() {
+            self.loading_raft.show(ui.ctx(), rect);
+            self.arm_water();
+        } else {
+            self.loading_raft.hide();
+        }
+
+        let painter = ui.painter();
+        let _fill = painter.rect_filled(rect, 2.0, chrome::SURFACE);
+        let _stroke = painter.rect_stroke(
+            rect,
+            2.0,
+            egui::Stroke::new(1.0, chrome::EDGE_STRONG),
+            egui::StrokeKind::Inside,
+        );
+        let mut at = rect.min + egui::vec2(14.0, 15.0);
+        let _title = painter.text(
+            at,
+            egui::Align2::LEFT_TOP,
+            "INDEXING",
+            egui::TextStyle::Button.resolve(ui.style()),
+            chrome::HOT,
+        );
+        at.y += 30.0;
+        for line in self.loading_status_lines() {
+            let _line = painter.text(
+                at,
+                egui::Align2::LEFT_TOP,
+                line,
+                egui::TextStyle::Small.resolve(ui.style()),
+                chrome::MUTED,
+            );
+            at.y += 22.0;
+        }
+    }
+
+    fn loading_status_lines(&self) -> [String; 3] {
+        [
+            elide_status(&self.warm_status, 34),
+            elide_status(&self.crawl_status, 34),
+            elide_status(&self.cache_status, 34),
+        ]
     }
 
     fn tile(&mut self, ui: &mut egui::Ui, post: &PostRecord, tile: f32) -> bool {
@@ -1319,6 +1379,18 @@ fn paint_tile_text(ui: &egui::Ui, rect: egui::Rect, text: &str) {
         egui::TextStyle::Body.resolve(ui.style()),
         ui.visuals().text_color(),
     );
+}
+
+fn elide_status(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    for (slot, ch) in text.chars().enumerate() {
+        if slot + 1 >= max {
+            out.push('…');
+            return out;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn fit(image: egui::Vec2, bounds: egui::Vec2) -> egui::Vec2 {
