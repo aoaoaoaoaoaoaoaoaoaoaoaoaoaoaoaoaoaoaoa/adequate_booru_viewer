@@ -11,7 +11,7 @@ use std::{
 
 use crate::{
     chrome,
-    config::{Config, FilterConfig, FilterName, QueryConfig, SavedFilter, Slate},
+    config::{Config, FilterConfig, FilterName, QueryConfig, SavedFilter, Slate, WaterMode},
     filter_bank::Bank,
     frost::{Cut, Veil},
     index::{CacheStats, Index, TagSuggestion},
@@ -91,19 +91,39 @@ struct Surf {
     tau_fall: f32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WaterUi {
-    Dry,
-    Wet,
+#[derive(Clone, Copy, Debug)]
+struct Drench {
+    amp: f32,
+    optics: f32,
+    decay: f32,
 }
 
-impl WaterUi {
-    fn from_slate(wet: bool) -> Self {
-        if wet { Self::Wet } else { Self::Dry }
+impl WaterMode {
+    fn drench(self) -> Drench {
+        match self {
+            Self::Dry | Self::Wet => Drench {
+                amp: 1.0,
+                optics: 1.0,
+                decay: 1.0,
+            },
+            Self::ReallyWet => Drench {
+                amp: 2.0,
+                optics: 2.0,
+                decay: 2.0,
+            },
+        }
     }
+}
 
-    fn wet(self) -> bool {
-        matches!(self, Self::Wet)
+impl Drench {
+    fn brine(self, mut brine: crate::frost::Brine) -> crate::frost::Brine {
+        brine.refract_px *= self.optics;
+        brine.ior_spread *= self.optics;
+        brine.meniscus_px *= self.amp;
+        brine.tremor_amp *= self.amp;
+        brine.wave_damp *= self.decay;
+        brine.height_retention = 1.0 - (1.0 - brine.height_retention) / self.decay;
+        brine
     }
 }
 
@@ -177,7 +197,7 @@ pub struct Bayonet {
     water_until: Option<Instant>,
     viewer_pond: egui::Rect,
     water_rect: egui::Rect,
-    water_ui: WaterUi,
+    water_mode: WaterMode,
     scroll: TrayTilt,
     scroll_tilt: f32,
     brine: crate::frost::Brine,
@@ -286,7 +306,7 @@ impl Bayonet {
             water_until: None,
             viewer_pond: egui::Rect::ZERO,
             water_rect: egui::Rect::ZERO,
-            water_ui: WaterUi::from_slate(slate.water_wet),
+            water_mode: slate.water,
             scroll: TrayTilt::default(),
             scroll_tilt: 0.0,
             brine: crate::frost::Brine::default(),
@@ -352,11 +372,19 @@ impl Bayonet {
 
     /// The water chemistry for the compose pass.
     pub fn brine(&self) -> crate::frost::Brine {
-        self.brine
+        self.water_mode.drench().brine(self.brine)
     }
 
     pub fn water_wet(&self) -> bool {
-        self.water_ui.wet()
+        self.water_mode.wet()
+    }
+
+    fn water_amp(&self) -> f32 {
+        self.water_mode.drench().amp
+    }
+
+    fn viewer_life(&self) -> f32 {
+        self.surf.viewer_life * self.water_mode.drench().decay
     }
 
     pub fn quiver_release(&self) -> f32 {
@@ -1128,7 +1156,7 @@ impl Bayonet {
             },
             sort: self.sort,
             images_per_row: self.images_per_row,
-            water_wet: self.water_ui.wet(),
+            water: self.water_mode,
             viewer_tags_open: self.viewer_tags_open,
         };
         let written = config

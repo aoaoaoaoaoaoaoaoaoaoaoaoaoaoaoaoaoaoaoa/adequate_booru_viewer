@@ -225,14 +225,16 @@ impl Bayonet {
 
     fn ui_panel(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
-        let wet = self.water_ui.wet();
+        let dry = self.water_mode == WaterMode::Dry;
+        let wet = self.water_mode == WaterMode::Wet;
+        let really = self.water_mode == WaterMode::ReallyWet;
         let _wet = ui.horizontal_wrapped(|ui| {
-            if chrome::glyph(ui, "DRY", !wet)
+            if chrome::glyph(ui, "DRY", dry)
                 .on_hover_text("disable the water shader entirely")
                 .clicked()
-                && wet
+                && !dry
             {
-                self.water_ui = WaterUi::Dry;
+                self.water_mode = WaterMode::Dry;
                 changed = true;
             }
             if chrome::glyph(ui, "WET", wet)
@@ -240,7 +242,15 @@ impl Bayonet {
                 .clicked()
                 && !wet
             {
-                self.water_ui = WaterUi::Wet;
+                self.water_mode = WaterMode::Wet;
+                changed = true;
+            }
+            if chrome::glyph(ui, "REALLY WET", really)
+                .on_hover_text("stronger, slower, wetter water")
+                .clicked()
+                && !really
+            {
+                self.water_mode = WaterMode::ReallyWet;
                 changed = true;
             }
         });

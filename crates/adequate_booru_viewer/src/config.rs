@@ -104,10 +104,6 @@ fn shelf_open_default() -> bool {
     true
 }
 
-fn water_wet_default() -> bool {
-    true
-}
-
 /// Persistent workbench state (XDG state dir): the snapshot the app keeps of
 /// itself — scratch query, selections, sliders, folder collapse. Nothing here
 /// is user-authored; losing it must never lose user intent.
@@ -119,8 +115,7 @@ pub struct Slate {
     pub query: QueryConfig,
     pub sort: Sort,
     pub images_per_row: u16,
-    #[serde(default = "water_wet_default")]
-    pub water_wet: bool,
+    pub water: WaterMode,
     pub viewer_tags_open: bool,
 }
 
@@ -132,7 +127,7 @@ impl Default for Slate {
             query: QueryConfig::default(),
             sort: Sort::Score,
             images_per_row: 5,
-            water_wet: true,
+            water: WaterMode::Wet,
             viewer_tags_open: false,
         }
     }
@@ -168,6 +163,21 @@ impl SavedFilter {
             tree,
             active_group,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaterMode {
+    Dry,
+    #[default]
+    Wet,
+    ReallyWet,
+}
+
+impl WaterMode {
+    pub fn wet(self) -> bool {
+        self != Self::Dry
     }
 }
 
@@ -262,7 +272,7 @@ mod tests {
             },
             sort: Sort::Newest,
             images_per_row: 7,
-            water_wet: false,
+            water: WaterMode::ReallyWet,
             viewer_tags_open: true,
         };
         let text = toml::to_string_pretty(&slate)?;
@@ -270,7 +280,7 @@ mod tests {
         assert_eq!(roundtrip.query.tree, query);
         assert!(roundtrip.closed_folders.contains("trips"));
         assert_eq!(roundtrip.images_per_row, 7);
-        assert!(!roundtrip.water_wet);
+        assert_eq!(roundtrip.water, WaterMode::ReallyWet);
         assert!(roundtrip.viewer_tags_open);
         Ok(())
     }
@@ -278,7 +288,7 @@ mod tests {
     #[test]
     fn slate_defaults_to_wet() {
         let slate = Slate::default();
-        assert!(slate.water_wet);
+        assert_eq!(slate.water, WaterMode::Wet);
         assert!(!slate.viewer_tags_open);
     }
 
@@ -293,7 +303,7 @@ images_per_row = 5
 active_group = []
 "#,
         )?;
-        assert!(slate.water_wet);
+        assert_eq!(slate.water, WaterMode::Wet);
         assert!(!slate.viewer_tags_open);
         Ok(())
     }

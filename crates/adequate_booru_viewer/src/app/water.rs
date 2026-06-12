@@ -4,8 +4,8 @@ const PLUNGE_SOURCE_LIFE: f32 = 0.24;
 const TOOLTIP_GRIP: f32 = 0.72;
 const HOVER_BUMP_AMP: f32 = 0.18;
 const GROUP_SELECT_AMP: f32 = 0.45;
-const FOLD_OPEN_AMP: f32 = -0.32;
-const FOLD_CLOSE_AMP: f32 = 0.42;
+const FOLD_OPEN_AMP: f32 = -0.72;
+const FOLD_CLOSE_AMP: f32 = 0.92;
 const WATER_WAKE: Duration = Duration::from_secs(14);
 const RAFT_RATE: f32 = 1.7;
 const RAFT_RISE: Duration = Duration::from_millis(70);
@@ -110,7 +110,7 @@ impl Bayonet {
             offset,
             pixels_per_point,
             dt,
-            self.surf.scroll_coupling,
+            self.surf.scroll_coupling * self.water_amp(),
             self.surf.scroll_tau,
         );
         if self.scroll_tilt.abs() > 0.015 {
@@ -125,6 +125,7 @@ impl Bayonet {
     }
 
     fn plunge_as(&mut self, rect: egui::Rect, amp: f32, shape: crate::frost::SplashShape) {
+        let amp = amp * self.water_amp();
         if amp.abs() <= f32::EPSILON {
             return;
         }
@@ -179,7 +180,7 @@ impl Bayonet {
         self.viewer_touches.push(TouchPlunge {
             center,
             born: Instant::now(),
-            amp: self.surf.viewer_amp,
+            amp: self.surf.viewer_amp * self.water_amp(),
         });
         self.arm_water();
     }
@@ -229,7 +230,15 @@ impl Bayonet {
                 }
             })
             .collect();
-        let raft = self.loading_raft.source(ctx, pixels_per_point);
+        let raft = self
+            .loading_raft
+            .source(ctx, pixels_per_point)
+            .map(|mut raft| {
+                for corner in &mut raft.corners {
+                    *corner *= self.water_amp();
+                }
+                raft
+            });
         (scale(surface), self.scroll_tilt, splashes, raft)
     }
 
@@ -238,7 +247,7 @@ impl Bayonet {
         ctx: &egui::Context,
         pixels_per_point: f32,
     ) -> (egui::Rect, Vec<crate::frost::Touch>) {
-        let life = self.surf.viewer_life;
+        let life = self.viewer_life();
         self.viewer_touches.retain(|touch| {
             self.zoom.is_some() && retire(touch.born.elapsed().as_secs_f32(), life) > 0.0
         });

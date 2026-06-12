@@ -23,7 +23,7 @@ impl Bayonet {
             CARD_H.min((arena.height() - 24.0).max(96.0)),
         );
         let rect = egui::Rect::from_center_size(arena.center(), size);
-        if self.water_ui.wet() {
+        if self.water_mode.wet() {
             self.loading_raft.show(ui.ctx(), rect);
             self.arm_water();
         } else {
