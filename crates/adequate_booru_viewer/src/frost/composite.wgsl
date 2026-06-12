@@ -143,8 +143,11 @@ fn mosaic(px: vec2f) -> vec3f {
     let n = hash21(c);
     let m = hash21(c + vec2f(19.7, 3.1));
     let pulse = (0.5 + 0.5 * sin(c.x * 0.67 + c.y * 1.21 + mask.tide * 0.13)) * 0.014;
-    let tile = vec3f(0.084, 0.063, 0.039) + vec3f(0.050, 0.038, 0.022) * n + vec3f(pulse) + vec3f(0.018, 0.010, 0.003) * (m - 0.5);
-    return mix(tile, vec3f(0.030, 0.024, 0.018), grout * 0.72);
+    let tile = vec3f(0.115, 0.087, 0.052)
+        + vec3f(0.070, 0.052, 0.030) * n
+        + vec3f(pulse * 1.3)
+        + vec3f(0.026, 0.015, 0.005) * (m - 0.5);
+    return mix(tile, vec3f(0.045, 0.036, 0.026), grout * 0.68);
 }
 
 fn palette_gate(rgb: vec3f, swatch: vec3f, reach: f32) -> f32 {
@@ -155,7 +158,7 @@ fn pool_floor(rgb: vec3f, px: vec2f, flow: vec2f, shore_px: f32) -> vec3f {
     let page = palette_gate(rgb, vec3f(0.047, 0.043, 0.035), 0.035);
     let surface = palette_gate(rgb, vec3f(0.067, 0.059, 0.047), 0.026) * 0.45;
     let gate = shore_px * max(page, surface);
-    return mix(rgb, mosaic(px + flow * 1.6), gate * 0.48);
+    return mix(rgb, mosaic(px + flow * 1.6), gate * 0.58);
 }
 
 fn finite(x: f32) -> bool {
@@ -344,7 +347,9 @@ fn composite(in: VsOut) -> @location(0) vec4f {
     let g = textureSample(sharp_tex, comp_samp, uv_g).g;
     let b = textureSample(sharp_tex, comp_samp, uv_b).b;
     let a = textureSample(sharp_tex, comp_samp, in.uv + lift_flow / size).a;
-    let floor_gate = shore_px * outside * (1.0 - viewer_wet);
+    let raft_size = mask.raft_rect.zw - mask.raft_rect.xy;
+    let loading_gate = select(0.0, 1.0, min(raft_size.x, raft_size.y) > 1.0);
+    let floor_gate = shore_px * outside * (1.0 - viewer_wet) * loading_gate;
     let floored = pool_floor(vec3f(r, g, b), px, water_flow, floor_gate);
     let sharp = vec4f(floored * mix(1.0, tint, outside), a);
 

@@ -38,72 +38,10 @@ impl Bayonet {
             egui::Stroke::new(1.0, chrome::EDGE_STRONG),
             egui::StrokeKind::Inside,
         );
-        let title_font = egui::FontId::new(25.0, egui::FontFamily::Proportional);
-        let detail_font = egui::FontId::new(38.0, egui::FontFamily::Proportional);
-        let LoadingCard { title, detail } = self.loading_state();
-        let title_galley =
-            painter.layout_no_wrap(title.to_owned(), title_font.clone(), chrome::HOT);
-        let detail_galley =
-            painter.layout_no_wrap(detail.clone(), detail_font.clone(), chrome::TEXT);
-        let title_at = egui::pos2(
-            rect.center().x - title_galley.size().x * 0.5,
-            rect.top() + 28.0,
-        );
-        let detail_at = egui::pos2(
-            rect.center().x - detail_galley.size().x * 0.5,
-            rect.center().y + 7.0,
-        );
-        let _title = painter.text(
-            title_at,
-            egui::Align2::LEFT_TOP,
-            title,
-            title_font,
-            chrome::HOT,
-        );
-        let _detail = painter.text(
-            detail_at,
-            egui::Align2::LEFT_TOP,
-            detail,
-            detail_font,
-            chrome::TEXT,
-        );
-    }
-
-    fn loading_state(&self) -> LoadingCard {
-        if self.warm_state == WarmState::Exhausted {
-            LoadingCard {
-                title: "NO MATCHES",
-                detail: "0 HITS".to_owned(),
-            }
-        } else {
-            LoadingCard {
-                title: "LOADING",
-                detail: query_warm_percent(self.warm_state, self.warm_next_page),
-            }
-        }
-    }
-}
-
-struct LoadingCard {
-    title: &'static str,
-    detail: String,
-}
-
-fn query_warm_percent(state: WarmState, next_page: u32) -> String {
-    if state == WarmState::Exhausted {
-        return "100%".to_owned();
-    }
-    let pages = next_page.saturating_sub(1);
-    rough_percent(100.0 * pages as f32 / DANBOORU_SEARCH_PAGE_LIMIT as f32)
-}
-
-fn rough_percent(value: f32) -> String {
-    let value = value.clamp(0.0, 100.0);
-    if value < 1.0 {
-        format!("{value:.4}%")
-    } else if value < 10.0 {
-        format!("{value:.3}%")
-    } else {
-        format!("{value:.2}%")
+        let font = egui::FontId::new(36.0, egui::FontFamily::Proportional);
+        let text = "LOADING";
+        let galley = painter.layout_no_wrap(text.to_owned(), font.clone(), chrome::HOT);
+        let at = rect.center() - galley.size() * 0.5;
+        let _text = painter.text(at, egui::Align2::LEFT_TOP, text, font, chrome::HOT);
     }
 }
