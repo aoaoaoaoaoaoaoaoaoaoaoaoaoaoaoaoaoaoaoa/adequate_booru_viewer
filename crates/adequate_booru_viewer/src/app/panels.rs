@@ -39,12 +39,14 @@ impl Bayonet {
         let _row = ui.horizontal_wrapped(|ui| {
             let _label = ui.label("complete");
             for suggestion in suggestions {
-                if ui
-                    .small_button(tag_chroma::text(
+                if chrome::shallow_small(
+                    ui,
+                    tag_chroma::text(
                         format!("{} ({})", suggestion.tag, suggestion.posts),
                         suggestion.kind,
-                    ))
-                    .clicked()
+                    ),
+                )
+                .clicked()
                 {
                     picked = Some(suggestion.clone());
                 }

@@ -174,24 +174,36 @@ pub fn glyph_button(text: impl Into<String>, selected: bool) -> egui::Button<'st
 /// the refraction reads as "on" the instant the pointer lands rather than
 /// creeping up linearly.
 const TENSION_TIME: f32 = 0.09;
+const SHALLOW_GRIP: f32 = 0.42;
 
 /// Puts a hovered widget "in tension": records a seed the frost composite
 /// turns into a refraction toward the pointer (blue bent hardest). The seed
 /// is per-frame temp data; the boiler consumes it after the UI pass.
 pub fn tension(ui: &egui::Ui, response: &egui::Response) {
-    let hovered = response.hovered();
+    tension_with_grip(ui, response, 1.0);
+}
+
+/// A gentler plate, for text-like controls that should breathe without
+/// becoming full buttons in the water.
+pub fn shallow_tension(ui: &egui::Ui, response: &egui::Response) {
+    tension_with_grip(ui, response, SHALLOW_GRIP);
+}
+
+fn tension_with_grip(ui: &egui::Ui, response: &egui::Response, grip_scale: f32) {
+    let held = response.hovered() || response.has_focus();
     let grip = ui.ctx().animate_bool_with_time_and_easing(
         response.id.with("tension"),
-        hovered,
+        held,
         TENSION_TIME,
         egui::emath::easing::cubic_out,
-    );
+    ) * grip_scale;
     if grip <= 0.0 {
         return;
     }
-    let Some(pointer) = ui.ctx().pointer_latest_pos() else {
-        return;
-    };
+    let pointer = ui
+        .ctx()
+        .pointer_latest_pos()
+        .unwrap_or_else(|| response.rect.center());
     ui.ctx().data_mut(|data| {
         data.get_temp_mut_or_default::<Vec<crate::frost::Tension>>(egui::Id::new("tension-field"))
             .push(crate::frost::Tension {
@@ -229,6 +241,12 @@ pub fn icon(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
 pub fn small(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
     let response = ui.small_button(RichText::new(text.into()));
     tension(ui, &response);
+    response
+}
+
+pub fn shallow_small(ui: &mut egui::Ui, text: RichText) -> egui::Response {
+    let response = ui.small_button(text);
+    shallow_tension(ui, &response);
     response
 }
 

@@ -66,7 +66,7 @@ pub const LIFT_SLOTS: usize = 4;
 
 /// How many splashes ride the water at once; the weakest old ring dies first.
 pub const SPLASH_SLOTS: usize = 32;
-/// How many button quivers (hovered + still fading) the mask carries.
+/// How many small control quivers (hovered + still fading) the mask carries.
 pub const QUIVER_SLOTS: usize = 4;
 /// Hard ceiling on the lift bulge. The shader also smooth-blends plate islands,
 /// so this is a taste bound rather than a brittle overlap guard.
@@ -156,7 +156,7 @@ impl Default for Brine {
     }
 }
 
-/// One quivering button: a small plate vibrating at the surface. Drives the
+/// One quivering control: a small plate vibrating at the surface. Drives the
 /// chromatic pull toward the pointer, a small pulsing bulge, and a continuous
 /// tremor wavetrain. Physical pixels; `grip` is the 0..=1 engagement.
 #[derive(Clone, Copy, Debug)]
@@ -167,12 +167,46 @@ pub struct Tension {
     pub grip: f32,
 }
 
-/// Hover lift: a grid tile hauled to the surface — its footprint bulges out
-/// over the neighbours and brightens as it nears the eye. Physical pixels.
+/// A raised pane in the water. Surface panes are image tiles hauled up to the
+/// air; shallow panes are readable UI glass just below the surface. Physical
+/// pixels; `grip` is the 0..=1 engagement.
 #[derive(Clone, Copy, Debug)]
 pub struct Lift {
     pub rect: egui::Rect,
     pub grip: f32,
+    pub depth: LiftDepth,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LiftDepth {
+    Surface,
+    Shallow,
+}
+
+impl Lift {
+    pub fn surface(rect: egui::Rect, grip: f32) -> Self {
+        Self {
+            rect,
+            grip,
+            depth: LiftDepth::Surface,
+        }
+    }
+
+    pub fn shallow(rect: egui::Rect, grip: f32) -> Self {
+        Self {
+            rect,
+            grip,
+            depth: LiftDepth::Shallow,
+        }
+    }
+
+    fn packed_grip(self) -> f32 {
+        let grip = self.grip.clamp(0.0, 1.0);
+        match self.depth {
+            LiftDepth::Surface => grip,
+            LiftDepth::Shallow => -grip,
+        }
+    }
 }
 
 /// One ring radiating from a plate's hull: the wavefront is an expanding
@@ -807,7 +841,7 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
             lift.rect.max.x,
             lift.rect.max.y,
         ]);
-        lanes[36 + slot] = lift.grip.clamp(0.0, 1.0);
+        lanes[36 + slot] = lift.packed_grip();
     }
     // quivers @ byte 160 (lane 40): rect, then pointer + grip + pad.
     for (slot, quiver) in surge.tensions.iter().take(QUIVER_SLOTS).enumerate() {
@@ -991,6 +1025,9 @@ const LIFT_RADIUS: f32 = 3.0;
 const PLATE_FEATHER: f32 = 6.0;
 const PLATE_LIFT_GAIN: f32 = 2.0;
 const PLATE_DRY_GAIN: f32 = 5.0;
+const SHALLOW_BULGE_GAIN: f32 = 0.18;
+const SHALLOW_BRIGHT_GAIN: f32 = 0.35;
+const SHALLOW_MASS_GAIN: f32 = 1.35;
 override FIELD_SCALE: f32 = 2.0;
 const FIELD_HEIGHT_CEIL: f32 = 48.0;
 const FIELD_FLOW_CEIL: f32 = 18.0;
@@ -1039,7 +1076,7 @@ fn field_obstacle(px: vec2f) -> f32 {
         island(sd_cut(px, mask.b_min, mask.b_max, mask.radius_b)),
     );
     for (var i = 0u; i < 4u; i = i + 1u) {
-        let g = mask.lift_grips[i];
+        let g = abs(mask.lift_grips[i]);
         if (g <= 0.0) {
             continue;
         }
@@ -1129,20 +1166,22 @@ fn composite(in: VsOut) -> @location(0) vec4f {
     var tint_num = 0.0;
     var plate_mass = 0.0;
     for (var i = 0u; i < 4u; i = i + 1u) {
-        let g = mask.lift_grips[i];
+        let raw_g = mask.lift_grips[i];
+        let g = abs(raw_g);
         if (g <= 0.0) {
             continue;
         }
+        let shallow = select(0.0, 1.0, raw_g < 0.0);
         let rect = mask.lift_rects[i];
-        let grow = mask.bulge_px * g;
+        let grow = mask.bulge_px * g * mix(1.0, SHALLOW_BULGE_GAIN, shallow);
         let emin = rect.xy - vec2f(grow);
         let emax = rect.zw + vec2f(grow);
         let erad = LIFT_RADIUS + grow;
         let bd = sd_cut(px, emin, emax, erad);
         let w = island(bd) * g;
         flow_num = flow_num + lift_warp(px, rect, grow) * w;
-        tint_num = tint_num + mask.lift_bright * g * w;
-        plate_mass = plate_mass + w;
+        tint_num = tint_num + mask.lift_bright * g * w * mix(1.0, SHALLOW_BRIGHT_GAIN, shallow);
+        plate_mass = plate_mass + w * mix(1.0, SHALLOW_MASS_GAIN, shallow);
     }
     for (var i = 0u; i < 4u; i = i + 1u) {
         let q = mask.quivers[i];
@@ -1341,7 +1380,7 @@ fn obstacle(px: vec2f) -> f32 {
         island(sd_cut(px, mask.b_min, mask.b_max, mask.radius_b)),
     );
     for (var i = 0u; i < 4u; i = i + 1u) {
-        let g = mask.lift_grips[i];
+        let g = abs(mask.lift_grips[i]);
         if (g <= 0.0) {
             continue;
         }

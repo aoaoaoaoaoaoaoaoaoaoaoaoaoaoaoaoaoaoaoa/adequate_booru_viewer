@@ -33,7 +33,7 @@ struct Spark;
 /// Earliest pending repaint deadline, shared with egui's repaint callback.
 type Alarm = Arc<Mutex<Option<Instant>>>;
 
-/// One button-plate oscillator in logical pixels. Egui temp data drives it
+/// One small control-plate oscillator in logical pixels. Egui temp data drives it
 /// while hovered; once contact leaves, it rings down under its own damping so
 /// quiver waves never snap off.
 #[derive(Clone, Copy)]
@@ -58,7 +58,7 @@ impl Quiver {
     }
 }
 
-/// Collects the frame's button-quiver seeds (left by `chrome::tension`) and
+/// Collects the frame's control-quiver seeds (left by `chrome::tension`) and
 /// evolves the persistent oscillator bank.
 fn take_tensions(
     ctx: &egui::Context,
@@ -173,6 +173,7 @@ impl Boiler {
             .handle_platform_output(&rig.window, output.platform_output);
         let primitives = self.ctx.tessellate(output.shapes, output.pixels_per_point);
         let veil = self.app.frost_veil(&self.ctx, output.pixels_per_point);
+        let tooltip_rects = tooltip_rects(&self.ctx);
         let tensions = take_tensions(
             &self.ctx,
             output.pixels_per_point,
@@ -184,7 +185,9 @@ impl Boiler {
             self.quiver_until = Some(Instant::now() + QUIVER_WAKE);
             rig.window.request_redraw();
         }
-        let lifts = self.app.frost_lift(&self.ctx, output.pixels_per_point);
+        let lifts = self
+            .app
+            .frost_lift(&self.ctx, output.pixels_per_point, &tooltip_rects);
         let (water, splashes) = self.app.frost_splashes(&self.ctx, output.pixels_per_point);
         let (viewer, touches) = self.app.frost_touches(&self.ctx, output.pixels_per_point);
         let quiver_wake = self
@@ -235,6 +238,16 @@ impl Boiler {
             rig.window.request_redraw();
         }
     }
+}
+
+fn tooltip_rects(ctx: &egui::Context) -> Vec<egui::Rect> {
+    ctx.memory(|mem| {
+        mem.layer_ids()
+            .filter(|layer| layer.order == egui::Order::Tooltip && mem.areas().is_visible(layer))
+            .filter_map(|layer| mem.area_rect(layer.id))
+            .filter(|rect| rect.is_positive())
+            .collect()
+    })
 }
 
 impl ApplicationHandler<Spark> for Boiler {

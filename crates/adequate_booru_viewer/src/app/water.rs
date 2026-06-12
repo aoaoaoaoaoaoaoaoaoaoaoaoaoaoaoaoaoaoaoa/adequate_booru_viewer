@@ -1,6 +1,7 @@
 use super::{scroll::SurgeEdge, *};
 
 const PLUNGE_SOURCE_LIFE: f32 = 0.24;
+const TOOLTIP_GRIP: f32 = 0.72;
 const WATER_WAKE: Duration = Duration::from_secs(14);
 
 impl Bayonet {
@@ -12,6 +13,7 @@ impl Bayonet {
         &mut self,
         ctx: &egui::Context,
         pixels_per_point: f32,
+        tooltip_rects: &[egui::Rect],
     ) -> Vec<crate::frost::Lift> {
         let dt = ctx.input(|input| input.stable_dt).clamp(0.0, 0.1);
         let hovered_id = self.hover_tile.map(|(id, _)| id);
@@ -56,17 +58,34 @@ impl Bayonet {
         if animating {
             ctx.request_repaint();
         }
-        self.lift_plates
+        let tooltip_slots = tooltip_rects.len().min(1);
+        let image_slots = crate::frost::LIFT_SLOTS.saturating_sub(tooltip_slots);
+        let mut image_plates = self
+            .lift_plates
             .iter()
             .filter(|plate| plate.grip > 0.0)
-            .map(|plate| crate::frost::Lift {
-                rect: egui::Rect::from_min_max(
-                    (plate.rect.min.to_vec2() * pixels_per_point).to_pos2(),
-                    (plate.rect.max.to_vec2() * pixels_per_point).to_pos2(),
-                ),
-                grip: plate.grip,
-            })
-            .collect()
+            .collect::<Vec<_>>();
+        image_plates.sort_by(|a, b| b.grip.total_cmp(&a.grip));
+
+        let scale = |rect: egui::Rect| {
+            egui::Rect::from_min_max(
+                (rect.min.to_vec2() * pixels_per_point).to_pos2(),
+                (rect.max.to_vec2() * pixels_per_point).to_pos2(),
+            )
+        };
+        let mut lifts = image_plates
+            .into_iter()
+            .take(image_slots)
+            .map(|plate| crate::frost::Lift::surface(scale(plate.rect), plate.grip))
+            .collect::<Vec<_>>();
+        lifts.extend(
+            tooltip_rects
+                .iter()
+                .take(tooltip_slots)
+                .copied()
+                .map(|rect| crate::frost::Lift::shallow(scale(rect), TOOLTIP_GRIP)),
+        );
+        lifts
     }
 
     /// Scroll inertia: the scrolled plate shears a trapped shallow fluid sheet.
