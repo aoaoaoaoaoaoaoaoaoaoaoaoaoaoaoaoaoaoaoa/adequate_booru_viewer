@@ -115,6 +115,8 @@ pub struct Slate {
     pub query: QueryConfig,
     pub sort: Sort,
     pub images_per_row: u16,
+    pub water_wet: bool,
+    pub water_hq: bool,
 }
 
 impl Default for Slate {
@@ -125,6 +127,8 @@ impl Default for Slate {
             query: QueryConfig::default(),
             sort: Sort::Score,
             images_per_row: 5,
+            water_wet: true,
+            water_hq: false,
         }
     }
 }
@@ -253,13 +257,24 @@ mod tests {
             },
             sort: Sort::Newest,
             images_per_row: 7,
+            water_wet: false,
+            water_hq: true,
         };
         let text = toml::to_string_pretty(&slate)?;
         let roundtrip = toml::from_str::<Slate>(&text)?;
         assert_eq!(roundtrip.query.tree, query);
         assert!(roundtrip.closed_folders.contains("trips"));
         assert_eq!(roundtrip.images_per_row, 7);
+        assert!(!roundtrip.water_wet);
+        assert!(roundtrip.water_hq);
         Ok(())
+    }
+
+    #[test]
+    fn slate_defaults_to_wet_standard_quality() {
+        let slate = Slate::default();
+        assert!(slate.water_wet);
+        assert!(!slate.water_hq);
     }
 
     #[test]

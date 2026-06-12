@@ -87,6 +87,51 @@ struct Surf {
     tau_fall: f32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WaterUi {
+    Dry,
+    Wet(WaterQuality),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WaterQuality {
+    Standard,
+    High,
+}
+
+impl WaterUi {
+    fn from_slate(wet: bool, hq: bool) -> Self {
+        if wet {
+            Self::Wet(if hq {
+                WaterQuality::High
+            } else {
+                WaterQuality::Standard
+            })
+        } else {
+            Self::Dry
+        }
+    }
+
+    fn wet(self) -> bool {
+        matches!(self, Self::Wet(_))
+    }
+
+    fn high(self) -> bool {
+        matches!(self, Self::Wet(WaterQuality::High))
+    }
+
+    fn standard(self) -> bool {
+        matches!(self, Self::Wet(WaterQuality::Standard))
+    }
+
+    fn sim_scale(self) -> f32 {
+        match self {
+            Self::Dry | Self::Wet(WaterQuality::Standard) => crate::frost::SIM_SCALE_STANDARD,
+            Self::Wet(WaterQuality::High) => crate::frost::SIM_SCALE_HIGH,
+        }
+    }
+}
+
 impl Default for Surf {
     fn default() -> Self {
         Self {
@@ -153,6 +198,7 @@ pub struct Bayonet {
     water_until: Option<Instant>,
     viewer_pond: egui::Rect,
     water_rect: egui::Rect,
+    water_ui: WaterUi,
     scroll: ScrollSea,
     brine: crate::frost::Brine,
     surf: Surf,
@@ -255,6 +301,7 @@ impl Bayonet {
             water_until: None,
             viewer_pond: egui::Rect::ZERO,
             water_rect: egui::Rect::ZERO,
+            water_ui: WaterUi::from_slate(slate.water_wet, slate.water_hq),
             scroll: ScrollSea::default(),
             brine: crate::frost::Brine::default(),
             surf: Surf::default(),
@@ -318,7 +365,13 @@ impl Bayonet {
 
     /// The water chemistry for the compose pass.
     pub fn brine(&self) -> crate::frost::Brine {
-        self.brine
+        let mut brine = self.brine;
+        brine.sim_scale = self.water_ui.sim_scale();
+        brine
+    }
+
+    pub fn water_wet(&self) -> bool {
+        self.water_ui.wet()
     }
 
     pub fn quiver_release(&self) -> f32 {
@@ -1045,6 +1098,8 @@ impl Bayonet {
             },
             sort: self.sort,
             images_per_row: self.images_per_row,
+            water_wet: self.water_ui.wet(),
+            water_hq: self.water_ui.high(),
         };
         let written = config
             .save(&self.lair.config_path())

@@ -84,6 +84,9 @@ impl Bayonet {
         chrome::section(ui, "index-status", "index status", false, |ui| {
             self.index_status_panel(ui);
         });
+        chrome::section(ui, "ui-controls", "ui", false, |ui| {
+            self.ui_panel(ui);
+        });
     }
 
     fn active_filter_panel(&mut self, ui: &mut egui::Ui) {
@@ -188,6 +191,56 @@ impl Bayonet {
             format!("index: {}", self.lair.index_path().display()),
         ] {
             let _line = chrome::note(ui, line);
+        }
+    }
+
+    fn ui_panel(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        let wet = self.water_ui.wet();
+        let _wet = ui.horizontal_wrapped(|ui| {
+            if chrome::glyph(ui, "DRY", !wet)
+                .on_hover_text("disable the water shader entirely")
+                .clicked()
+                && wet
+            {
+                self.water_ui = WaterUi::Dry;
+                changed = true;
+            }
+            if chrome::glyph(ui, "WET", wet)
+                .on_hover_text("enable water, refraction, and veil shaders")
+                .clicked()
+                && !wet
+            {
+                self.water_ui = WaterUi::Wet(WaterQuality::Standard);
+                changed = true;
+            }
+        });
+        let wet = self.water_ui.wet();
+        let standard = self.water_ui.standard();
+        let high = self.water_ui.high();
+        let _quality = ui.add_enabled_ui(wet, |ui| {
+            let _row = ui.horizontal_wrapped(|ui| {
+                if chrome::glyph(ui, "SQ", standard)
+                    .on_hover_text("standard quality: 2× downsampled water sim")
+                    .clicked()
+                    && !standard
+                {
+                    self.water_ui = WaterUi::Wet(WaterQuality::Standard);
+                    changed = true;
+                }
+                if chrome::glyph(ui, "HQ", high)
+                    .on_hover_text("high quality: full-resolution water sim")
+                    .clicked()
+                    && !high
+                {
+                    self.water_ui = WaterUi::Wet(WaterQuality::High);
+                    changed = true;
+                }
+            });
+        });
+        if changed {
+            self.save_config();
+            ui.ctx().request_repaint();
         }
     }
 

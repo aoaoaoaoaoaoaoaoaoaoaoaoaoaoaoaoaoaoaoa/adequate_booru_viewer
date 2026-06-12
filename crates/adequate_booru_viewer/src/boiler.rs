@@ -201,6 +201,7 @@ impl Boiler {
             &output.textures_delta,
             output.pixels_per_point,
             &crate::frost::Surge {
+                dry: !self.app.water_wet(),
                 veil,
                 tensions: &tensions,
                 lifts: &lifts,
@@ -460,8 +461,13 @@ impl Rig {
                 .render(&mut pass, primitives, &screen);
         }
         if frosted {
-            self.frost
-                .compose(&self.gpu.queue, &mut encoder, &surface_view, surge);
+            self.frost.compose(
+                &self.gpu.device,
+                &self.gpu.queue,
+                &mut encoder,
+                &surface_view,
+                surge,
+            );
         }
         let _submission = self
             .gpu
