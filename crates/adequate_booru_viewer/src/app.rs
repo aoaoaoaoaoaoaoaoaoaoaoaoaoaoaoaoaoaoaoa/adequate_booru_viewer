@@ -99,6 +99,15 @@ enum WaterQuality {
     High,
 }
 
+impl WaterQuality {
+    fn frost(self) -> crate::frost::Quality {
+        match self {
+            Self::Standard => crate::frost::Quality::Standard,
+            Self::High => crate::frost::Quality::High,
+        }
+    }
+}
+
 impl WaterUi {
     fn from_slate(wet: bool, hq: bool) -> Self {
         if wet {
@@ -122,6 +131,13 @@ impl WaterUi {
 
     fn standard(self) -> bool {
         matches!(self, Self::Wet(WaterQuality::Standard))
+    }
+
+    fn quality(self) -> crate::frost::Quality {
+        match self {
+            Self::Dry => crate::frost::Quality::Standard,
+            Self::Wet(quality) => quality.frost(),
+        }
     }
 }
 
@@ -363,6 +379,10 @@ impl Bayonet {
 
     pub fn water_wet(&self) -> bool {
         self.water_ui.wet()
+    }
+
+    pub fn water_quality(&self) -> crate::frost::Quality {
+        self.water_ui.quality()
     }
 
     pub fn quiver_release(&self) -> f32 {
