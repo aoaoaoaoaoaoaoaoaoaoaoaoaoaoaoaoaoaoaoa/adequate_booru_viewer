@@ -959,17 +959,6 @@ pub fn decode_record(bytes: &[u8]) -> Result<PostRecord> {
     Ok(post)
 }
 
-/// Decodes only the record head needed for sorting: (score, favs).
-/// Local candidate sorts would otherwise pay full tag/URL parsing per post.
-pub fn decode_sort_keys(bytes: &[u8]) -> Result<(i32, u32)> {
-    let mut blade = wire::Blade::new(bytes, POST_MAGIC)?;
-    let _id = blade.u32()?;
-    let _rating = decode_rating(&mut blade)?;
-    let score = blade.i32()?;
-    let favs = blade.u32()?;
-    Ok((score, favs))
-}
-
 fn encode_tag_hints(sink: &mut wire::Sink, hints: &[TagHint]) {
     let mut canonical = BTreeMap::new();
     for hint in hints {

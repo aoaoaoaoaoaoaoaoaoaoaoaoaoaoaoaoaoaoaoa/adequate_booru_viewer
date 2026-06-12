@@ -14,7 +14,7 @@ use std::{
 
 use crate::model::{
     BoolOp, PostId, PostRecord, Query, QueryAtom, QueryExpr, RatingClass, SearchHit, Sort, Tag,
-    TagKind, decode_record, decode_sort_keys, encode_record, narrow_post_id,
+    TagKind, decode_record, encode_record, narrow_post_id,
 };
 use crate::posting::{self, Batch as FactBatch, Lane as PostingLane};
 use crate::trace::startup;
@@ -327,18 +327,18 @@ impl Index {
     }
 
     fn evict_records(&self, posts: &[PostRecord]) {
-        let mut records = lock_record_vault(&self.records);
+        let mut records = lock(&self.records);
         for post in posts {
             records.evict(post.id);
         }
     }
 
     fn clear_sort_heads(&self) {
-        lock_sort_heads(&self.sort_heads).clear();
+        lock(&self.sort_heads).clear();
     }
 
     fn refresh_sort_keys(&self, posts: &[PostRecord]) {
-        lock_sort_keys(&self.sort_keys).refresh(posts);
+        lock(&self.sort_keys).refresh(posts);
     }
 
     fn absorb_into(tx: &redb::WriteTransaction, posts: &[PostRecord]) -> Result<()> {
@@ -528,7 +528,7 @@ impl Index {
                         apply_delta_chunks(&mut rating_chunks, &key.key, delta)?;
                     }
                 }
-                lock_vault(&self.vault).evict(key.lane, &key.key);
+                lock(&self.vault).evict(key.lane, &key.key);
             }
         }
         {
@@ -588,7 +588,7 @@ impl Index {
                 self.ranked_ids(&tx, sort, Some(candidate), limit)?
             }
             (Some(Candidate::Finite(bitmap)), Sort::Score | Sort::Favorites) => {
-                self.local_sorted_ids(&tx, &posts, bitmap.as_ref(), sort, limit)?
+                self.local_sorted_ids(&tx, bitmap.as_ref(), sort, limit)?
             }
         };
         startup("index.search.ids");
@@ -596,7 +596,7 @@ impl Index {
         let mut hydrated = Vec::with_capacity(ids.len());
         for id in ids {
             let id = PostId(id);
-            if let Some(post) = lock_record_vault(&self.records).get(id) {
+            if let Some(post) = lock(&self.records).get(id) {
                 hydrated.push(post);
                 continue;
             }
@@ -609,7 +609,7 @@ impl Index {
                 // Media-less records predating the ingestion ban wash out here
                 // until a re-crawl purges them.
                 if post.blade_url().is_some() {
-                    lock_record_vault(&self.records).put(post.clone());
+                    lock(&self.records).put(post.clone());
                     hydrated.push(post);
                 }
             }
@@ -648,7 +648,7 @@ impl Index {
     }
 
     fn sort_head(&self, tx: &redb::ReadTransaction, sort: Sort) -> Result<Arc<Vec<u32>>> {
-        if let Some(ids) = lock_sort_heads(&self.sort_heads).get(sort) {
+        if let Some(ids) = lock(&self.sort_heads).get(sort) {
             return Ok(ids);
         }
         let ids = Arc::new(match sort {
@@ -662,7 +662,7 @@ impl Index {
             )?,
             Sort::Newest => unreachable!("newest has no sort-head cache"),
         });
-        let mut heads = lock_sort_heads(&self.sort_heads);
+        let mut heads = lock(&self.sort_heads);
         if let Some(raced) = heads.get(sort) {
             return Ok(raced);
         }
@@ -673,7 +673,6 @@ impl Index {
     fn local_sorted_ids(
         &self,
         tx: &redb::ReadTransaction,
-        posts: &impl redb::ReadableTable<u64, &'static [u8]>,
         bitmap: &RoaringBitmap,
         sort: Sort,
         limit: usize,
@@ -683,12 +682,12 @@ impl Index {
                 let keys = self.sort_keys(tx, sort)?;
                 Ok(local_sorted_ids_from_keys(bitmap, &keys, limit))
             }
-            Sort::Newest => local_sorted_ids(posts, bitmap, sort, limit),
+            Sort::Newest => unreachable!("finite newest search iterates candidate IDs directly"),
         }
     }
 
     fn sort_keys(&self, tx: &redb::ReadTransaction, sort: Sort) -> Result<Arc<Vec<u64>>> {
-        if let Some(keys) = lock_sort_keys(&self.sort_keys).get(sort) {
+        if let Some(keys) = lock(&self.sort_keys).get(sort) {
             return Ok(keys);
         }
         let keys = Arc::new(match sort {
@@ -700,7 +699,7 @@ impl Index {
             }
             Sort::Newest => unreachable!("newest has no dense sort-key cache"),
         });
-        let mut vault = lock_sort_keys(&self.sort_keys);
+        let mut vault = lock(&self.sort_keys);
         if let Some(raced) = vault.get(sort) {
             return Ok(raced);
         }
@@ -1245,28 +1244,7 @@ fn tag_post_count(
     posting_count(chunks, pending, PostingLane::Tag, tag)
 }
 
-fn lock_vault(vault: &Mutex<Vault>) -> std::sync::MutexGuard<'_, Vault> {
-    match vault.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-fn lock_record_vault(vault: &Mutex<RecordVault>) -> std::sync::MutexGuard<'_, RecordVault> {
-    match vault.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-fn lock_sort_heads(vault: &Mutex<SortHeadVault>) -> std::sync::MutexGuard<'_, SortHeadVault> {
-    match vault.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-fn lock_sort_keys(vault: &Mutex<SortKeyVault>) -> std::sync::MutexGuard<'_, SortKeyVault> {
+fn lock<T>(vault: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     match vault.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -1280,12 +1258,12 @@ fn read_posting_bitmap(
     lane: PostingLane,
     key: &str,
 ) -> Result<BitmapCow> {
-    let cached = lock_vault(vault).get(lane, key);
+    let cached = lock(vault).get(lane, key);
     let base = if let Some(base) = cached {
         base
     } else {
         let decoded = read_chunk_bitmap(chunks, key)?;
-        lock_vault(vault).put(lane, key, decoded)
+        lock(vault).put(lane, key, decoded)
     };
     if let Some(delta) = pending.group(lane, key) {
         let mut bitmap = (*base).clone();
@@ -1464,7 +1442,6 @@ fn head_ids(head: &[u32], candidate: Option<&Candidate>, limit: usize) -> Option
     }
     (candidate.is_none() && ids.len() == limit).then_some(ids)
 }
-
 fn lane_sort_keys(table: &impl redb::ReadableTable<u64, u32>) -> Result<Vec<u64>> {
     let mut keys = Vec::new();
     for row in table.range(0_u64..=u64::MAX).context("range sort keys")? {
@@ -1473,7 +1450,6 @@ fn lane_sort_keys(table: &impl redb::ReadableTable<u64, u32>) -> Result<Vec<u64>
     }
     Ok(keys)
 }
-
 fn set_sort_key(keys: &mut Vec<u64>, id: PostId, key: Option<u64>) {
     let slot = id.0 as usize;
     if keys.len() <= slot {
@@ -1481,7 +1457,6 @@ fn set_sort_key(keys: &mut Vec<u64>, id: PostId, key: Option<u64>) {
     }
     keys[slot] = key.unwrap_or(0);
 }
-
 fn local_sorted_ids_from_keys(bitmap: &RoaringBitmap, keys: &[u64], limit: usize) -> Vec<u32> {
     if limit == 0 {
         return Vec::new();
@@ -1510,43 +1485,16 @@ fn local_sorted_ids_from_keys(bitmap: &RoaringBitmap, keys: &[u64], limit: usize
     keyed.sort_unstable_by(|a, b| b.cmp(a));
     keyed.into_iter().map(|(_, id)| id).collect()
 }
-
-fn local_sorted_ids(
-    posts: &impl redb::ReadableTable<u64, &'static [u8]>,
-    bitmap: &RoaringBitmap,
-    sort: Sort,
-    limit: usize,
-) -> Result<Vec<u32>> {
-    let mut keyed = Vec::with_capacity(bitmap.len() as usize);
-    for id in bitmap {
-        let Some(guard) = posts.get(u64::from(id)).context("read candidate post")? else {
-            continue;
-        };
-        let (score, favs) = decode_sort_keys(guard.value())?;
-        let key = match sort {
-            Sort::Newest => u64::from(id),
-            Sort::Score => sort_key_i32(score, PostId(id)),
-            Sort::Favorites => sort_key_u32(favs, PostId(id)),
-        };
-        keyed.push((key, id));
-    }
-    keyed.sort_unstable_by(|a, b| b.cmp(a));
-    Ok(keyed.into_iter().take(limit).map(|(_, id)| id).collect())
-}
-
 fn sort_key_i32(score: i32, id: PostId) -> u64 {
     let shifted = (i64::from(score) - i64::from(i32::MIN)) as u64;
     (shifted << 32) | u64::from(id.0)
 }
-
 fn sort_key_u32(count: u32, id: PostId) -> u64 {
     (u64::from(count) << 32) | u64::from(id.0)
 }
-
 fn normalize_prefix(prefix: &str) -> Option<String> {
     let prefix = prefix.trim().to_ascii_lowercase().replace(' ', "_");
     (!prefix.is_empty()).then_some(prefix)
 }
-
 #[cfg(test)]
 mod tests;
