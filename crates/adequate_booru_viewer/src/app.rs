@@ -23,7 +23,8 @@ use crate::{
     saved_filter_ui::{self, Action as SavedFilterAction, NameEdit, ShelfEdit},
     tag_chroma,
     tag_menu::{
-        HEIGHT as TAG_MENU_HEIGHT, TagMenu, WIDTH as TAG_MENU_WIDTH, position as tag_menu_pos,
+        HEIGHT as TAG_MENU_HEIGHT, TagGroups, TagMenu, WIDTH as TAG_MENU_WIDTH,
+        position as tag_menu_pos,
     },
     tag_palette,
     trace::startup,
@@ -175,6 +176,8 @@ pub struct Bayonet {
     zoom: Option<PostRecord>,
     zoom_gate: ZoomGate,
     zoom_rect: Option<egui::Rect>,
+    viewer_tags_open: bool,
+    viewer_tag_groups: Option<(PostId, TagGroups)>,
     images_per_row: u16,
     tag_menu: TagMenu,
     tag_menu_rect: Option<egui::Rect>,
@@ -278,6 +281,8 @@ impl Bayonet {
             zoom: None,
             zoom_gate: ZoomGate::Fresh,
             zoom_rect: None,
+            viewer_tags_open: slate.viewer_tags_open,
+            viewer_tag_groups: None,
             images_per_row: slate
                 .images_per_row
                 .clamp(MIN_IMAGES_PER_ROW, MAX_IMAGES_PER_ROW),
@@ -775,6 +780,10 @@ impl Bayonet {
                 Event::Refetched { post } => {
                     if let Some(post) = post {
                         let _was_inflight = self.refetch_inflight.remove(&post.id);
+                        if self.zoom.as_ref().is_some_and(|zoom| zoom.id == post.id) {
+                            self.zoom = Some(*post.clone());
+                            self.viewer_tag_groups = None;
+                        }
                         // A menu open on this post re-derives its tag groups
                         // in place from the healed record.
                         if self.tag_menu.post_id() == Some(post.id)
@@ -969,6 +978,17 @@ impl Bayonet {
     }
 
     fn open_tag_menu(&mut self, post: &PostRecord, anchor: egui::Pos2, tile: egui::Rect) {
+        let groups = self.learn_tag_groups(post);
+        self.tag_menu = TagMenu::Open {
+            post: Box::new(post.clone()),
+            anchor,
+            groups,
+        };
+        // Menu half starts at the tile; the overlay overwrites it once painted.
+        self.menu_cuts = Some((tile, tile));
+    }
+
+    fn learn_tag_groups(&mut self, post: &PostRecord) -> TagGroups {
         let learned = match self.index.tag_kinds(&post.tags) {
             Ok(learned) => learned,
             Err(err) => {
@@ -981,15 +1001,13 @@ impl Bayonet {
                 let _old = self.tag_kinds.insert(tag.clone(), *kind);
             }
         }
-        let groups =
-            tag_palette::grouped(post, |tag| learned.get(tag).copied().unwrap_or_default());
-        self.tag_menu = TagMenu::Open {
-            post: Box::new(post.clone()),
-            anchor,
-            groups,
-        };
-        // Menu half starts at the tile; the overlay overwrites it once painted.
-        self.menu_cuts = Some((tile, tile));
+        let groups = tag_palette::grouped(post, |tag| {
+            learned
+                .get(tag)
+                .copied()
+                .or_else(|| self.tag_kinds.get(tag).copied())
+                .unwrap_or_default()
+        });
         // Records absorbed before tag hints existed carry no kinds; one
         // rate-gated refetch heals them, and the open menu updates live.
         if post.tag_hints.is_empty()
@@ -999,6 +1017,7 @@ impl Bayonet {
             let _was_inflight = self.refetch_inflight.remove(&post.id);
             self.status = format!("{err:#}");
         }
+        groups
     }
 
     fn thumb(&mut self, post: &PostRecord, edge: f32) -> Option<ThumbLoad<'_>> {
@@ -1113,6 +1132,7 @@ impl Bayonet {
             images_per_row: self.images_per_row,
             water_wet: self.water_ui.wet(),
             water_hd: self.water_ui.is(Definition::Hd),
+            viewer_tags_open: self.viewer_tags_open,
         };
         let written = config
             .save(&self.lair.config_path())

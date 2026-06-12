@@ -2,8 +2,8 @@ use super::*;
 
 const PLUNGE_SOURCE_LIFE: f32 = 0.24;
 const TOOLTIP_GRIP: f32 = 0.72;
-const HOVER_BUMP_AMP: f32 = 0.55;
-const GROUP_SELECT_AMP: f32 = 0.9;
+const HOVER_BUMP_AMP: f32 = 0.18;
+const GROUP_SELECT_AMP: f32 = 0.45;
 const FOLD_OPEN_AMP: f32 = -0.32;
 const FOLD_CLOSE_AMP: f32 = 0.42;
 const WATER_WAKE: Duration = Duration::from_secs(14);

@@ -122,6 +122,7 @@ pub struct Slate {
     #[serde(default = "water_wet_default")]
     pub water_wet: bool,
     pub water_hd: bool,
+    pub viewer_tags_open: bool,
 }
 
 impl Default for Slate {
@@ -134,6 +135,7 @@ impl Default for Slate {
             images_per_row: 5,
             water_wet: true,
             water_hd: false,
+            viewer_tags_open: false,
         }
     }
 }
@@ -264,6 +266,7 @@ mod tests {
             images_per_row: 7,
             water_wet: false,
             water_hd: true,
+            viewer_tags_open: true,
         };
         let text = toml::to_string_pretty(&slate)?;
         let roundtrip = toml::from_str::<Slate>(&text)?;
@@ -272,6 +275,7 @@ mod tests {
         assert_eq!(roundtrip.images_per_row, 7);
         assert!(!roundtrip.water_wet);
         assert!(roundtrip.water_hd);
+        assert!(roundtrip.viewer_tags_open);
         Ok(())
     }
 
@@ -280,6 +284,7 @@ mod tests {
         let slate = Slate::default();
         assert!(slate.water_wet);
         assert!(!slate.water_hd);
+        assert!(!slate.viewer_tags_open);
     }
 
     #[test]
@@ -295,6 +300,7 @@ active_group = []
         )?;
         assert!(slate.water_wet);
         assert!(!slate.water_hd);
+        assert!(!slate.viewer_tags_open);
         Ok(())
     }
 

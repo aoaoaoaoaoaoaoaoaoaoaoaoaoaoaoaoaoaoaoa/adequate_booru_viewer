@@ -24,7 +24,14 @@ impl Bayonet {
             .show(ctx, |ui| {
                 let _frame = egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_width(TAG_MENU_WIDTH);
-                    palette_body(ui, groups, query, &mut strikes, &mut pulses);
+                    palette_body(
+                        ui,
+                        groups,
+                        query,
+                        TAG_MENU_HEIGHT,
+                        &mut strikes,
+                        &mut pulses,
+                    );
                 });
             });
         self.tag_menu_rect = Some(area.response.rect);
@@ -35,15 +42,51 @@ impl Bayonet {
             self.bump_plunge(rect);
         }
         for strike in strikes {
-            match strike {
-                TagStrike::Require(tag) => {
-                    self.add_atom(QueryAtom::Tag(tag), TagPolarity::Positive);
-                }
-                TagStrike::Exclude(tag) => {
-                    self.add_atom(QueryAtom::Tag(tag), TagPolarity::Negative);
-                }
-                TagStrike::Remove(tag) => self.remove_atom(&QueryAtom::Tag(tag)),
+            self.apply_tag_strike(strike);
+        }
+    }
+
+    pub(super) fn viewer_tag_drawer(&mut self, ui: &mut egui::Ui, post: &PostRecord, height: f32) {
+        let groups = self.cached_viewer_groups(post);
+        let mut strikes = Vec::new();
+        let mut pulses = Vec::new();
+        let _frame = egui::Frame::new()
+            .fill(chrome::SURFACE)
+            .stroke(egui::Stroke::new(1.0, chrome::EDGE))
+            .inner_margin(egui::Margin::symmetric(7, 6))
+            .show(ui, |ui| {
+                ui.set_width(TAG_MENU_WIDTH);
+                ui.set_height(height);
+                palette_body(ui, &groups, &self.query, height, &mut strikes, &mut pulses);
+            });
+        for rect in pulses {
+            self.bump_plunge(rect);
+        }
+        for strike in strikes {
+            self.apply_tag_strike(strike);
+        }
+    }
+
+    fn cached_viewer_groups(&mut self, post: &PostRecord) -> TagGroups {
+        if let Some((id, groups)) = &self.viewer_tag_groups
+            && *id == post.id
+        {
+            return groups.clone();
+        }
+        let groups = self.learn_tag_groups(post);
+        self.viewer_tag_groups = Some((post.id, groups.clone()));
+        groups
+    }
+
+    fn apply_tag_strike(&mut self, strike: TagStrike) {
+        match strike {
+            TagStrike::Require(tag) => {
+                self.add_atom(QueryAtom::Tag(tag), TagPolarity::Positive);
             }
+            TagStrike::Exclude(tag) => {
+                self.add_atom(QueryAtom::Tag(tag), TagPolarity::Negative);
+            }
+            TagStrike::Remove(tag) => self.remove_atom(&QueryAtom::Tag(tag)),
         }
     }
 
@@ -83,11 +126,12 @@ fn palette_body(
     ui: &mut egui::Ui,
     groups: &[(TagKind, Vec<Tag>)],
     query: &Query,
+    max_height: f32,
     strikes: &mut Vec<TagStrike>,
     pulses: &mut Vec<egui::Rect>,
 ) {
     let _scroll = egui::ScrollArea::vertical()
-        .max_height(TAG_MENU_HEIGHT)
+        .max_height(max_height)
         // Never shrink horizontally: the rows' intrinsic widths vary, and a
         // shrunk scroll area strands the scrollbar mid-popup.
         .auto_shrink([false, true])
