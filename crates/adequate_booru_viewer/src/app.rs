@@ -159,6 +159,7 @@ pub struct Bayonet {
     stats_pulse: AsyncPulse,
     stats_gate: PulseGate,
     hit: SearchHit,
+    parked_hit: Option<SearchHit>,
     thumbs: HashMap<ThumbKey, TextureHandle>,
     thumb_inflight: HashSet<ThumbKey>,
     thumb_faults: HashSet<ThumbKey>,
@@ -261,6 +262,7 @@ impl Bayonet {
             stats_pulse: AsyncPulse::Idle,
             stats_gate: PulseGate::stats(),
             hit: SearchHit::default(),
+            parked_hit: None,
             thumbs: HashMap::new(),
             thumb_inflight: HashSet::new(),
             thumb_faults: HashSet::new(),
@@ -438,6 +440,14 @@ impl Bayonet {
     }
 
     fn install_hit(&mut self, hit: SearchHit) {
+        if self.tag_menu.is_open() {
+            self.parked_hit = Some(hit);
+            return;
+        }
+        self.commit_hit(hit);
+    }
+
+    fn commit_hit(&mut self, hit: SearchHit) {
         if posts_changed(&self.hit.posts, &hit.posts) {
             self.advance_thumb_epoch();
         }
@@ -451,6 +461,14 @@ impl Bayonet {
         self.thumbs.retain(|key, _| live.contains(&key.id));
         self.thumb_faults.retain(|key| live.contains(&key.id));
         self.prefetched.retain(|id| live.contains(id));
+    }
+
+    fn close_tag_menu(&mut self) {
+        self.tag_menu = TagMenu::Closed;
+        self.tag_menu_rect = None;
+        if let Some(hit) = self.parked_hit.take() {
+            self.commit_hit(hit);
+        }
     }
 
     fn advance_thumb_epoch(&mut self) {
@@ -907,8 +925,7 @@ impl Bayonet {
         if response.secondary_clicked() {
             if self.tag_menu.post_id() == Some(post.id) {
                 // Right-click on the same image toggles its menu away.
-                self.tag_menu = TagMenu::Closed;
-                self.tag_menu_rect = None;
+                self.close_tag_menu();
             } else if let Some(pos) = response.interact_pointer_pos() {
                 self.open_tag_menu(post, pos, rect);
                 menu_opened = true;

@@ -1409,7 +1409,7 @@ fn wall_height(p: vec2i, dims: vec2i, h: f32) -> f32 {
 }
 
 fn source_shell(px: vec2f, rect: vec4f, age: f32, amp: f32) -> f32 {
-    if (amp <= 0.0 || age > SOURCE_LIFE) {
+    if (amp == 0.0 || age > SOURCE_LIFE) {
         return 0.0;
     }
     let d = sd_cut(px, rect.xy, rect.zw, LIFT_RADIUS);

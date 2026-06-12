@@ -2,6 +2,10 @@ use super::*;
 
 const PLUNGE_SOURCE_LIFE: f32 = 0.24;
 const TOOLTIP_GRIP: f32 = 0.72;
+const HOVER_BUMP_AMP: f32 = 0.55;
+const GROUP_SELECT_AMP: f32 = 0.9;
+const FOLD_OPEN_AMP: f32 = -1.35;
+const FOLD_CLOSE_AMP: f32 = 1.75;
 const WATER_WAKE: Duration = Duration::from_secs(14);
 
 impl Bayonet {
@@ -112,6 +116,9 @@ impl Bayonet {
 
     /// Drops a plate into the water: one ring, radiating from `rect`'s hull.
     pub(super) fn plunge(&mut self, rect: egui::Rect, amp: f32) {
+        if amp.abs() <= f32::EPSILON {
+            return;
+        }
         if self.plunges.len() >= crate::frost::SPLASH_SLOTS {
             let victim = self
                 .plunges
@@ -127,6 +134,25 @@ impl Bayonet {
             amp,
         });
         self.arm_water();
+    }
+
+    pub(super) fn bump_plunge(&mut self, rect: egui::Rect) {
+        self.plunge(rect, HOVER_BUMP_AMP);
+    }
+
+    pub(super) fn group_plunge(&mut self, rect: egui::Rect) {
+        self.plunge(rect, GROUP_SELECT_AMP);
+    }
+
+    pub(super) fn fold_plunge(&mut self, wake: Option<chrome::FoldWake>) {
+        let Some(wake) = wake else {
+            return;
+        };
+        let amp = match wake.flux {
+            chrome::FoldFlux::Open => FOLD_OPEN_AMP,
+            chrome::FoldFlux::Close => FOLD_CLOSE_AMP,
+        };
+        self.plunge(wake.rect, amp);
     }
 
     pub(super) fn text_plunge(&mut self, wake: chrome::TextWake) {

@@ -71,24 +71,42 @@ impl Bayonet {
 
     pub(super) fn left_panel(&mut self, ui: &mut egui::Ui) {
         ui.set_width(ui.available_width());
-        chrome::section(ui, "filter-library", "filter library", true, |ui| {
-            self.filter_library_panel(ui);
+        self.panel_section(ui, "filter-library", "filter library", true, |this, ui| {
+            this.filter_library_panel(ui);
         });
-        chrome::section(ui, "active-filter", "active filter", true, |ui| {
-            self.active_filter_panel(ui);
+        self.panel_section(ui, "active-filter", "active filter", true, |this, ui| {
+            this.active_filter_panel(ui);
         });
-        chrome::section(ui, "reference-query", "reference query", true, |ui| {
-            self.query_panel(ui);
+        self.panel_section(
+            ui,
+            "reference-query",
+            "reference query",
+            true,
+            |this, ui| {
+                this.query_panel(ui);
+            },
+        );
+        self.panel_section(ui, "gallery-controls", "gallery", false, |this, ui| {
+            this.gallery_panel(ui);
         });
-        chrome::section(ui, "gallery-controls", "gallery", false, |ui| {
-            self.gallery_panel(ui);
+        self.panel_section(ui, "index-status", "index status", false, |this, ui| {
+            this.index_status_panel(ui);
         });
-        chrome::section(ui, "index-status", "index status", false, |ui| {
-            self.index_status_panel(ui);
+        self.panel_section(ui, "ui-controls", "ui", false, |this, ui| {
+            this.ui_panel(ui);
         });
-        chrome::section(ui, "ui-controls", "ui", false, |ui| {
-            self.ui_panel(ui);
-        });
+    }
+
+    fn panel_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: &'static str,
+        title: &'static str,
+        default_open: bool,
+        add: impl FnOnce(&mut Self, &mut egui::Ui),
+    ) {
+        let wake = chrome::section(ui, id, title, default_open, |ui| add(self, ui));
+        self.fold_plunge(wake);
     }
 
     fn active_filter_panel(&mut self, ui: &mut egui::Ui) {
@@ -129,7 +147,11 @@ impl Bayonet {
         });
         ui.add_space(5.0);
         let _active = ui.horizontal_wrapped(|ui| {
-            if chrome::icon(ui, "✚").on_hover_text("add group").clicked() {
+            let add = chrome::icon_still(ui, "✚").on_hover_text("add group");
+            if chrome::hover_started(ui, &add) {
+                actions.push(QueryAction::Pulse(add.rect));
+            }
+            if add.clicked() {
                 actions.push(QueryAction::AddGroup { op: BoolOp::And });
             }
         });
@@ -269,6 +291,7 @@ impl Bayonet {
                     self.save_config();
                 }
                 SavedFilterAction::TypeWake(wake) => self.text_plunge(wake),
+                SavedFilterAction::Pulse(rect) => self.bump_plunge(rect),
                 SavedFilterAction::ScuttleShelf(shelf) => {
                     self.filters.scuttle_shelf(shelf);
                     self.shelf_edit = None;
@@ -318,10 +341,14 @@ impl Bayonet {
 
     fn apply_query_action(&mut self, action: QueryAction) {
         match action {
-            QueryAction::Select { path } => {
-                self.active_group = self.query.clamp_group_path(&path);
-                self.sync_active_filter();
-                self.save_config();
+            QueryAction::Select { path, rect } => {
+                let path = self.query.clamp_group_path(&path);
+                if self.active_group != path {
+                    self.active_group = path;
+                    self.group_plunge(rect);
+                    self.sync_active_filter();
+                    self.save_config();
+                }
             }
             QueryAction::SetOp { path, op } => {
                 let mut query = self.query.clone();
@@ -351,6 +378,7 @@ impl Bayonet {
                     self.install_query_at(query, path);
                 }
             }
+            QueryAction::Pulse(rect) => self.bump_plunge(rect),
         }
     }
 }

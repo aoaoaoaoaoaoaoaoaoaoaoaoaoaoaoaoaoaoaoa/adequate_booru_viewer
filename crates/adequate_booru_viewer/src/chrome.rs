@@ -102,13 +102,15 @@ pub fn section(
     title: &'static str,
     default_open: bool,
     add: impl FnOnce(&mut egui::Ui),
-) {
+) -> Option<FoldWake> {
     let id = ui.make_persistent_id(id);
+    let rect_id = id.with("rect");
     let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
         ui.ctx(),
         id,
         default_open,
     );
+    let mut flux = None;
     let _frame = egui::Frame::new()
         .fill(SURFACE)
         .stroke(Stroke::new(1.0, EDGE))
@@ -132,6 +134,11 @@ pub fn section(
                 .interact(header.response.rect, id.with("header"), Sense::click())
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             if header_click.clicked() {
+                flux = Some(if state.is_open() {
+                    FoldFlux::Close
+                } else {
+                    FoldFlux::Open
+                });
                 state.toggle(ui);
             }
             if state.is_open() {
@@ -146,6 +153,30 @@ pub fn section(
             state.store(ui.ctx());
             header.response
         });
+    let rect = _frame.response.rect;
+    ui.ctx().data_mut(|data| {
+        let prior = data.get_temp::<egui::Rect>(rect_id);
+        let _old = data.insert_temp(rect_id, rect);
+        flux.map(|flux| FoldWake {
+            rect: match flux {
+                FoldFlux::Open => rect,
+                FoldFlux::Close => prior.unwrap_or(rect),
+            },
+            flux,
+        })
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FoldWake {
+    pub rect: egui::Rect,
+    pub flux: FoldFlux,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FoldFlux {
+    Open,
+    Close,
 }
 
 pub fn section_title(text: impl Into<String>) -> RichText {
@@ -269,10 +300,21 @@ pub fn icon(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
     response
 }
 
-pub fn small(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
-    let response = ui.small_button(RichText::new(text.into()));
-    tension(ui, &response);
-    response
+pub fn small_still(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
+    ui.small_button(RichText::new(text.into()))
+}
+
+pub fn icon_still(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
+    ui.add(icon_button(text))
+}
+
+pub fn hover_started(ui: &egui::Ui, response: &egui::Response) -> bool {
+    let id = response.id.with("hover-started");
+    ui.ctx().data_mut(|data| {
+        let was = data.get_temp::<bool>(id).unwrap_or(false);
+        let _old = data.insert_temp(id, response.hovered());
+        response.hovered() && !was
+    })
 }
 
 pub fn shallow_small(ui: &mut egui::Ui, text: RichText) -> egui::Response {

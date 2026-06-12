@@ -15,6 +15,7 @@ impl Bayonet {
         let pos = tag_menu_pos(anchor, ctx.content_rect());
         let query = &self.query;
         let mut strikes = Vec::new();
+        let mut pulses = Vec::new();
         // Per-post area id: egui remembers area sizes by id and never shrinks
         // them, so a shared id would inherit the widest menu ever shown.
         let area = egui::Area::new(egui::Id::new(("tag-palette", post.id.0)))
@@ -23,12 +24,15 @@ impl Bayonet {
             .show(ctx, |ui| {
                 let _frame = egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_width(TAG_MENU_WIDTH);
-                    palette_body(ui, groups, query, &mut strikes);
+                    palette_body(ui, groups, query, &mut strikes, &mut pulses);
                 });
             });
         self.tag_menu_rect = Some(area.response.rect);
         if let Some(cuts) = &mut self.menu_cuts {
             cuts.1 = area.response.rect;
+        }
+        for rect in pulses {
+            self.bump_plunge(rect);
         }
         for strike in strikes {
             match strike {
@@ -62,8 +66,7 @@ impl Bayonet {
         // fresh menu's corner, so "right-click the same image" arrives here).
         let secondary = ctx.input(|input| input.pointer.secondary_clicked()) && !menu_opened;
         if escaped || outside_click || secondary {
-            self.tag_menu = TagMenu::Closed;
-            self.tag_menu_rect = None;
+            self.close_tag_menu();
         }
     }
 
@@ -81,6 +84,7 @@ fn palette_body(
     groups: &[(TagKind, Vec<Tag>)],
     query: &Query,
     strikes: &mut Vec<TagStrike>,
+    pulses: &mut Vec<egui::Rect>,
 ) {
     let _scroll = egui::ScrollArea::vertical()
         .max_height(TAG_MENU_HEIGHT)
@@ -93,24 +97,27 @@ fn palette_body(
                 for tag in tags {
                     let active = query.polarity(tag);
                     let _row = ui.horizontal(|ui| {
-                        if chrome::small(ui, "+")
-                            .on_hover_text("require tag")
-                            .clicked()
-                        {
+                        let require = chrome::small_still(ui, "+").on_hover_text("require tag");
+                        if chrome::hover_started(ui, &require) {
+                            pulses.push(require.rect);
+                        }
+                        if require.clicked() {
                             strikes.push(TagStrike::Require(tag.clone()));
                         }
-                        if chrome::small(ui, "-")
-                            .on_hover_text("exclude tag")
-                            .clicked()
-                        {
+                        let exclude = chrome::small_still(ui, "-").on_hover_text("exclude tag");
+                        if chrome::hover_started(ui, &exclude) {
+                            pulses.push(exclude.rect);
+                        }
+                        if exclude.clicked() {
                             strikes.push(TagStrike::Exclude(tag.clone()));
                         }
                         if active.is_some() {
-                            if ui
-                                .small_button("×")
-                                .on_hover_text("remove from query")
-                                .clicked()
-                            {
+                            let remove =
+                                chrome::small_still(ui, "×").on_hover_text("remove from query");
+                            if chrome::hover_started(ui, &remove) {
+                                pulses.push(remove.rect);
+                            }
+                            if remove.clicked() {
                                 strikes.push(TagStrike::Remove(tag.clone()));
                             }
                         } else {

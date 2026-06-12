@@ -17,6 +17,7 @@ pub enum Action {
     NewShelf,
     ToggleShelf(usize),
     TypeWake(chrome::TextWake),
+    Pulse(egui::Rect),
     ScuttleShelf(usize),
     BeginShelfRename(usize),
     CommitShelfRename,
@@ -180,6 +181,9 @@ fn filter_row(
         } else {
             response
         };
+        if chrome::hover_started(ui, &response) {
+            actions.push(Action::Pulse(response.rect));
+        }
         if response.clicked() {
             actions.push(Action::Load(filter.clone()));
         }

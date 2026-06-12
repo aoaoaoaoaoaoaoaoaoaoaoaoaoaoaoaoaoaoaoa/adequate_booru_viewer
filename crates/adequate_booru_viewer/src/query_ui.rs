@@ -6,11 +6,12 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub enum QueryAction {
-    Select { path: Vec<usize> },
+    Select { path: Vec<usize>, rect: egui::Rect },
     SetOp { path: Vec<usize>, op: BoolOp },
     ToggleNot { path: Vec<usize> },
     RemoveChild { parent: Vec<usize>, child: usize },
     AddGroup { op: BoolOp },
+    Pulse(egui::Rect),
 }
 
 pub fn render_query_tree(
@@ -61,6 +62,7 @@ fn render_group(
 ) {
     let active_here = path.as_slice() == active;
     let baseline = actions.len();
+    let mut select = false;
     // Lean margins: nesting reads from the depth hues, not from shrinkage, so
     // headers stay unwrapped down to the depth cap.
     let frame = egui::Frame::new()
@@ -83,15 +85,19 @@ fn render_group(
                 .on_hover_text("click to select this group for new tags")
                 .clicked()
             {
-                actions.push(QueryAction::Select { path: path.clone() });
+                select = true;
             }
             // The remove button rides directly after the title: when the
             // header wraps at nested depths, only self-evident op buttons may
             // land on the next line — never an orphaned ×.
             if let Some((parent, child)) = parent.as_ref()
-                && chrome::small(ui, "×")
-                    .on_hover_text("remove group")
-                    .clicked()
+                && {
+                    let button = chrome::small_still(ui, "×").on_hover_text("remove group");
+                    if chrome::hover_started(ui, &button) {
+                        actions.push(QueryAction::Pulse(button.rect));
+                    }
+                    button.clicked()
+                }
             {
                 actions.push(QueryAction::RemoveChild {
                     parent: parent.clone(),
@@ -139,8 +145,11 @@ fn render_group(
             let _old = path.pop();
         }
     });
-    if actions.len() == baseline && primary_click_inside(ui, frame.response.rect) {
-        actions.push(QueryAction::Select { path: path.clone() });
+    if select || (actions.len() == baseline && primary_click_inside(ui, frame.response.rect)) {
+        actions.push(QueryAction::Select {
+            path: path.clone(),
+            rect: frame.response.rect,
+        });
     }
 }
 
@@ -165,10 +174,13 @@ fn render_atom(
     let _row = ui.horizontal(|ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
         if let Some((parent, child)) = parent
-            && ui
-                .small_button("×")
-                .on_hover_text("remove from query")
-                .clicked()
+            && {
+                let button = chrome::small_still(ui, "×").on_hover_text("remove from query");
+                if chrome::hover_started(ui, &button) {
+                    actions.push(QueryAction::Pulse(button.rect));
+                }
+                button.clicked()
+            }
         {
             actions.push(QueryAction::RemoveChild { parent, child });
         }
