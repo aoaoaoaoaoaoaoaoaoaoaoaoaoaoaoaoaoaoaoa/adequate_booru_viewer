@@ -111,16 +111,13 @@ pub struct Brine {
     pub lift_bright: f32,
     /// Persistent gallery solver + viewer pond waves: crest speed, source
     /// width, viscous decay seconds, viewer-only geometric spreading scale,
-    /// source-to-velocity gain, per-step height retention, and velocity
-    /// diffusion. Diffusion is the real viscosity knob: it kills high
-    /// frequency chatter faster than long swells.
+    /// source-to-velocity gain, and per-step height retention.
     pub wave_v: f32,
     pub wave_sigma: f32,
     pub wave_damp: f32,
     pub wave_spread: f32,
     pub source_gain: f32,
     pub height_retention: f32,
-    pub viscosity: f32,
     /// Shore: chromatic transmission into the shallows, shelf impedance,
     /// viewer-wall reflectivity, boundary feather.
     pub t_panel: f32,
@@ -151,7 +148,6 @@ impl Default for Brine {
             wave_spread: 480.0,
             source_gain: 44.0,
             height_retention: 0.99965,
-            viscosity: 90.0,
             t_panel: 0.12,
             r_panel: 0.35,
             r_wall: 0.6,
@@ -849,7 +845,7 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
     }
     // brine @ byte 1520 (lane 380): the runtime-tunable water chemistry.
     let brine = &surge.brine;
-    lanes[380..404].copy_from_slice(&[
+    lanes[380..403].copy_from_slice(&[
         brine.reach,
         brine.meniscus_px,
         brine.refract_px,
@@ -869,7 +865,6 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
         brine.wave_spread,
         brine.source_gain,
         brine.height_retention,
-        brine.viscosity,
         brine.t_panel,
         brine.r_panel,
         brine.r_wall,
@@ -966,11 +961,11 @@ struct Mask {
     wave_spread: f32,
     source_gain: f32,
     height_retention: f32,
-    viscosity: f32,
     t_panel: f32,
     r_panel: f32,
     r_wall: f32,
     shore_feather: f32,
+    _pad4: f32,
 }
 
 // touch.xy = pointer, touch.z = grip; .w pad.
@@ -1280,11 +1275,11 @@ struct Mask {
     wave_spread: f32,
     source_gain: f32,
     height_retention: f32,
-    viscosity: f32,
     t_panel: f32,
     r_panel: f32,
     r_wall: f32,
     shore_feather: f32,
+    _pad4: f32,
 }
 
 struct Quiver {
@@ -1367,12 +1362,6 @@ fn wall_height(p: vec2i, dims: vec2i, h: f32) -> f32 {
     return mix(load_state(q, dims).x, h, b);
 }
 
-fn wall_velocity(p: vec2i, dims: vec2i, v: f32) -> f32 {
-    let q = clamp(p, vec2i(0), dims - vec2i(1));
-    let b = obstacle(cell_px(q));
-    return mix(load_state(q, dims).y, v, b);
-}
-
 fn plateau(x: f32, lo: f32, hi: f32) -> f32 {
     return smoothstep(lo - SOURCE_SIGMA, lo + SOURCE_SIGMA, x)
         * (1.0 - smoothstep(hi - SOURCE_SIGMA, hi + SOURCE_SIGMA, x));
@@ -1446,18 +1435,12 @@ fn step(@builtin(global_invocation_id) gid: vec3u) {
     let u = wall_height(p + vec2i(0, -1), dims, h);
     let d = wall_height(p + vec2i(0, 1), dims, h);
     let lap = (l + r + u + d - 4.0 * h) / (SIM_SCALE * SIM_SCALE);
-    let vl = wall_velocity(p + vec2i(-1, 0), dims, here.y);
-    let vr = wall_velocity(p + vec2i(1, 0), dims, here.y);
-    let vu = wall_velocity(p + vec2i(0, -1), dims, here.y);
-    let vd = wall_velocity(p + vec2i(0, 1), dims, here.y);
-    let v_lap = (vl + vr + vu + vd - 4.0 * here.y) / (SIM_SCALE * SIM_SCALE);
 
     let shelf = smoothstep(-mask.shore_feather, mask.shore_feather, px.x - mask.water_min.x);
     let shelf_speed = clamp((1.0 - mask.r_panel) / (1.0 + mask.r_panel), 0.2, 1.0);
     let cfl = 0.66 * SIM_SCALE / DT;
     let c = min(mask.wave_v * mix(shelf_speed, 1.0, shelf), cfl);
     var v = here.y + c * c * lap * DT + source(px) * mask.source_gain * IMPULSE_GAIN;
-    v = v + clamp(mask.viscosity, 0.0, 220.0) * v_lap * DT;
     v = v * exp(-DT / max(mask.wave_damp, 0.08)) * mix(0.985, 1.0, shelf);
 
     let block = obstacle(px);

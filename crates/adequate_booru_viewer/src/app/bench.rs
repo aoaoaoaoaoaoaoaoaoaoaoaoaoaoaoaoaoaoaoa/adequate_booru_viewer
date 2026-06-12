@@ -60,7 +60,6 @@ impl super::Bayonet {
                     knob(ui, "wave speed px/s", &mut brine.wave_v, 40.0..=900.0);
                     knob(ui, "source width px", &mut brine.wave_sigma, 3.0..=60.0);
                     knob(ui, "bulk damping s", &mut brine.wave_damp, 0.2..=6.0);
-                    knob(ui, "viscosity px²/s", &mut brine.viscosity, 0.0..=220.0);
                     knob(ui, "impulse gain", &mut brine.source_gain, 0.0..=120.0);
                     knob(
                         ui,
