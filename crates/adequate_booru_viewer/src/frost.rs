@@ -1,68 +1,37 @@
 //! The water under the UI: one composite pass that owns every shader effect.
 //!
-//! Egui renders into `scene`; this module composites veil, refraction, lift
-//! plates, persistent gallery water, and the viewer pond to the swapchain.
+//! The boiler renders the whole UI into an offscreen `scene` texture; this
+//! module composites it to the swapchain with (a) the frosted veil for the
+//! viewer (dual-Kawase blur over a small mip chain, SDF rounded-rect cutouts
+//! kept sharp), (b) the button tension refraction, (c) the grid's lift
+//! plates, (d) a persistent damped shallow-water height field excited by
+//! splashes, text, scroll shocks, and button tremors, and (e) the viewer's
+//! separate bounded pond for click ripples. While nothing is live the boiler
+//! bypasses all of this entirely.
 
 use egui_wgpu::wgpu;
 use std::f32::consts::TAU;
 
 /// Mip levels in the blur chain: /2, /4, /8 of the surface.
 const LEVELS: usize = 3;
+/// Water simulation decimation. Solver cells are square, in physical pixels.
+const SIM_SCALE: u32 = 2;
 const SIM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const SIM_BYTES: u32 = 8;
+const SIM_STEPS: usize = 4;
 const SIM_WORKGROUP: u32 = 8;
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum Quality {
-    /// Reference world: 2 px cells, 4 × 1/240 s.
-    #[default]
-    Standard,
-    /// Same model: 1 px cells, 8 × 1/480 s.
-    High,
-}
-
-#[derive(Clone, Copy)]
-struct Spec {
-    scale: u32,
-    steps: usize,
-    dt: f32,
-    source_scale: f32,
-}
-
-impl Quality {
-    fn spec(self) -> Spec {
-        match self {
-            Self::Standard => Spec {
-                scale: 2,
-                steps: 4,
-                dt: 1.0 / 240.0,
-                source_scale: 1.0,
-            },
-            Self::High => Spec {
-                scale: 1,
-                steps: 8,
-                dt: 1.0 / 480.0,
-                source_scale: 0.5,
-            },
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Standard => "sq",
-            Self::High => "hq",
-        }
-    }
-}
-/// Depth of the lift trail as the pointer sweeps across the grid.
+/// How many grid tiles may rise/relax at once — the depth of the slosh trail
+/// as the pointer sweeps across the grid.
 pub const LIFT_SLOTS: usize = 4;
 
-/// Concurrent splashes; the weakest old ring dies first.
+/// How many splashes ride the water at once; the weakest old ring dies first.
 pub const SPLASH_SLOTS: usize = 32;
-/// Hovered and fading button quivers.
+/// How many button quivers (hovered + still fading) the mask carries.
 pub const QUIVER_SLOTS: usize = 4;
-/// Hard ceiling on lift bulge.
+/// Hard ceiling on the lift bulge. The shader also smooth-blends plate islands,
+/// so this is a taste bound rather than a brittle overlap guard.
 pub const BULGE_CEIL: f32 = 12.0;
+/// Fingertip ripples inside the full-image viewer.
 pub const TOUCH_SLOTS: usize = 12;
 
 /// Mask uniform layout (all offsets 16-aligned where arrays demand it):
@@ -264,18 +233,12 @@ pub struct Frost {
     sim_layout: wgpu::BindGroupLayout,
     down: wgpu::RenderPipeline,
     up: wgpu::RenderPipeline,
-    sq: WaterPipes,
-    hq: WaterPipes,
+    composite: wgpu::RenderPipeline,
+    sim: wgpu::ComputePipeline,
     sampler: wgpu::Sampler,
     mask: wgpu::Buffer,
     format: wgpu::TextureFormat,
-    quality: Quality,
     rig: Option<Rig>,
-}
-
-struct WaterPipes {
-    composite: wgpu::RenderPipeline,
-    sim: wgpu::ComputePipeline,
 }
 
 /// The size-dependent resources, rebuilt on resize.
@@ -283,7 +246,6 @@ struct Rig {
     scene: Target,
     chain: Vec<Target>,
     water: Water,
-    quality: Quality,
 }
 
 struct Water {
@@ -410,100 +372,27 @@ impl Frost {
             bind_group_layouts: &[Some(&sim_layout)],
             immediate_size: 0,
         });
-        let composite_pipe = |quality: Quality| {
-            let label = format!("frost-composite-{}", quality.label());
-            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some(&label),
-                bind_group_layouts: &[Some(&composite_layout)],
-                immediate_size: 0,
-            });
-            let spec = quality.spec();
-            let constants = [("FIELD_SCALE", f64::from(spec.scale))];
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(&label),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("fullscreen"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some("composite"),
-                    compilation_options: wgpu::PipelineCompilationOptions {
-                        constants: &constants,
-                        ..Default::default()
-                    },
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-        let sim_pipe = |quality: Quality| {
-            let spec = quality.spec();
-            let label = format!("frost-sim-{}", quality.label());
-            let sim_scale = f64::from(spec.scale);
-            let dt = f64::from(spec.dt);
-            let source_scale = f64::from(spec.source_scale);
-            let constants = [
-                ("SIM_SCALE", sim_scale),
-                ("DT", dt),
-                ("SOURCE_SCALE", source_scale),
-            ];
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(&label),
-                layout: Some(&sim_layout_handle),
-                module: &sim_module,
-                entry_point: Some("step"),
-                compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: &constants,
-                    ..Default::default()
-                },
-                cache: None,
-            })
-        };
-        let pipes = |quality| WaterPipes {
-            composite: composite_pipe(quality),
-            sim: sim_pipe(quality),
-        };
+        let sim = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("frost-sim"),
+            layout: Some(&sim_layout_handle),
+            module: &sim_module,
+            entry_point: Some("step"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
         Self {
             down: pipeline("frost-down", &sample_layout, "kawase_down"),
             up: pipeline("frost-up", &sample_layout, "kawase_up"),
-            sq: pipes(Quality::Standard),
-            hq: pipes(Quality::High),
+            composite: pipeline("frost-composite", &composite_layout, "composite"),
+            sim,
             sample_layout,
             composite_layout,
             sim_layout,
             sampler,
             mask,
             format,
-            quality: Quality::default(),
             rig: None,
         }
-    }
-
-    pub fn set_quality(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        width: u32,
-        height: u32,
-        quality: Quality,
-    ) {
-        if self.quality == quality {
-            return;
-        }
-        self.quality = quality;
-        self.resize(device, queue, width, height);
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) {
@@ -553,7 +442,6 @@ impl Frost {
             scene,
             chain,
             water,
-            quality: self.quality,
         });
     }
 
@@ -574,14 +462,10 @@ impl Frost {
             return;
         };
         queue.write_buffer(&self.mask, 0, &mask_bytes(surge));
-        let pipes = match rig.quality {
-            Quality::Standard => &self.sq,
-            Quality::High => &self.hq,
-        };
-        for _ in 0..rig.quality.spec().steps {
+        for _ in 0..SIM_STEPS {
             run_compute(
                 encoder,
-                &pipes.sim,
+                &self.sim,
                 &rig.water.sim_bind[rig.water.phase],
                 rig.water.size,
             );
@@ -601,7 +485,7 @@ impl Frost {
         }
         run_pass(
             encoder,
-            &pipes.composite,
+            &self.composite,
             &rig.water.composite_bind[rig.water.phase],
             surface,
         );
@@ -616,10 +500,9 @@ impl Frost {
         scene: &Target,
         blur: &Target,
     ) -> Water {
-        let spec = self.quality.spec();
         let size = wgpu::Extent3d {
-            width: width.div_ceil(spec.scale).max(1),
-            height: height.div_ceil(spec.scale).max(1),
+            width: width.div_ceil(SIM_SCALE).max(1),
+            height: height.div_ceil(SIM_SCALE).max(1),
             depth_or_array_layers: 1,
         };
         let textures = (0..2)
@@ -1025,7 +908,7 @@ const LIFT_RADIUS: f32 = 3.0;
 const PLATE_FEATHER: f32 = 6.0;
 const PLATE_LIFT_GAIN: f32 = 2.0;
 const PLATE_DRY_GAIN: f32 = 5.0;
-override FIELD_SCALE: f32 = 2.0;
+const FIELD_SCALE: f32 = 2.0;
 const FIELD_HEIGHT_CEIL: f32 = 48.0;
 const FIELD_FLOW_CEIL: f32 = 18.0;
 
@@ -1330,9 +1213,8 @@ struct Touch {
     wave: vec4f,
 }
 
-override SIM_SCALE: f32 = 2.0;
-override DT: f32 = 1.0 / 240.0;
-override SOURCE_SCALE: f32 = 1.0;
+const SIM_SCALE: f32 = 2.0;
+const DT: f32 = 1.0 / 240.0;
 const LIFT_RADIUS: f32 = 3.0;
 const PLATE_FEATHER: f32 = 6.0;
 const SOURCE_SIGMA: f32 = 12.0;
@@ -1485,7 +1367,7 @@ fn step(@builtin(global_invocation_id) gid: vec3u) {
     let shelf_speed = clamp((1.0 - mask.r_panel) / (1.0 + mask.r_panel), 0.2, 1.0);
     let cfl = 0.66 * SIM_SCALE / DT;
     let c = min(mask.wave_v * mix(shelf_speed, 1.0, shelf), cfl);
-    var v = here.y + c * c * lap * DT + source(px) * mask.source_gain * SOURCE_SCALE;
+    var v = here.y + c * c * lap * DT + source(px) * mask.source_gain;
     v = v + clamp(mask.viscosity, 0.0, 220.0) * v_lap * DT;
     v = v * exp(-DT / max(mask.wave_damp, 0.08)) * mix(0.985, 1.0, shelf);
 

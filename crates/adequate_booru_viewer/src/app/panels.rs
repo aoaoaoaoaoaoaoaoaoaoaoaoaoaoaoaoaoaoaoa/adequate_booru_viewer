@@ -229,7 +229,9 @@ impl Bayonet {
                     changed = true;
                 }
                 if chrome::glyph(ui, "HQ", high)
-                    .on_hover_text("full-resolution water lattice; switching wipes the pond")
+                    .on_hover_text(
+                        "parked until the water solver grows a real multiresolution field",
+                    )
                     .clicked()
                     && !high
                 {

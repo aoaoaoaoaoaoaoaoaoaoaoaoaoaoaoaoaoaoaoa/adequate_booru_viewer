@@ -200,7 +200,6 @@ impl Boiler {
             &primitives,
             &output.textures_delta,
             output.pixels_per_point,
-            self.app.water_quality(),
             &crate::frost::Surge {
                 dry: !self.app.water_wet(),
                 veil,
@@ -384,20 +383,12 @@ impl Rig {
         primitives: &[egui::ClippedPrimitive],
         delta: &egui::TexturesDelta,
         pixels_per_point: f32,
-        quality: crate::frost::Quality,
         surge: &crate::frost::Surge<'_>,
     ) {
         let screen = ScreenDescriptor {
             size_in_pixels: [self.config.width, self.config.height],
             pixels_per_point,
         };
-        self.frost.set_quality(
-            &self.gpu.device,
-            &self.gpu.queue,
-            self.config.width,
-            self.config.height,
-            quality,
-        );
         let mut encoder = self
             .gpu
             .device
