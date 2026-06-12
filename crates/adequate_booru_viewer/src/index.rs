@@ -90,6 +90,7 @@ const ANCHOR_GAP: Duration = Duration::from_secs(30);
 /// Decoded postings the vault may hold; eviction scans are O(cap) and rare.
 const VAULT_CAP: usize = 96;
 const RECORD_VAULT_CAP: usize = 4096;
+const SORT_HEAD_CAP: usize = 262_144;
 
 /// Cache of decoded posting bitmaps for the merged tables. Hot tags skip the
 /// redb chunk scan and roaring deserialization on every query; the merge loop
@@ -192,12 +193,42 @@ impl RecordVault {
     }
 }
 
+#[derive(Default)]
+struct SortHeadVault {
+    score: Option<Arc<Vec<u32>>>,
+    favs: Option<Arc<Vec<u32>>>,
+}
+
+impl SortHeadVault {
+    fn get(&self, sort: Sort) -> Option<Arc<Vec<u32>>> {
+        match sort {
+            Sort::Score => self.score.clone(),
+            Sort::Favorites => self.favs.clone(),
+            Sort::Newest => None,
+        }
+    }
+
+    fn put(&mut self, sort: Sort, ids: Arc<Vec<u32>>) {
+        match sort {
+            Sort::Score => self.score = Some(ids),
+            Sort::Favorites => self.favs = Some(ids),
+            Sort::Newest => {}
+        }
+    }
+
+    fn clear(&mut self) {
+        self.score = None;
+        self.favs = None;
+    }
+}
+
 #[derive(Clone)]
 pub struct Index {
     db: Arc<Database>,
     anchor: Arc<Mutex<Instant>>,
     vault: Arc<Mutex<Vault>>,
     records: Arc<Mutex<RecordVault>>,
+    sort_heads: Arc<Mutex<SortHeadVault>>,
 }
 
 impl Index {
@@ -210,6 +241,7 @@ impl Index {
             anchor: Arc::new(Mutex::new(Instant::now())),
             vault: Arc::new(Mutex::new(Vault::new())),
             records: Arc::new(Mutex::new(RecordVault::new())),
+            sort_heads: Arc::new(Mutex::new(SortHeadVault::default())),
         };
         index.prime()?;
         startup("index.prime.done");
@@ -221,6 +253,7 @@ impl Index {
         Self::absorb_into(&tx, posts)?;
         tx.commit().context("commit index write")?;
         self.evict_records(posts);
+        self.clear_sort_heads();
         Ok(())
     }
 
@@ -237,6 +270,7 @@ impl Index {
         }
         tx.commit().context("commit crawl write")?;
         self.evict_records(posts);
+        self.clear_sort_heads();
         Ok(())
     }
 
@@ -245,6 +279,10 @@ impl Index {
         for post in posts {
             records.evict(post.id);
         }
+    }
+
+    fn clear_sort_heads(&self) {
+        lock_sort_heads(&self.sort_heads).clear();
     }
 
     fn absorb_into(tx: &redb::WriteTransaction, posts: &[PostRecord]) -> Result<()> {
@@ -475,44 +513,20 @@ impl Index {
             (Some(candidate @ Candidate::Cofinite(_)), Sort::Newest) => {
                 newest_ids_filtered(&posts, candidate, limit)?
             }
-            (None, Sort::Score) => lane_ids(
-                &tx.open_table(SCORE_POSTS).context("open score_posts")?,
-                None,
-                limit,
-            )?,
-            (None, Sort::Favorites) => lane_ids(
-                &tx.open_table(FAV_POSTS).context("open fav_posts")?,
-                None,
-                limit,
-            )?,
+            (None, Sort::Score | Sort::Favorites) => self.ranked_ids(&tx, sort, None, limit)?,
             (Some(candidate @ Candidate::Finite(bitmap)), Sort::Score)
                 if bitmap.len() > SMALL_SORT =>
             {
-                lane_ids(
-                    &tx.open_table(SCORE_POSTS).context("open score_posts")?,
-                    Some(candidate),
-                    limit,
-                )?
+                self.ranked_ids(&tx, sort, Some(candidate), limit)?
             }
             (Some(candidate @ Candidate::Finite(bitmap)), Sort::Favorites)
                 if bitmap.len() > SMALL_SORT =>
             {
-                lane_ids(
-                    &tx.open_table(FAV_POSTS).context("open fav_posts")?,
-                    Some(candidate),
-                    limit,
-                )?
+                self.ranked_ids(&tx, sort, Some(candidate), limit)?
             }
-            (Some(candidate @ Candidate::Cofinite(_)), Sort::Score) => lane_ids(
-                &tx.open_table(SCORE_POSTS).context("open score_posts")?,
-                Some(candidate),
-                limit,
-            )?,
-            (Some(candidate @ Candidate::Cofinite(_)), Sort::Favorites) => lane_ids(
-                &tx.open_table(FAV_POSTS).context("open fav_posts")?,
-                Some(candidate),
-                limit,
-            )?,
+            (Some(candidate @ Candidate::Cofinite(_)), Sort::Score | Sort::Favorites) => {
+                self.ranked_ids(&tx, sort, Some(candidate), limit)?
+            }
             (Some(Candidate::Finite(bitmap)), Sort::Score | Sort::Favorites) => {
                 local_sorted_ids(&posts, bitmap.as_ref(), sort, limit)?
             }
@@ -545,6 +559,55 @@ impl Index {
             posts: hydrated,
             candidates,
         })
+    }
+
+    fn ranked_ids(
+        &self,
+        tx: &redb::ReadTransaction,
+        sort: Sort,
+        candidate: Option<&Candidate>,
+        limit: usize,
+    ) -> Result<Vec<u32>> {
+        let head = self.sort_head(tx, sort)?;
+        if let Some(ids) = head_ids(&head, candidate, limit) {
+            return Ok(ids);
+        }
+        match sort {
+            Sort::Score => lane_ids(
+                &tx.open_table(SCORE_POSTS).context("open score_posts")?,
+                candidate,
+                limit,
+            ),
+            Sort::Favorites => lane_ids(
+                &tx.open_table(FAV_POSTS).context("open fav_posts")?,
+                candidate,
+                limit,
+            ),
+            Sort::Newest => unreachable!("newest is not a ranked sort lane"),
+        }
+    }
+
+    fn sort_head(&self, tx: &redb::ReadTransaction, sort: Sort) -> Result<Arc<Vec<u32>>> {
+        if let Some(ids) = lock_sort_heads(&self.sort_heads).get(sort) {
+            return Ok(ids);
+        }
+        let ids = Arc::new(match sort {
+            Sort::Score => lane_head(
+                &tx.open_table(SCORE_POSTS).context("open score_posts")?,
+                SORT_HEAD_CAP,
+            )?,
+            Sort::Favorites => lane_head(
+                &tx.open_table(FAV_POSTS).context("open fav_posts")?,
+                SORT_HEAD_CAP,
+            )?,
+            Sort::Newest => unreachable!("newest has no sort-head cache"),
+        });
+        let mut heads = lock_sort_heads(&self.sort_heads);
+        if let Some(raced) = heads.get(sort) {
+            return Ok(raced);
+        }
+        heads.put(sort, Arc::clone(&ids));
+        Ok(ids)
     }
 
     fn prime(&self) -> Result<()> {
@@ -1105,6 +1168,13 @@ fn lock_record_vault(vault: &Mutex<RecordVault>) -> std::sync::MutexGuard<'_, Re
     }
 }
 
+fn lock_sort_heads(vault: &Mutex<SortHeadVault>) -> std::sync::MutexGuard<'_, SortHeadVault> {
+    match vault.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 fn read_posting_bitmap(
     chunks: &impl redb::ReadableTable<&'static str, &'static [u8]>,
     pending: &FactBatch,
@@ -1269,6 +1339,32 @@ fn lane_ids(
         }
     }
     Ok(ids)
+}
+
+fn lane_head(table: &impl redb::ReadableTable<u64, u32>, cap: usize) -> Result<Vec<u32>> {
+    table
+        .range(0_u64..=u64::MAX)
+        .context("range sort head")?
+        .rev()
+        .take(cap)
+        .map(|row| {
+            let (_, id) = row.context("read sort-head row")?;
+            Ok(id.value())
+        })
+        .collect()
+}
+
+fn head_ids(head: &[u32], candidate: Option<&Candidate>, limit: usize) -> Option<Vec<u32>> {
+    let mut ids = Vec::with_capacity(limit);
+    for id in head {
+        if candidate.is_none_or(|candidate| candidate.contains(*id)) {
+            ids.push(*id);
+            if ids.len() == limit {
+                return Some(ids);
+            }
+        }
+    }
+    (candidate.is_none() && ids.len() == limit).then_some(ids)
 }
 
 fn local_sorted_ids(
