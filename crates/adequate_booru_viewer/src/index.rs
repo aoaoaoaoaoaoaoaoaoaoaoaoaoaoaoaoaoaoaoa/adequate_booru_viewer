@@ -415,7 +415,7 @@ impl Index {
         let ids = match (&candidate, sort) {
             (None, Sort::Newest) => newest_ids(&posts, limit)?,
             (Some(Candidate::Finite(bitmap)), Sort::Newest) => {
-                bitmap.iter().rev().take(limit).collect::<Vec<_>>()
+                bitmap.as_ref().iter().rev().take(limit).collect::<Vec<_>>()
             }
             (Some(candidate @ Candidate::Cofinite(_)), Sort::Newest) => {
                 newest_ids_filtered(&posts, candidate, limit)?
@@ -459,7 +459,7 @@ impl Index {
                 limit,
             )?,
             (Some(Candidate::Finite(bitmap)), Sort::Score | Sort::Favorites) => {
-                local_sorted_ids(&posts, bitmap, sort, limit)?
+                local_sorted_ids(&posts, bitmap.as_ref(), sort, limit)?
             }
         };
         startup("index.search.ids");
@@ -597,8 +597,38 @@ impl Index {
 
 #[derive(Clone, Debug)]
 enum Candidate {
-    Finite(RoaringBitmap),
-    Cofinite(RoaringBitmap),
+    Finite(BitmapCow),
+    Cofinite(BitmapCow),
+}
+
+#[derive(Clone, Debug)]
+enum BitmapCow {
+    Shared(Arc<RoaringBitmap>),
+    Owned(RoaringBitmap),
+}
+
+impl BitmapCow {
+    fn as_ref(&self) -> &RoaringBitmap {
+        match self {
+            Self::Shared(bitmap) => bitmap,
+            Self::Owned(bitmap) => bitmap,
+        }
+    }
+
+    fn into_owned(self) -> RoaringBitmap {
+        match self {
+            Self::Shared(bitmap) => (*bitmap).clone(),
+            Self::Owned(bitmap) => bitmap,
+        }
+    }
+
+    fn len(&self) -> u64 {
+        self.as_ref().len()
+    }
+
+    fn contains(&self, id: u32) -> bool {
+        self.as_ref().contains(id)
+    }
 }
 
 impl Candidate {
@@ -625,10 +655,10 @@ impl Candidate {
 
     fn materialize(self, universe: &RoaringBitmap) -> RoaringBitmap {
         match self {
-            Self::Finite(bitmap) => bitmap,
+            Self::Finite(bitmap) => bitmap.into_owned(),
             Self::Cofinite(excluded) => {
                 let mut bitmap = universe.clone();
-                bitmap -= excluded;
+                bitmap -= excluded.as_ref();
                 bitmap
             }
         }
@@ -714,46 +744,48 @@ where
             .iter()
             .all(|child| matches!(child, Candidate::Finite(_)))
         {
-            return Ok(Candidate::Finite(exactly_one(
+            return Ok(Candidate::Finite(BitmapCow::Owned(exactly_one(
                 children
                     .into_iter()
                     .filter_map(|child| match child {
                         Candidate::Finite(bitmap) => Some(bitmap),
                         Candidate::Cofinite(_) => None,
                     })
+                    .map(BitmapCow::into_owned)
                     .collect(),
-            )));
+            ))));
         }
         let universe = self.universe()?;
-        Ok(Candidate::Finite(exactly_one(
+        Ok(Candidate::Finite(BitmapCow::Owned(exactly_one(
             children
                 .into_iter()
                 .map(|child| child.materialize(&universe))
                 .collect(),
-        )))
+        ))))
     }
 }
 
 fn conjunction(children: Vec<Candidate>) -> Candidate {
-    let mut finite = Vec::<RoaringBitmap>::new();
+    let mut finite = Vec::<BitmapCow>::new();
     let mut excluded = RoaringBitmap::new();
     for child in children {
         match child {
             Candidate::Finite(bitmap) => finite.push(bitmap),
-            Candidate::Cofinite(bitmap) => excluded |= bitmap,
+            Candidate::Cofinite(bitmap) => excluded |= bitmap.as_ref(),
         }
     }
-    finite.sort_unstable_by_key(RoaringBitmap::len);
+    finite.sort_unstable_by_key(BitmapCow::len);
     let mut finite = finite.into_iter();
     match finite.next() {
-        Some(mut bitmap) => {
+        Some(bitmap) => {
+            let mut bitmap = bitmap.into_owned();
             for child in finite {
-                bitmap &= child;
+                bitmap &= child.as_ref();
             }
             bitmap -= excluded;
-            Candidate::Finite(bitmap)
+            Candidate::Finite(BitmapCow::Owned(bitmap))
         }
-        None => Candidate::Cofinite(excluded),
+        None => Candidate::Cofinite(BitmapCow::Owned(excluded)),
     }
 }
 
@@ -762,19 +794,19 @@ fn disjunction(children: Vec<Candidate>) -> Candidate {
     let mut cofinite = None::<RoaringBitmap>;
     for child in children {
         match child {
-            Candidate::Finite(bitmap) => finite |= bitmap,
+            Candidate::Finite(bitmap) => finite |= bitmap.as_ref(),
             Candidate::Cofinite(excluded) => match &mut cofinite {
-                Some(acc) => *acc &= excluded,
-                None => cofinite = Some(excluded),
+                Some(acc) => *acc &= excluded.as_ref(),
+                None => cofinite = Some(excluded.into_owned()),
             },
         }
     }
     match cofinite {
         Some(mut excluded) => {
             excluded -= finite;
-            Candidate::Cofinite(excluded)
+            Candidate::Cofinite(BitmapCow::Owned(excluded))
         }
-        None => Candidate::Finite(finite),
+        None => Candidate::Finite(BitmapCow::Owned(finite)),
     }
 }
 
@@ -1016,7 +1048,7 @@ fn read_posting_bitmap(
     vault: &Mutex<Vault>,
     lane: PostingLane,
     key: &str,
-) -> Result<RoaringBitmap> {
+) -> Result<BitmapCow> {
     let cached = lock_vault(vault).get(lane, key);
     let base = if let Some(base) = cached {
         base
@@ -1024,12 +1056,13 @@ fn read_posting_bitmap(
         let decoded = read_chunk_bitmap(chunks, key)?;
         lock_vault(vault).put(lane, key, decoded)
     };
-    let mut bitmap = (*base).clone();
     if let Some(delta) = pending.group(lane, key) {
+        let mut bitmap = (*base).clone();
         bitmap -= &delta.del;
         bitmap |= &delta.add;
+        return Ok(BitmapCow::Owned(bitmap));
     }
-    Ok(bitmap)
+    Ok(BitmapCow::Shared(base))
 }
 
 fn read_chunk_row(
