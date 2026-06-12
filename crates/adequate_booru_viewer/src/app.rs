@@ -132,7 +132,7 @@ impl Default for Surf {
             viewer_amp: 1.6,
             viewer_life: 8.0,
             quiver_release: 0.48,
-            scroll_coupling: 0.0028,
+            scroll_coupling: 0.02,
             scroll_tau: 0.11,
             poison_sweep: true,
             tau_rise: 0.09,

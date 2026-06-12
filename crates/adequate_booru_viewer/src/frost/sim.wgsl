@@ -60,11 +60,12 @@ override IMPULSE_GAIN: f32 = 1.0;
 const LIFT_RADIUS: f32 = 3.0;
 const PLATE_FEATHER: f32 = 6.0;
 const SOURCE_LIFE: f32 = 0.22;
-const BASIN_TAPER: f32 = 28.0; const BASIN_GAIN: f32 = 0.5;
+const BASIN_TAPER: f32 = 28.0;
+const BASIN_GAIN: f32 = 0.5;
 const SOURCE_CEIL: f32 = 72.0;
 const H_CEIL: f32 = 48.0;
 const V_CEIL: f32 = 1440.0;
-const TILT_CEIL: f32 = 36.0;
+const TILT_CEIL: f32 = 48.0;
 const RAFT_STIFFNESS: f32 = 420.0;
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
