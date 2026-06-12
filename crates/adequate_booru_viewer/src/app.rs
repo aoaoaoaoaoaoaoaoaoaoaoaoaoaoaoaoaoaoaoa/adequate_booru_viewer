@@ -437,11 +437,16 @@ impl Bayonet {
         query.sort_atoms();
         self.active_group = query.clamp_group_path(&active_group);
         self.query = query;
-        self.advance_thumb_epoch();
+        self.clear_hit();
         let query = self.query.clone();
         self.align_warm(&query);
         self.save_config();
         self.strike(true, AUTO_WARM_PAGES);
+    }
+
+    fn clear_hit(&mut self) {
+        self.parked_hit = None;
+        self.commit_hit(SearchHit::default());
     }
 
     fn install_hit(&mut self, hit: SearchHit) {

@@ -165,9 +165,11 @@ impl Bayonet {
         let _sort = ui.horizontal_wrapped(|ui| {
             let _label = ui.label(chrome::eyebrow("SORT"));
             for sort in Sort::ALL {
-                if chrome::glyph(ui, sort.label(), self.sort == sort).clicked() {
+                if chrome::glyph(ui, sort.label(), self.sort == sort).clicked() && self.sort != sort
+                {
                     self.sort = sort;
                     self.save_config();
+                    self.clear_hit();
                     self.strike(true, AUTO_WARM_PAGES);
                 }
             }
@@ -275,7 +277,6 @@ impl Bayonet {
         for line in [
             "enter: add typed tag(s) to highlighted group",
             "-tag: add a negative tag atom",
-            "rating:q: query rating meta-tags",
             "right-click thumbnail: inspect tags",
             "thumbnail tag menu: + require, - exclude, × remove",
             "click thumbnail: open full viewer",
