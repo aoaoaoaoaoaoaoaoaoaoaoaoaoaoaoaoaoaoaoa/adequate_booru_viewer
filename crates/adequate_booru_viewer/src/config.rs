@@ -104,6 +104,10 @@ fn shelf_open_default() -> bool {
     true
 }
 
+fn water_wet_default() -> bool {
+    true
+}
+
 /// Persistent workbench state (XDG state dir): the snapshot the app keeps of
 /// itself — scratch query, selections, sliders, folder collapse. Nothing here
 /// is user-authored; losing it must never lose user intent.
@@ -115,6 +119,7 @@ pub struct Slate {
     pub query: QueryConfig,
     pub sort: Sort,
     pub images_per_row: u16,
+    #[serde(default = "water_wet_default")]
     pub water_wet: bool,
     pub water_hq: bool,
 }
@@ -275,6 +280,22 @@ mod tests {
         let slate = Slate::default();
         assert!(slate.water_wet);
         assert!(!slate.water_hq);
+    }
+
+    #[test]
+    fn old_slate_migrates_to_wet_standard_quality() -> Result<()> {
+        let slate = toml::from_str::<Slate>(
+            r#"
+sort = "score"
+images_per_row = 5
+
+[query]
+active_group = []
+"#,
+        )?;
+        assert!(slate.water_wet);
+        assert!(!slate.water_hq);
+        Ok(())
     }
 
     #[test]

@@ -14,11 +14,11 @@ use std::f32::consts::TAU;
 
 /// Mip levels in the blur chain: /2, /4, /8 of the surface.
 const LEVELS: usize = 3;
+/// Water simulation decimation. Solver cells are square, in physical pixels.
+const SIM_SCALE: u32 = 2;
 const SIM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const SIM_BYTES: u32 = 8;
 const SIM_STEPS: usize = 4;
-pub const SIM_SCALE_HIGH: f32 = 1.0;
-pub const SIM_SCALE_STANDARD: f32 = 2.0;
 const SIM_WORKGROUP: u32 = 8;
 /// How many grid tiles may rise/relax at once — the depth of the slosh trail
 /// as the pointer sweeps across the grid.
@@ -38,8 +38,8 @@ pub const TOUCH_SLOTS: usize = 12;
 /// vec2f block @0..48 (cuts a/b, water), scalars @48..80 (radii, strength,
 /// dim, blur, tide, 2 pad), `lift_rects` @80, `lift_grips` @144, quivers @160
 /// (rect + pointer/grip per slot), splashes @288, viewer rect @1312,
-/// touches @1328, brine @1520. 408 f32 lanes = 1632 bytes, matching WGSL.
-const MASK_BYTES: u64 = 1632;
+/// touches @1328, brine @1520. 404 f32 lanes = 1616 bytes, matching WGSL.
+const MASK_BYTES: u64 = 1616;
 
 /// The water's chemistry: every shader-side tunable, runtime-adjustable via
 /// the water bench (F12). Defaults are the shipped feel. Physical px at 1x.
@@ -74,7 +74,6 @@ pub struct Brine {
     /// source-to-velocity gain, per-step height retention, and velocity
     /// diffusion. Diffusion is the real viscosity knob: it kills high
     /// frequency chatter faster than long swells.
-    pub sim_scale: f32,
     pub wave_v: f32,
     pub wave_sigma: f32,
     pub wave_damp: f32,
@@ -93,7 +92,6 @@ pub struct Brine {
 impl Default for Brine {
     fn default() -> Self {
         Self {
-            sim_scale: SIM_SCALE_STANDARD,
             reach: 34.0,
             meniscus_px: 1.4,
             refract_px: 1.0,
@@ -248,18 +246,14 @@ struct Rig {
     scene: Target,
     chain: Vec<Target>,
     water: Water,
-    width: u32,
-    height: u32,
-    sim_scale: u32,
 }
 
 struct Water {
     size: wgpu::Extent3d,
-    textures: Vec<wgpu::Texture>,
+    _textures: Vec<wgpu::Texture>,
     composite_bind: Vec<wgpu::BindGroup>,
     sim_bind: Vec<wgpu::BindGroup>,
     phase: usize,
-    muddy: bool,
 }
 
 struct Target {
@@ -402,23 +396,6 @@ impl Frost {
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) {
-        self.resize_with_scale(
-            device,
-            queue,
-            width,
-            height,
-            sim_scale(Brine::default().sim_scale),
-        );
-    }
-
-    fn resize_with_scale(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        width: u32,
-        height: u32,
-        sim_scale: u32,
-    ) {
         if width == 0 || height == 0 {
             self.rig = None;
             return;
@@ -460,14 +437,11 @@ impl Frost {
         let chain = (1..=LEVELS as u32)
             .map(|level| target("frost-chain", width >> level, height >> level))
             .collect::<Vec<_>>();
-        let water = self.water(device, queue, width, height, sim_scale, &scene, &chain[0]);
+        let water = self.water(device, queue, width, height, &scene, &chain[0]);
         self.rig = Some(Rig {
             scene,
             chain,
             water,
-            width,
-            height,
-            sim_scale,
         });
     }
 
@@ -479,23 +453,11 @@ impl Frost {
     /// Composites the offscreen scene to `surface` with everything in `surge`.
     pub fn compose(
         &mut self,
-        device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         surface: &wgpu::TextureView,
         surge: &Surge<'_>,
     ) {
-        let Some((width, height, current_scale)) = self
-            .rig
-            .as_ref()
-            .map(|rig| (rig.width, rig.height, rig.sim_scale))
-        else {
-            return;
-        };
-        let wanted_scale = sim_scale(surge.brine.sim_scale);
-        if current_scale != wanted_scale {
-            self.resize_with_scale(device, queue, width, height, wanted_scale);
-        }
         let Some(rig) = &mut self.rig else {
             return;
         };
@@ -509,7 +471,6 @@ impl Frost {
             );
             rig.water.phase ^= 1;
         }
-        rig.water.muddy = true;
         if surge.veil.is_some_and(|veil| veil.blur > 0.0) {
             let mut blur = |pipeline, source: &Target, sink: &wgpu::TextureView| {
                 run_pass(encoder, pipeline, &source.bind, sink);
@@ -530,51 +491,18 @@ impl Frost {
         );
     }
 
-    /// The renderer may bypass the frost pass entirely while the UI is dry.
-    /// That must also mean the next wet frame starts from a flat pond, not
-    /// from whatever tiny half-float scars were left when the solver stopped.
-    pub fn becalm(&mut self, queue: &wgpu::Queue) {
-        let Some(rig) = &mut self.rig else {
-            return;
-        };
-        if !rig.water.muddy {
-            return;
-        }
-        let zeros = vec![0_u8; (rig.water.size.width * rig.water.size.height * SIM_BYTES) as usize];
-        for texture in &rig.water.textures {
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &zeros,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(rig.water.size.width * SIM_BYTES),
-                    rows_per_image: Some(rig.water.size.height),
-                },
-                rig.water.size,
-            );
-        }
-        rig.water.phase = 0;
-        rig.water.muddy = false;
-    }
-
     fn water(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         width: u32,
         height: u32,
-        sim_scale: u32,
         scene: &Target,
         blur: &Target,
     ) -> Water {
         let size = wgpu::Extent3d {
-            width: width.div_ceil(sim_scale).max(1),
-            height: height.div_ceil(sim_scale).max(1),
+            width: width.div_ceil(SIM_SCALE).max(1),
+            height: height.div_ceil(SIM_SCALE).max(1),
             depth_or_array_layers: 1,
         };
         let textures = (0..2)
@@ -670,11 +598,10 @@ impl Frost {
             .collect::<Vec<_>>();
         Water {
             size,
-            textures: textures.into_iter().map(|(_, texture)| texture).collect(),
+            _textures: textures.into_iter().map(|(_, texture)| texture).collect(),
             composite_bind,
             sim_bind,
             phase: 0,
-            muddy: false,
         }
     }
 }
@@ -751,14 +678,6 @@ fn unfilterable_texture_entry(
             multisampled: false,
         },
         count: None,
-    }
-}
-
-fn sim_scale(scale: f32) -> u32 {
-    match scale.round() as i32 {
-        i32::MIN..=1 => 1,
-        2 => 2,
-        _ => 3,
     }
 }
 
@@ -842,8 +761,7 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
     }
     // brine @ byte 1520 (lane 380): the runtime-tunable water chemistry.
     let brine = &surge.brine;
-    lanes[380..405].copy_from_slice(&[
-        brine.sim_scale,
+    lanes[380..404].copy_from_slice(&[
         brine.reach,
         brine.meniscus_px,
         brine.refract_px,
@@ -941,7 +859,6 @@ struct Mask {
     viewer_min: vec2f,
     viewer_max: vec2f,
     touches: array<Touch, 12>,
-    sim_scale: f32,
     reach: f32,
     meniscus_px: f32,
     refract_px: f32,
@@ -966,9 +883,6 @@ struct Mask {
     r_panel: f32,
     r_wall: f32,
     shore_feather: f32,
-    _pad4: f32,
-    _pad5: f32,
-    _pad6: f32,
 }
 
 // touch.xy = pointer, touch.z = grip; .w pad.
@@ -994,6 +908,7 @@ const LIFT_RADIUS: f32 = 3.0;
 const PLATE_FEATHER: f32 = 6.0;
 const PLATE_LIFT_GAIN: f32 = 2.0;
 const PLATE_DRY_GAIN: f32 = 5.0;
+const FIELD_SCALE: f32 = 2.0;
 const FIELD_HEIGHT_CEIL: f32 = 48.0;
 const FIELD_FLOW_CEIL: f32 = 18.0;
 
@@ -1080,13 +995,8 @@ fn sane_height(x: f32) -> f32 {
     return clamp(select(0.0, x, x == x), -FIELD_HEIGHT_CEIL, FIELD_HEIGHT_CEIL);
 }
 
-fn field_scale() -> f32 {
-    return clamp(mask.sim_scale, 1.0, 3.0);
-}
-
 fn cell_px(coord: vec2i) -> vec2f {
-    let scale = field_scale();
-    return (vec2f(coord) + vec2f(0.5)) * scale;
+    return (vec2f(coord) + vec2f(0.5)) * FIELD_SCALE;
 }
 
 fn sample_height(coord: vec2i, dims: vec2i) -> f32 {
@@ -1102,14 +1012,13 @@ fn sample_visible_height(coord: vec2i, dims: vec2i, center_h: f32) -> f32 {
 
 fn field_flow(px: vec2f) -> vec2f {
     let dims = vec2i(textureDimensions(water_tex));
-    let scale = field_scale();
-    let p = clamp(vec2i(floor(px / scale)), vec2i(0), dims - vec2i(1));
+    let p = clamp(vec2i(floor(px / FIELD_SCALE)), vec2i(0), dims - vec2i(1));
     let center_h = sample_height(p, dims);
     let hx = sample_visible_height(p + vec2i(1, 0), dims, center_h)
         - sample_visible_height(p - vec2i(1, 0), dims, center_h);
     let hy = sample_visible_height(p + vec2i(0, 1), dims, center_h)
         - sample_visible_height(p - vec2i(0, 1), dims, center_h);
-    var flow = -vec2f(hx, hy) * (4.5 / scale);
+    var flow = -vec2f(hx, hy) * (4.5 / FIELD_SCALE);
     let mag = length(flow);
     flow = flow * min(1.0, FIELD_FLOW_CEIL / max(mag, 1e-4));
     return flow;
@@ -1264,7 +1173,6 @@ struct Mask {
     viewer_min: vec2f,
     viewer_max: vec2f,
     touches: array<Touch, 12>,
-    sim_scale: f32,
     reach: f32,
     meniscus_px: f32,
     refract_px: f32,
@@ -1289,9 +1197,6 @@ struct Mask {
     r_panel: f32,
     r_wall: f32,
     shore_feather: f32,
-    _pad4: f32,
-    _pad5: f32,
-    _pad6: f32,
 }
 
 struct Quiver {
@@ -1308,6 +1213,7 @@ struct Touch {
     wave: vec4f,
 }
 
+const SIM_SCALE: f32 = 2.0;
 const DT: f32 = 1.0 / 240.0;
 const LIFT_RADIUS: f32 = 3.0;
 const PLATE_FEATHER: f32 = 6.0;
@@ -1323,8 +1229,7 @@ const V_CEIL: f32 = 1440.0;
 @group(0) @binding(2) var<uniform> mask: Mask;
 
 fn cell_px(p: vec2i) -> vec2f {
-    let scale = clamp(mask.sim_scale, 1.0, 3.0);
-    return (vec2f(p) + vec2f(0.5)) * scale;
+    return (vec2f(p) + vec2f(0.5)) * SIM_SCALE;
 }
 
 fn sd_cut(px: vec2f, rect_min: vec2f, rect_max: vec2f, radius: f32) -> f32 {
@@ -1451,25 +1356,19 @@ fn step(@builtin(global_invocation_id) gid: vec3u) {
     let r = wall_height(p + vec2i(1, 0), dims, h);
     let u = wall_height(p + vec2i(0, -1), dims, h);
     let d = wall_height(p + vec2i(0, 1), dims, h);
-    let scale = clamp(mask.sim_scale, 1.0, 3.0);
-    let lap = (l + r + u + d - 4.0 * h) / (scale * scale);
+    let lap = (l + r + u + d - 4.0 * h) / (SIM_SCALE * SIM_SCALE);
     let vl = wall_velocity(p + vec2i(-1, 0), dims, here.y);
     let vr = wall_velocity(p + vec2i(1, 0), dims, here.y);
     let vu = wall_velocity(p + vec2i(0, -1), dims, here.y);
     let vd = wall_velocity(p + vec2i(0, 1), dims, here.y);
-    let v_lap = (vl + vr + vu + vd - 4.0 * here.y) / (scale * scale);
+    let v_lap = (vl + vr + vu + vd - 4.0 * here.y) / (SIM_SCALE * SIM_SCALE);
 
     let shelf = smoothstep(-mask.shore_feather, mask.shore_feather, px.x - mask.water_min.x);
     let shelf_speed = clamp((1.0 - mask.r_panel) / (1.0 + mask.r_panel), 0.2, 1.0);
-    let cfl = 0.66 * scale / DT;
+    let cfl = 0.66 * SIM_SCALE / DT;
     let c = min(mask.wave_v * mix(shelf_speed, 1.0, shelf), cfl);
     var v = here.y + c * c * lap * DT + source(px) * mask.source_gain;
-    // Explicit diffusion must obey ν·dt/dx² ≤ 1/4. SQ happened to sit below
-    // the bound; HQ halves dx and would otherwise explode into chromatic
-    // pixel confetti. Clamp the physical viscosity to the grid's stability
-    // limit instead of trusting a UI knob to know the finite-difference law.
-    let viscosity = min(clamp(mask.viscosity, 0.0, 220.0), 0.23 * scale * scale / DT);
-    v = v + viscosity * v_lap * DT;
+    v = v + clamp(mask.viscosity, 0.0, 220.0) * v_lap * DT;
     v = v * exp(-DT / max(mask.wave_damp, 0.08)) * mix(0.985, 1.0, shelf);
 
     let block = obstacle(px);

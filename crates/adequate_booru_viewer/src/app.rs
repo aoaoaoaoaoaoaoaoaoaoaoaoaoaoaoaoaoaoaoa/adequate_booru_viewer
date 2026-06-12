@@ -123,13 +123,6 @@ impl WaterUi {
     fn standard(self) -> bool {
         matches!(self, Self::Wet(WaterQuality::Standard))
     }
-
-    fn sim_scale(self) -> f32 {
-        match self {
-            Self::Dry | Self::Wet(WaterQuality::Standard) => crate::frost::SIM_SCALE_STANDARD,
-            Self::Wet(WaterQuality::High) => crate::frost::SIM_SCALE_HIGH,
-        }
-    }
 }
 
 impl Default for Surf {
@@ -365,9 +358,7 @@ impl Bayonet {
 
     /// The water chemistry for the compose pass.
     pub fn brine(&self) -> crate::frost::Brine {
-        let mut brine = self.brine;
-        brine.sim_scale = self.water_ui.sim_scale();
-        brine
+        self.brine
     }
 
     pub fn water_wet(&self) -> bool {

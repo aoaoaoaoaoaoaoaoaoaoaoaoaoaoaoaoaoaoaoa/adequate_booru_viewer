@@ -221,7 +221,7 @@ impl Bayonet {
         let _quality = ui.add_enabled_ui(wet, |ui| {
             let _row = ui.horizontal_wrapped(|ui| {
                 if chrome::glyph(ui, "SQ", standard)
-                    .on_hover_text("standard quality: 2× downsampled water sim")
+                    .on_hover_text("stable water physics lattice")
                     .clicked()
                     && !standard
                 {
@@ -229,7 +229,9 @@ impl Bayonet {
                     changed = true;
                 }
                 if chrome::glyph(ui, "HQ", high)
-                    .on_hover_text("high quality: full-resolution water sim")
+                    .on_hover_text(
+                        "parked until the water solver grows a real multiresolution field",
+                    )
                     .clicked()
                     && !high
                 {
