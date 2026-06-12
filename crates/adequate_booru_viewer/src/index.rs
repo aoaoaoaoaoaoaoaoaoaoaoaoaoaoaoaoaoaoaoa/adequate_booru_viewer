@@ -745,22 +745,17 @@ where
             .all(|child| matches!(child, Candidate::Finite(_)))
         {
             return Ok(Candidate::Finite(BitmapCow::Owned(exactly_one(
-                children
-                    .into_iter()
-                    .filter_map(|child| match child {
-                        Candidate::Finite(bitmap) => Some(bitmap),
-                        Candidate::Cofinite(_) => None,
-                    })
-                    .map(BitmapCow::into_owned)
-                    .collect(),
+                children.into_iter().filter_map(|child| match child {
+                    Candidate::Finite(bitmap) => Some(bitmap),
+                    Candidate::Cofinite(_) => None,
+                }),
             ))));
         }
         let universe = self.universe()?;
         Ok(Candidate::Finite(BitmapCow::Owned(exactly_one(
             children
                 .into_iter()
-                .map(|child| child.materialize(&universe))
-                .collect(),
+                .map(|child| BitmapCow::Owned(child.materialize(&universe))),
         ))))
     }
 }
@@ -1123,11 +1118,12 @@ fn collect_chunked_tag_names(
     Ok(())
 }
 
-fn exactly_one(children: Vec<RoaringBitmap>) -> RoaringBitmap {
+fn exactly_one(children: impl IntoIterator<Item = BitmapCow>) -> RoaringBitmap {
     let mut exactly = RoaringBitmap::new();
     let mut repeated = RoaringBitmap::new();
     for child in children {
-        let overlap = &exactly & &child;
+        let child = child.as_ref();
+        let overlap = &exactly & child;
         repeated |= overlap;
         exactly ^= child;
         exactly -= &repeated;
