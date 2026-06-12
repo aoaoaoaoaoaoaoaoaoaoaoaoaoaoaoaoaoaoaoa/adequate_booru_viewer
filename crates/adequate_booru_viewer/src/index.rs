@@ -196,6 +196,7 @@ impl RecordVault {
 
 #[derive(Default)]
 struct SortHeadVault {
+    newest: Option<Arc<Vec<u32>>>,
     score: Option<Arc<Vec<u32>>>,
     favs: Option<Arc<Vec<u32>>>,
 }
@@ -203,21 +204,22 @@ struct SortHeadVault {
 impl SortHeadVault {
     fn get(&self, sort: Sort) -> Option<Arc<Vec<u32>>> {
         match sort {
+            Sort::Newest => self.newest.clone(),
             Sort::Score => self.score.clone(),
             Sort::Favorites => self.favs.clone(),
-            Sort::Newest => None,
         }
     }
 
     fn put(&mut self, sort: Sort, ids: Arc<Vec<u32>>) {
         match sort {
+            Sort::Newest => self.newest = Some(ids),
             Sort::Score => self.score = Some(ids),
             Sort::Favorites => self.favs = Some(ids),
-            Sort::Newest => {}
         }
     }
 
     fn clear(&mut self) {
+        self.newest = None;
         self.score = None;
         self.favs = None;
     }
@@ -562,12 +564,12 @@ impl Index {
         startup("index.search.candidates.len");
 
         let ids = match (&candidate, sort) {
-            (None, Sort::Newest) => newest_ids(&posts, limit)?,
+            (None, Sort::Newest) => self.newest_ranked_ids(&posts, None, limit)?,
             (Some(Candidate::Finite(bitmap)), Sort::Newest) => {
                 bitmap.as_ref().iter().rev().take(limit).collect::<Vec<_>>()
             }
             (Some(candidate @ Candidate::Cofinite(_)), Sort::Newest) => {
-                newest_ids_filtered(&posts, candidate, limit)?
+                self.newest_ranked_ids(&posts, Some(candidate), limit)?
             }
             (None, Sort::Score | Sort::Favorites) => self.ranked_ids(&tx, sort, None, limit)?,
             (Some(candidate @ Candidate::Finite(bitmap)), Sort::Score)
@@ -641,6 +643,38 @@ impl Index {
             ),
             Sort::Newest => unreachable!("newest is not a ranked sort lane"),
         }
+    }
+
+    fn newest_ranked_ids(
+        &self,
+        posts: &impl redb::ReadableTable<u64, &'static [u8]>,
+        candidate: Option<&Candidate>,
+        limit: usize,
+    ) -> Result<Vec<u32>> {
+        let head = self.newest_head(posts)?;
+        if let Some(ids) = head_ids(&head, candidate, limit) {
+            return Ok(ids);
+        }
+        match candidate {
+            Some(candidate) => newest_ids_filtered(posts, candidate, limit),
+            None => newest_ids(posts, limit),
+        }
+    }
+
+    fn newest_head(
+        &self,
+        posts: &impl redb::ReadableTable<u64, &'static [u8]>,
+    ) -> Result<Arc<Vec<u32>>> {
+        if let Some(ids) = lock_sort_heads(&self.sort_heads).get(Sort::Newest) {
+            return Ok(ids);
+        }
+        let ids = Arc::new(post_head(posts, SORT_HEAD_CAP)?);
+        let mut heads = lock_sort_heads(&self.sort_heads);
+        if let Some(raced) = heads.get(Sort::Newest) {
+            return Ok(raced);
+        }
+        heads.put(Sort::Newest, Arc::clone(&ids));
+        Ok(ids)
     }
 
     fn sort_head(&self, tx: &redb::ReadTransaction, sort: Sort) -> Result<Arc<Vec<u32>>> {
@@ -1382,6 +1416,19 @@ fn newest_ids(
         .map(|row| {
             row.map(|(id, _)| id.value() as u32)
                 .context("read newest row")
+        })
+        .collect()
+}
+
+fn post_head(table: &impl redb::ReadableTable<u64, &'static [u8]>, cap: usize) -> Result<Vec<u32>> {
+    table
+        .range(0_u64..=u64::MAX)
+        .context("range newest head")?
+        .rev()
+        .take(cap)
+        .map(|row| {
+            row.map(|(id, _)| id.value() as u32)
+                .context("read newest-head row")
         })
         .collect()
 }
