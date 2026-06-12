@@ -1,6 +1,6 @@
 /// A scroll jump larger than this is navigation, not momentum.
 const TILT_TELEPORT: f32 = 2500.0;
-const TILT_CEIL: f32 = 18.0;
+const TILT_CEIL: f32 = 180.0;
 const TILT_EPSILON: f32 = 0.015;
 
 /// Linearized tray tilt: scroll velocity tips the water tray, while the

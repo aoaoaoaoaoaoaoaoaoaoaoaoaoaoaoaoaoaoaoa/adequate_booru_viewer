@@ -70,7 +70,7 @@ impl super::Bayonet {
                     );
                 });
                 section(ui, "SCROLL SLOSH", |ui| {
-                    knob(ui, "tilt per px/s", &mut surf.scroll_coupling, 0.0..=0.008);
+                    knob(ui, "tilt per px/s", &mut surf.scroll_coupling, 0.0..=0.08);
                     knob(ui, "tray memory s", &mut surf.scroll_tau, 0.02..=0.8);
                 });
                 section(ui, "BOUNDARIES", |ui| {
