@@ -147,21 +147,36 @@ fn palette_body(
                 for tag in tags {
                     let active = query.polarity(tag);
                     let _row = ui.horizontal(|ui| {
-                        remove_slot(ui, active.is_some(), tag, strikes, pulses);
-                        let require = chrome::small_still(ui, "+").on_hover_text("require tag");
-                        if chrome::hover_started(ui, &require) {
-                            pulses.push(require.rect);
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        if let Some(remove) =
+                            tag_action(ui, active.is_some().then_some("×"), "remove from query")
+                        {
+                            if chrome::hover_started(ui, &remove) {
+                                pulses.push(remove.rect);
+                            }
+                            if remove.clicked() {
+                                strikes.push(TagStrike::Remove(tag.clone()));
+                            }
                         }
-                        if require.clicked() {
+                        let require = tag_action(ui, Some("+"), "require tag");
+                        if require.as_ref().is_some_and(|response| {
+                            if chrome::hover_started(ui, response) {
+                                pulses.push(response.rect);
+                            }
+                            response.clicked()
+                        }) {
                             strikes.push(TagStrike::Require(tag.clone()));
                         }
-                        let exclude = chrome::small_still(ui, "-").on_hover_text("exclude tag");
-                        if chrome::hover_started(ui, &exclude) {
-                            pulses.push(exclude.rect);
-                        }
-                        if exclude.clicked() {
+                        let exclude = tag_action(ui, Some("-"), "exclude tag");
+                        if exclude.as_ref().is_some_and(|response| {
+                            if chrome::hover_started(ui, response) {
+                                pulses.push(response.rect);
+                            }
+                            response.clicked()
+                        }) {
                             strikes.push(TagStrike::Exclude(tag.clone()));
                         }
+                        ui.add_space(4.0);
                         let _tag = ui
                             .add(egui::Label::new(tag_chroma::text(tag.as_str(), *kind)).truncate())
                             .on_hover_text(tag.as_str());
@@ -171,28 +186,22 @@ fn palette_body(
         });
 }
 
-fn remove_slot(
+fn tag_action(
     ui: &mut egui::Ui,
-    active: bool,
-    tag: &Tag,
-    strikes: &mut Vec<TagStrike>,
-    pulses: &mut Vec<egui::Rect>,
-) {
-    const REMOVE_COL: f32 = 20.0;
-    let _slot = ui.allocate_ui_with_layout(
-        egui::vec2(REMOVE_COL, ui.spacing().interact_size.y),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            if !active {
-                return;
-            }
-            let remove = chrome::small_still(ui, "×").on_hover_text("remove from query");
-            if chrome::hover_started(ui, &remove) {
-                pulses.push(remove.rect);
-            }
-            if remove.clicked() {
-                strikes.push(TagStrike::Remove(tag.clone()));
-            }
-        },
-    );
+    glyph: Option<&'static str>,
+    hover: &'static str,
+) -> Option<egui::Response> {
+    const ACTION: f32 = 22.0;
+    let size = egui::vec2(ACTION, ui.spacing().interact_size.y);
+    let Some(glyph) = glyph else {
+        let _blank = ui.allocate_space(size);
+        return None;
+    };
+    Some(
+        ui.add_sized(
+            size,
+            egui::Button::new(egui::RichText::new(glyph).monospace()).small(),
+        )
+        .on_hover_text(hover),
+    )
 }

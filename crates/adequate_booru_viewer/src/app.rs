@@ -124,8 +124,8 @@ impl WaterUi {
 impl Default for Surf {
     fn default() -> Self {
         Self {
-            enter_amp: 1.5,
-            exit_amp: 0.7,
+            enter_amp: 0.9,
+            exit_amp: 0.42,
             click_amp: 2.5,
             text_amp: 1.02,
             viewer_amp: 1.6,
