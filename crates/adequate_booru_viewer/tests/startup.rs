@@ -21,7 +21,7 @@ fn first_egui_frame_within_250ms() -> Result<()> {
     let probe = case.root.join("gui-ready");
     let started = Instant::now();
     let mut app = ChildGuard::spawn(
-        Command::new(env!("CARGO_BIN_EXE_adequate_booru_viewer"))
+        Command::new(env!("CARGO_BIN_EXE_abv"))
             .env("XDG_CONFIG_HOME", &case.config)
             .env("XDG_DATA_HOME", &case.data)
             .env("XDG_CACHE_HOME", &case.cache)
@@ -30,7 +30,7 @@ fn first_egui_frame_within_250ms() -> Result<()> {
             .stdout(Stdio::null())
             .stderr(Stdio::piped()),
     )
-    .context("spawn adequate_booru_viewer")?;
+    .context("spawn abv")?;
 
     wait_for_probe(&probe, &mut app, started)?;
     Ok(())
@@ -51,7 +51,7 @@ fn wait_for_probe(path: &Path, child: &mut ChildGuard, started: Instant) -> Resu
         }
         if let Some(status) = child.try_wait()? {
             bail!(
-                "adequate_booru_viewer exited before startup probe: {status}\n{}",
+                "abv exited before startup probe: {status}\n{}",
                 child.stderr_tail()
             );
         }

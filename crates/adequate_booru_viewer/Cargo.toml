@@ -1,9 +1,19 @@
 [package]
 name = "adequate_booru_viewer"
+default-run = "abv"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 version.workspace = true
+autobins = false
+
+[[bin]]
+name = "abv"
+path = "src/main.rs"
+
+[[example]]
+name = "retrieval_bench"
+path = "examples/retrieval_bench.rs"
 
 [dependencies]
 anyhow = "1.0.102"
