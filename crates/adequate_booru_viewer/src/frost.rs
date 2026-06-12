@@ -14,12 +14,52 @@ use std::f32::consts::TAU;
 
 /// Mip levels in the blur chain: /2, /4, /8 of the surface.
 const LEVELS: usize = 3;
-/// Water simulation decimation. Solver cells are square, in physical pixels.
-const SIM_SCALE: u32 = 2;
 const SIM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const SIM_BYTES: u32 = 8;
-const SIM_STEPS: usize = 4;
 const SIM_WORKGROUP: u32 = 8;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Definition {
+    #[default]
+    Sd,
+    Hd,
+}
+
+#[derive(Clone, Copy)]
+struct Spec {
+    scale: u32,
+    steps: usize,
+    dt: f32,
+}
+
+impl Definition {
+    fn spec(self) -> Spec {
+        match self {
+            Self::Sd => Spec {
+                scale: 2,
+                steps: 4,
+                dt: 1.0 / 240.0,
+            },
+            Self::Hd => Spec {
+                scale: 1,
+                steps: 8,
+                dt: 1.0 / 480.0,
+            },
+        }
+    }
+
+    fn slot(self) -> usize {
+        self as usize
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sd => "sd",
+            Self::Hd => "hd",
+        }
+    }
+}
+
 /// How many grid tiles may rise/relax at once — the depth of the slosh trail
 /// as the pointer sweeps across the grid.
 pub const LIFT_SLOTS: usize = 4;
@@ -233,12 +273,17 @@ pub struct Frost {
     sim_layout: wgpu::BindGroupLayout,
     down: wgpu::RenderPipeline,
     up: wgpu::RenderPipeline,
-    composite: wgpu::RenderPipeline,
-    sim: wgpu::ComputePipeline,
+    pipes: [Pipes; 2],
     sampler: wgpu::Sampler,
     mask: wgpu::Buffer,
     format: wgpu::TextureFormat,
+    definition: Definition,
     rig: Option<Rig>,
+}
+
+struct Pipes {
+    composite: wgpu::RenderPipeline,
+    sim: wgpu::ComputePipeline,
 }
 
 /// The size-dependent resources, rebuilt on resize.
@@ -246,6 +291,7 @@ struct Rig {
     scene: Target,
     chain: Vec<Target>,
     water: Water,
+    definition: Definition,
 }
 
 struct Water {
@@ -335,64 +381,103 @@ impl Frost {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let pipeline = |label, layout: &wgpu::BindGroupLayout, entry| {
-            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some(label),
-                bind_group_layouts: &[Some(layout)],
-                immediate_size: 0,
-            });
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("fullscreen"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some(entry),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
+        let pipeline =
+            |label: &str, layout: &wgpu::BindGroupLayout, entry, constants: &[(&str, f64)]| {
+                let pipeline_layout =
+                    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some(label),
+                        bind_group_layouts: &[Some(layout)],
+                        immediate_size: 0,
+                    });
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("fullscreen"),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some(entry),
+                        compilation_options: wgpu::PipelineCompilationOptions {
+                            constants,
+                            ..Default::default()
+                        },
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
         let sim_layout_handle = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("frost-sim"),
             bind_group_layouts: &[Some(&sim_layout)],
             immediate_size: 0,
         });
-        let sim = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("frost-sim"),
-            layout: Some(&sim_layout_handle),
-            module: &sim_module,
-            entry_point: Some("step"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
-        });
+        let pipes = |definition: Definition| {
+            let label = definition.label();
+            let spec = definition.spec();
+            let field = [("FIELD_SCALE", f64::from(spec.scale))];
+            let impulse = 4.0 / spec.steps as f64;
+            let sim_consts = [
+                ("SIM_SCALE", f64::from(spec.scale)),
+                ("DT", f64::from(spec.dt)),
+                ("IMPULSE_GAIN", impulse),
+            ];
+            let composite_label = format!("frost-composite-{label}");
+            let sim_label = format!("frost-sim-{label}");
+            Pipes {
+                composite: pipeline(&composite_label, &composite_layout, "composite", &field),
+                sim: device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(&sim_label),
+                    layout: Some(&sim_layout_handle),
+                    module: &sim_module,
+                    entry_point: Some("step"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &sim_consts,
+                        ..Default::default()
+                    },
+                    cache: None,
+                }),
+            }
+        };
         Self {
-            down: pipeline("frost-down", &sample_layout, "kawase_down"),
-            up: pipeline("frost-up", &sample_layout, "kawase_up"),
-            composite: pipeline("frost-composite", &composite_layout, "composite"),
-            sim,
+            down: pipeline("frost-down", &sample_layout, "kawase_down", &[]),
+            up: pipeline("frost-up", &sample_layout, "kawase_up", &[]),
+            pipes: [pipes(Definition::Sd), pipes(Definition::Hd)],
             sample_layout,
             composite_layout,
             sim_layout,
             sampler,
             mask,
             format,
+            definition: Definition::default(),
             rig: None,
         }
+    }
+
+    pub fn set_definition(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        definition: Definition,
+    ) {
+        if self.definition == definition {
+            return;
+        }
+        self.definition = definition;
+        self.resize(device, queue, width, height);
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) {
@@ -442,6 +527,7 @@ impl Frost {
             scene,
             chain,
             water,
+            definition: self.definition,
         });
     }
 
@@ -462,10 +548,11 @@ impl Frost {
             return;
         };
         queue.write_buffer(&self.mask, 0, &mask_bytes(surge));
-        for _ in 0..SIM_STEPS {
+        let pipes = &self.pipes[rig.definition.slot()];
+        for _ in 0..rig.definition.spec().steps {
             run_compute(
                 encoder,
-                &self.sim,
+                &pipes.sim,
                 &rig.water.sim_bind[rig.water.phase],
                 rig.water.size,
             );
@@ -485,7 +572,7 @@ impl Frost {
         }
         run_pass(
             encoder,
-            &self.composite,
+            &pipes.composite,
             &rig.water.composite_bind[rig.water.phase],
             surface,
         );
@@ -500,9 +587,10 @@ impl Frost {
         scene: &Target,
         blur: &Target,
     ) -> Water {
+        let scale = self.definition.spec().scale;
         let size = wgpu::Extent3d {
-            width: width.div_ceil(SIM_SCALE).max(1),
-            height: height.div_ceil(SIM_SCALE).max(1),
+            width: width.div_ceil(scale).max(1),
+            height: height.div_ceil(scale).max(1),
             depth_or_array_layers: 1,
         };
         let textures = (0..2)
@@ -908,7 +996,7 @@ const LIFT_RADIUS: f32 = 3.0;
 const PLATE_FEATHER: f32 = 6.0;
 const PLATE_LIFT_GAIN: f32 = 2.0;
 const PLATE_DRY_GAIN: f32 = 5.0;
-const FIELD_SCALE: f32 = 2.0;
+override FIELD_SCALE: f32 = 2.0;
 const FIELD_HEIGHT_CEIL: f32 = 48.0;
 const FIELD_FLOW_CEIL: f32 = 18.0;
 
@@ -1213,8 +1301,9 @@ struct Touch {
     wave: vec4f,
 }
 
-const SIM_SCALE: f32 = 2.0;
-const DT: f32 = 1.0 / 240.0;
+override SIM_SCALE: f32 = 2.0;
+override DT: f32 = 1.0 / 240.0;
+override IMPULSE_GAIN: f32 = 1.0;
 const LIFT_RADIUS: f32 = 3.0;
 const PLATE_FEATHER: f32 = 6.0;
 const SOURCE_SIGMA: f32 = 12.0;
@@ -1292,7 +1381,7 @@ fn plateau(x: f32, lo: f32, hi: f32) -> f32 {
 fn source_shell(px: vec2f, rect: vec4f, age: f32, amp: f32, walls: vec2f) -> f32 {
     let sheet = max(1.0 - walls.x, 1.0 - walls.y);
     let life = mix(SOURCE_LIFE, SHEET_SOURCE_LIFE, sheet);
-    if (abs(amp) <= 0.001 || age > life) {
+    if (amp <= 0.0 || age > life) {
         return 0.0;
     }
     var shell = 0.0;
@@ -1367,7 +1456,7 @@ fn step(@builtin(global_invocation_id) gid: vec3u) {
     let shelf_speed = clamp((1.0 - mask.r_panel) / (1.0 + mask.r_panel), 0.2, 1.0);
     let cfl = 0.66 * SIM_SCALE / DT;
     let c = min(mask.wave_v * mix(shelf_speed, 1.0, shelf), cfl);
-    var v = here.y + c * c * lap * DT + source(px) * mask.source_gain;
+    var v = here.y + c * c * lap * DT + source(px) * mask.source_gain * IMPULSE_GAIN;
     v = v + clamp(mask.viscosity, 0.0, 220.0) * v_lap * DT;
     v = v * exp(-DT / max(mask.wave_damp, 0.08)) * mix(0.985, 1.0, shelf);
 

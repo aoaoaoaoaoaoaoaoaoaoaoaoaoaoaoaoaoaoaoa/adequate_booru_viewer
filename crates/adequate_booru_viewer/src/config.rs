@@ -121,7 +121,7 @@ pub struct Slate {
     pub images_per_row: u16,
     #[serde(default = "water_wet_default")]
     pub water_wet: bool,
-    pub water_hq: bool,
+    pub water_hd: bool,
 }
 
 impl Default for Slate {
@@ -133,7 +133,7 @@ impl Default for Slate {
             sort: Sort::Score,
             images_per_row: 5,
             water_wet: true,
-            water_hq: false,
+            water_hd: false,
         }
     }
 }
@@ -263,7 +263,7 @@ mod tests {
             sort: Sort::Newest,
             images_per_row: 7,
             water_wet: false,
-            water_hq: true,
+            water_hd: true,
         };
         let text = toml::to_string_pretty(&slate)?;
         let roundtrip = toml::from_str::<Slate>(&text)?;
@@ -271,19 +271,19 @@ mod tests {
         assert!(roundtrip.closed_folders.contains("trips"));
         assert_eq!(roundtrip.images_per_row, 7);
         assert!(!roundtrip.water_wet);
-        assert!(roundtrip.water_hq);
+        assert!(roundtrip.water_hd);
         Ok(())
     }
 
     #[test]
-    fn slate_defaults_to_wet_standard_quality() {
+    fn slate_defaults_to_wet_sd() {
         let slate = Slate::default();
         assert!(slate.water_wet);
-        assert!(!slate.water_hq);
+        assert!(!slate.water_hd);
     }
 
     #[test]
-    fn old_slate_migrates_to_wet_standard_quality() -> Result<()> {
+    fn slate_without_water_fields_defaults_to_wet_sd() -> Result<()> {
         let slate = toml::from_str::<Slate>(
             r#"
 sort = "score"
@@ -294,7 +294,7 @@ active_group = []
 "#,
         )?;
         assert!(slate.water_wet);
-        assert!(!slate.water_hq);
+        assert!(!slate.water_hd);
         Ok(())
     }
 

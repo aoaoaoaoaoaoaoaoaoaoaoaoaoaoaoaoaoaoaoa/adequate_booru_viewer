@@ -232,12 +232,33 @@ pub fn small(ui: &mut egui::Ui, text: impl Into<String>) -> egui::Response {
     response
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct TextWake {
+    pub rect: egui::Rect,
+    flux: TextFlux,
+}
+
+impl TextWake {
+    pub fn amp(self, unit: f32) -> f32 {
+        match self.flux {
+            TextFlux::Ink(mass) => unit * mass,
+            TextFlux::Erase(mass) => unit * mass * 0.55,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TextFlux {
+    Ink(f32),
+    Erase(f32),
+}
+
 pub fn text_wake(
     ui: &egui::Ui,
     response: &egui::Response,
     before: &str,
     after: &str,
-) -> Option<(egui::Rect, f32)> {
+) -> Option<TextWake> {
     if !response.changed() {
         return None;
     }
@@ -259,10 +280,11 @@ pub fn text_wake(
         .count();
     let removed = &before[head..before.len().saturating_sub(tail)];
     let inserted = &after[head..after.len().saturating_sub(tail)];
-    let (sign, glyphs, measure) = if inserted.is_empty() {
-        (-1.0, removed, &before[..head + removed.len()])
+    let erased = inserted.is_empty();
+    let (glyphs, measure) = if erased {
+        (removed, &before[..head + removed.len()])
     } else {
-        (1.0, inserted, &after[..head + inserted.len()])
+        (inserted, &after[..head + inserted.len()])
     };
     if glyphs.is_empty() {
         return None;
@@ -284,10 +306,15 @@ pub fn text_wake(
     let x = (rect.left() + 6.0 + text.size().x).clamp(rect.left() + 6.0, rect.right() - 6.0);
     let h = (rect.height() * 0.62).clamp(8.0, 18.0);
     let w = (4.0 + mass * 3.5).clamp(5.0, rect.width() * 0.35);
-    Some((
-        egui::Rect::from_center_size(egui::pos2(x, rect.center().y), egui::vec2(w, h)),
-        sign * mass,
-    ))
+    let flux = if erased {
+        TextFlux::Erase(mass)
+    } else {
+        TextFlux::Ink(mass)
+    };
+    Some(TextWake {
+        rect: egui::Rect::from_center_size(egui::pos2(x, rect.center().y), egui::vec2(w, h)),
+        flux,
+    })
 }
 
 fn glyph_weight(ch: char) -> f32 {

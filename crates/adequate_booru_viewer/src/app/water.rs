@@ -127,10 +127,10 @@ impl Bayonet {
         self.arm_water();
     }
 
-    pub(super) fn text_plunge(&mut self, rect: egui::Rect, weight: f32) {
-        let amp = (self.surf.text_amp * weight).clamp(-6.6, 6.6);
-        if amp.abs() >= 0.25 {
-            self.plunge(rect, amp);
+    pub(super) fn text_plunge(&mut self, wake: chrome::TextWake) {
+        let amp = wake.amp(self.surf.text_amp).clamp(0.25, 6.6);
+        if amp >= 0.25 {
+            self.plunge(wake.rect, amp);
         }
     }
 

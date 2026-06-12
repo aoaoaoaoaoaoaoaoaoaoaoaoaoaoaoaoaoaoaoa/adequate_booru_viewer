@@ -13,7 +13,7 @@ use crate::{
     chrome,
     config::{Config, FilterConfig, FilterName, QueryConfig, SavedFilter, Slate},
     filter_bank::Bank,
-    frost::{Cut, Veil},
+    frost::{Cut, Definition, Veil},
     index::{CacheStats, Index, TagSuggestion},
     media::{MediaCache, RgbaBlade, extension},
     model::{
@@ -90,20 +90,31 @@ struct Surf {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WaterUi {
     Dry,
-    Wet,
+    Wet(Definition),
 }
 
 impl WaterUi {
-    fn from_slate(wet: bool, _hq: bool) -> Self {
-        if wet { Self::Wet } else { Self::Dry }
+    fn from_slate(wet: bool, hd: bool) -> Self {
+        if wet {
+            Self::Wet(if hd { Definition::Hd } else { Definition::Sd })
+        } else {
+            Self::Dry
+        }
     }
 
     fn wet(self) -> bool {
-        matches!(self, Self::Wet)
+        matches!(self, Self::Wet(_))
     }
 
-    fn standard(self) -> bool {
-        self.wet()
+    fn definition(self) -> Definition {
+        match self {
+            Self::Dry | Self::Wet(Definition::Sd) => Definition::Sd,
+            Self::Wet(Definition::Hd) => Definition::Hd,
+        }
+    }
+
+    fn is(self, definition: Definition) -> bool {
+        matches!(self, Self::Wet(active) if active == definition)
     }
 }
 
@@ -276,7 +287,7 @@ impl Bayonet {
             water_until: None,
             viewer_pond: egui::Rect::ZERO,
             water_rect: egui::Rect::ZERO,
-            water_ui: WaterUi::from_slate(slate.water_wet, slate.water_hq),
+            water_ui: WaterUi::from_slate(slate.water_wet, slate.water_hd),
             scroll: ScrollSea::default(),
             brine: crate::frost::Brine::default(),
             surf: Surf::default(),
@@ -345,6 +356,10 @@ impl Bayonet {
 
     pub fn water_wet(&self) -> bool {
         self.water_ui.wet()
+    }
+
+    pub fn water_definition(&self) -> Definition {
+        self.water_ui.definition()
     }
 
     pub fn quiver_release(&self) -> f32 {
@@ -1072,7 +1087,7 @@ impl Bayonet {
             sort: self.sort,
             images_per_row: self.images_per_row,
             water_wet: self.water_ui.wet(),
-            water_hq: false,
+            water_hd: self.water_ui.is(Definition::Hd),
         };
         let written = config
             .save(&self.lair.config_path())

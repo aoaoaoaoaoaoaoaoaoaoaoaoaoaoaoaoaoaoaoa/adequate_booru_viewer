@@ -110,8 +110,8 @@ impl Bayonet {
             [ui.available_width(), 20.0],
             egui::TextEdit::singleline(&mut self.tag_entry).hint_text("add tag to selected group…"),
         );
-        if let Some((rect, weight)) = chrome::text_wake(ui, &entry, &before, &self.tag_entry) {
-            self.text_plunge(rect, weight);
+        if let Some(wake) = chrome::text_wake(ui, &entry, &before, &self.tag_entry) {
+            self.text_plunge(wake);
         }
         let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
         if enter && (entry.has_focus() || entry.lost_focus()) {
@@ -211,27 +211,31 @@ impl Bayonet {
                 .clicked()
                 && !wet
             {
-                self.water_ui = WaterUi::Wet;
+                self.water_ui = WaterUi::Wet(Definition::Sd);
                 changed = true;
             }
         });
         let wet = self.water_ui.wet();
-        let standard = self.water_ui.standard();
+        let sd = self.water_ui.is(Definition::Sd);
+        let hd = self.water_ui.is(Definition::Hd);
         let _quality = ui.add_enabled_ui(wet, |ui| {
             let _row = ui.horizontal_wrapped(|ui| {
-                if chrome::glyph(ui, "SQ", standard)
-                    .on_hover_text("stable water physics lattice")
+                if chrome::glyph(ui, "SD", sd)
+                    .on_hover_text("2 px water cells")
                     .clicked()
-                    && !standard
+                    && !sd
                 {
-                    self.water_ui = WaterUi::Wet;
+                    self.water_ui = WaterUi::Wet(Definition::Sd);
                     changed = true;
                 }
-                let _parked = ui
-                    .add_enabled(false, chrome::glyph_button("HQ", false))
-                    .on_hover_text(
-                        "parked until the water solver grows a real multiresolution field",
-                    );
+                if chrome::glyph(ui, "HD", hd)
+                    .on_hover_text("1 px water cells")
+                    .clicked()
+                    && !hd
+                {
+                    self.water_ui = WaterUi::Wet(Definition::Hd);
+                    changed = true;
+                }
             });
         });
         if changed {
@@ -262,7 +266,7 @@ impl Bayonet {
                     self.filters.toggle_shelf(shelf);
                     self.save_config();
                 }
-                SavedFilterAction::TypeWake { rect, weight } => self.text_plunge(rect, weight),
+                SavedFilterAction::TypeWake(wake) => self.text_plunge(wake),
                 SavedFilterAction::ScuttleShelf(shelf) => {
                     self.filters.scuttle_shelf(shelf);
                     self.shelf_edit = None;

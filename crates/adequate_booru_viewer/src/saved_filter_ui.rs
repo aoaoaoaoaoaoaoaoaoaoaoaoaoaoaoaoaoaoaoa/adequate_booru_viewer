@@ -16,7 +16,7 @@ pub enum Action {
     Moor { name: FilterName, berth: Berth },
     NewShelf,
     ToggleShelf(usize),
-    TypeWake { rect: egui::Rect, weight: f32 },
+    TypeWake(chrome::TextWake),
     ScuttleShelf(usize),
     BeginShelfRename(usize),
     CommitShelfRename,
@@ -66,8 +66,8 @@ pub fn active_card(
                 [ui.available_width(), 20.0],
                 egui::TextEdit::singleline(name_entry).hint_text("filter name"),
             );
-            if let Some((rect, weight)) = chrome::text_wake(ui, &entry, &before, name_entry) {
-                actions.push(Action::TypeWake { rect, weight });
+            if let Some(wake) = chrome::text_wake(ui, &entry, &before, name_entry) {
+                actions.push(Action::TypeWake(wake));
             }
             if *edit == NameEdit::Arming {
                 entry.request_focus();
@@ -241,8 +241,8 @@ fn shelf_rows(
             Some(edit) if edit.shelf == slot => {
                 let before = edit.name.clone();
                 let entry = ui.text_edit_singleline(&mut edit.name);
-                if let Some((rect, weight)) = chrome::text_wake(ui, &entry, &before, &edit.name) {
-                    actions.push(Action::TypeWake { rect, weight });
+                if let Some(wake) = chrome::text_wake(ui, &entry, &before, &edit.name) {
+                    actions.push(Action::TypeWake(wake));
                 }
                 if edit.focus {
                     entry.request_focus();
