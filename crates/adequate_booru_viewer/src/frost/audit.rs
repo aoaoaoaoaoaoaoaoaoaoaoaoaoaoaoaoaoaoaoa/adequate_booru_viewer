@@ -246,6 +246,7 @@ fn quiet(tide: f32) -> Surge<'static> {
         tensions: &[],
         lifts: &[],
         water: water_rect(),
+        scroll_tilt: 0.0,
         splashes: &[],
         viewer: far_rect(),
         touches: &[],
@@ -289,23 +290,13 @@ impl Script {
             });
         }
         for i in 0..SPLASH_SLOTS {
-            let sheet = i % 5 == 0;
             let x = 96.0 + ((frame * 23 + i * 31) % 500) as f32;
             let y = ((frame * 19 + i * 43) % 330) as f32;
-            let rect = if sheet {
-                egui::Rect::from_min_max(egui::pos2(96.0, y), egui::pos2(640.0, y + 42.0))
-            } else {
-                egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(72.0, 96.0))
-            };
+            let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(72.0, 96.0));
             splashes.push(Splash {
                 rect,
                 age: (i as f32 % 11.0) * 0.023,
-                amp: if sheet { 20.0 } else { 10.0 + i as f32 % 7.0 },
-                walls: if sheet {
-                    egui::vec2(0.0, 1.0)
-                } else {
-                    egui::vec2(1.0, 1.0)
-                },
+                amp: 10.0 + i as f32 % 7.0,
             });
         }
         Self {
@@ -322,6 +313,7 @@ impl Script {
             tensions: &self.tensions,
             lifts: &self.lifts,
             water: water_rect(),
+            scroll_tilt: ((tide * 2.3).sin() * 14.0).clamp(-18.0, 18.0),
             splashes: &self.splashes,
             viewer: far_rect(),
             touches: &[],

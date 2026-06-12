@@ -84,6 +84,7 @@ pub struct Brine {
     pub wave_spread: f32,
     pub source_gain: f32,
     pub height_retention: f32,
+    pub tilt_gain: f32,
     pub t_panel: f32,
     pub r_panel: f32,
     pub r_wall: f32,
@@ -112,6 +113,7 @@ impl Default for Brine {
             wave_spread: 480.0,
             source_gain: 44.0,
             height_retention: 0.99965,
+            tilt_gain: 120.0,
             t_panel: 0.12,
             r_panel: 0.35,
             r_wall: 0.6,
@@ -184,9 +186,6 @@ pub struct Splash {
     pub rect: egui::Rect,
     pub age: f32,
     pub amp: f32,
-    /// x/y wall reflection enable. Scroll sheet waves set x=0 so ideal planar
-    /// shocks do not invent side-wall corner waves.
-    pub walls: egui::Vec2,
 }
 
 /// A fingertip ripple inside the full-image viewer. Unlike `Splash`, this is
@@ -209,6 +208,7 @@ pub struct Surge<'a> {
     pub tensions: &'a [Tension],
     pub lifts: &'a [Lift],
     pub water: egui::Rect,
+    pub scroll_tilt: f32,
     pub splashes: &'a [Splash],
     pub viewer: egui::Rect,
     pub touches: &'a [Touch],
@@ -800,13 +800,14 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
     lanes[6..8].copy_from_slice(&[b.rect.max.x, b.rect.max.y]);
     lanes[8..10].copy_from_slice(&[surge.water.min.x, surge.water.min.y]);
     lanes[10..12].copy_from_slice(&[surge.water.max.x, surge.water.max.y]);
-    // scalar block (bytes 48..80), two pad lanes to reach the arrays.
+    // scalar block (bytes 48..80), one pad lane to reach the arrays.
     lanes[12] = a.radius;
     lanes[13] = b.radius;
     lanes[14] = veil.strength.clamp(0.0, 1.0);
     lanes[15] = veil.dim;
     lanes[16] = veil.blur.clamp(0.0, 1.0);
     lanes[17] = surge.tide;
+    lanes[18] = surge.scroll_tilt;
     // lift_rects @ byte 80 (lane 20); grips @ 144 (lane 36).
     for (slot, lift) in surge.lifts.iter().take(LIFT_SLOTS).enumerate() {
         let at = 20 + slot * 4;
@@ -832,7 +833,7 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
             quiver.omega.max(0.0),
         ]);
     }
-    // splashes @ byte 288 (lane 72): rect, then age + amp + x/y wall mask.
+    // splashes @ byte 288 (lane 72): rect, then age + amp + pad.
     for (slot, splash) in surge.splashes.iter().take(SPLASH_SLOTS).enumerate() {
         let at = 72 + slot * 8;
         lanes[at..at + 8].copy_from_slice(&[
@@ -842,8 +843,8 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
             splash.rect.max.y,
             splash.age,
             splash.amp,
-            splash.walls.x,
-            splash.walls.y,
+            0.0,
+            0.0,
         ]);
     }
     // viewer rect @ byte 1312 (lane 328), touches @ byte 1328 (lane 332).
@@ -855,7 +856,7 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
     }
     // brine @ byte 1520 (lane 380): the runtime-tunable water chemistry.
     let brine = &surge.brine;
-    lanes[380..403].copy_from_slice(&[
+    lanes[380..404].copy_from_slice(&[
         brine.reach,
         brine.meniscus_px,
         brine.refract_px,
@@ -875,6 +876,7 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
         brine.wave_spread,
         brine.source_gain,
         brine.height_retention,
+        brine.tilt_gain,
         brine.t_panel,
         brine.r_panel,
         brine.r_wall,
@@ -943,7 +945,7 @@ struct Mask {
     dim: f32,
     blur: f32,
     tide: f32,
-    _pad0: f32,
+    scroll_tilt: f32,
     _pad1: f32,
     lift_rects: array<vec4f, 4>,
     lift_grips: vec4f,
@@ -971,11 +973,11 @@ struct Mask {
     wave_spread: f32,
     source_gain: f32,
     height_retention: f32,
+    tilt_gain: f32,
     t_panel: f32,
     r_panel: f32,
     r_wall: f32,
     shore_feather: f32,
-    _pad4: f32,
 }
 
 // touch.xy = pointer, touch.z = grip, touch.w = optional angular pulse rate.
@@ -984,7 +986,7 @@ struct Quiver {
     touch: vec4f,
 }
 
-// vitals.x = age seconds, vitals.y = amplitude px, vitals.zw = x/y wall mask.
+// vitals.x = age seconds, vitals.y = amplitude px, vitals.zw = pad.
 struct Splash {
     rect: vec4f,
     vitals: vec4f,
@@ -1270,7 +1272,7 @@ struct Mask {
     dim: f32,
     blur: f32,
     tide: f32,
-    _pad0: f32,
+    scroll_tilt: f32,
     _pad1: f32,
     lift_rects: array<vec4f, 4>,
     lift_grips: vec4f,
@@ -1298,11 +1300,11 @@ struct Mask {
     wave_spread: f32,
     source_gain: f32,
     height_retention: f32,
+    tilt_gain: f32,
     t_panel: f32,
     r_panel: f32,
     r_wall: f32,
     shore_feather: f32,
-    _pad4: f32,
 }
 
 struct Quiver {
@@ -1324,9 +1326,7 @@ override DT: f32 = 1.0 / 240.0;
 override IMPULSE_GAIN: f32 = 1.0;
 const LIFT_RADIUS: f32 = 3.0;
 const PLATE_FEATHER: f32 = 6.0;
-const SOURCE_SIGMA: f32 = 12.0;
 const SOURCE_LIFE: f32 = 0.22;
-const SHEET_SOURCE_LIFE: f32 = 0.38;
 const SOURCE_CEIL: f32 = 72.0;
 const H_CEIL: f32 = 48.0;
 const V_CEIL: f32 = 1440.0;
@@ -1393,44 +1393,24 @@ fn wall_height(p: vec2i, dims: vec2i, h: f32) -> f32 {
     return mix(load_state(q, dims).x, h, b);
 }
 
-fn plateau(x: f32, lo: f32, hi: f32) -> f32 {
-    return smoothstep(lo - SOURCE_SIGMA, lo + SOURCE_SIGMA, x)
-        * (1.0 - smoothstep(hi - SOURCE_SIGMA, hi + SOURCE_SIGMA, x));
-}
-
-fn source_shell(px: vec2f, rect: vec4f, age: f32, amp: f32, walls: vec2f) -> f32 {
-    let sheet = max(1.0 - walls.x, 1.0 - walls.y);
-    let life = mix(SOURCE_LIFE, SHEET_SOURCE_LIFE, sheet);
-    if (amp <= 0.0 || age > life) {
+fn source_shell(px: vec2f, rect: vec4f, age: f32, amp: f32) -> f32 {
+    if (amp <= 0.0 || age > SOURCE_LIFE) {
         return 0.0;
     }
-    var shell = 0.0;
-    if (walls.x > 0.5 && walls.y > 0.5) {
-        let d = sd_cut(px, rect.xy, rect.zw, LIFT_RADIUS);
-        if (d < -PLATE_FEATHER) {
-            return 0.0;
-        }
-        shell = exp(-0.5 * pow(max(d, 0.0) / max(mask.wave_sigma, 1.0), 2.0));
-    } else if (walls.y > 0.5) {
-        let dy = max(max(rect.y - px.y, px.y - rect.w), 0.0);
-        shell = exp(-0.5 * pow(dy / max(mask.wave_sigma, 1.0), 2.0))
-            * plateau(px.x, rect.x, rect.z);
-    } else if (walls.x > 0.5) {
-        let dx = max(max(rect.x - px.x, px.x - rect.z), 0.0);
-        shell = exp(-0.5 * pow(dx / max(mask.wave_sigma, 1.0), 2.0))
-            * plateau(px.y, rect.y, rect.w);
+    let d = sd_cut(px, rect.xy, rect.zw, LIFT_RADIUS);
+    if (d < -PLATE_FEATHER) {
+        return 0.0;
     }
-    let birth = 1.0 - smoothstep(0.0, life, age);
-    let violence = mix(1.0, 2.8, sheet);
-    return amp * violence * shell * birth;
+    let shell = exp(-0.5 * pow(max(d, 0.0) / max(mask.wave_sigma, 1.0), 2.0));
+    let birth = 1.0 - smoothstep(0.0, SOURCE_LIFE, age);
+    return amp * shell * birth;
 }
 
 fn source(px: vec2f) -> f32 {
     var drive = 0.0;
     for (var i = 0u; i < 32u; i = i + 1u) {
         let splash = mask.splashes[i];
-        drive = drive
-            + source_shell(px, splash.rect, splash.vitals.x, splash.vitals.y, splash.vitals.zw);
+        drive = drive + source_shell(px, splash.rect, splash.vitals.x, splash.vitals.y);
     }
     for (var i = 0u; i < 4u; i = i + 1u) {
         let q = mask.quivers[i];
@@ -1447,6 +1427,22 @@ fn source(px: vec2f) -> f32 {
         drive = drive + mask.tremor_amp * g * shell * sin(phase);
     }
     return soft_limiter(drive, SOURCE_CEIL);
+}
+
+fn tilt_drive(px: vec2f, h: f32) -> f32 {
+    let span = max(mask.water_max.y - mask.water_min.y, 1.0);
+    let y = clamp((px.y - mask.water_min.y) / span, 0.0, 1.0);
+    let ramp = y * 2.0 - 1.0;
+    let lip = max(SIM_SCALE * 2.0, 1.0);
+    let y_gate = smoothstep(mask.water_min.y, mask.water_min.y + lip, px.y)
+        * (1.0 - smoothstep(mask.water_max.y - lip, mask.water_max.y, px.y));
+    let x_gate = smoothstep(
+        mask.water_min.x - mask.shore_feather,
+        mask.water_min.x + mask.shore_feather,
+        px.x,
+    );
+    let desired = -mask.scroll_tilt * ramp;
+    return (desired - h) * max(mask.tilt_gain, 0.0) * x_gate * y_gate;
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -1471,7 +1467,10 @@ fn step(@builtin(global_invocation_id) gid: vec3u) {
     let shelf_speed = clamp((1.0 - mask.r_panel) / (1.0 + mask.r_panel), 0.2, 1.0);
     let cfl = 0.66 * SIM_SCALE / DT;
     let c = min(mask.wave_v * mix(shelf_speed, 1.0, shelf), cfl);
-    var v = here.y + c * c * lap * DT + source(px) * mask.source_gain * IMPULSE_GAIN;
+    var v = here.y
+        + c * c * lap * DT
+        + source(px) * mask.source_gain * IMPULSE_GAIN
+        + tilt_drive(px, h) * DT;
     v = v * exp(-DT / max(mask.wave_damp, 0.08)) * mix(0.985, 1.0, shelf);
 
     let block = obstacle(px);

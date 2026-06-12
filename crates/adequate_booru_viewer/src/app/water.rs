@@ -1,4 +1,4 @@
-use super::{scroll::SurgeEdge, *};
+use super::*;
 
 const PLUNGE_SOURCE_LIFE: f32 = 0.24;
 const TOOLTIP_GRIP: f32 = 0.72;
@@ -88,46 +88,30 @@ impl Bayonet {
         lifts
     }
 
-    /// Scroll inertia: the scrolled plate shears a trapped shallow fluid sheet.
-    /// Motion accumulates wake distance, while speed and acceleration set the
-    /// violence. The viewport edges are tight slits, so waves are born from
-    /// the edge the water piles against and then reflect through the shader's
-    /// wall images.
+    /// Scroll inertia: the gallery tray tilts under filtered scroll velocity.
+    /// The shader sees a zero-mean target slope; pile-up and release are left
+    /// to the persistent wave field instead of injected as synthetic strips.
     pub(super) fn heave(&mut self, ctx: &egui::Context, offset: f32, pixels_per_point: f32) {
         if !self.water_rect.is_positive() {
+            self.scroll_tilt = 0.0;
             return;
         }
         let dt = ctx.input(|input| input.stable_dt).clamp(1.0 / 240.0, 0.08);
-        let Some((edge, amp, count)) = self.scroll.shear(
+        self.scroll_tilt = self.scroll.sway(
             offset,
             pixels_per_point,
             dt,
-            self.surf.surge_quantum,
-            self.surf.surge_amp,
-            self.surf.surge_tau,
-        ) else {
-            return;
-        };
-        let water = self.water_rect;
-        let strip = |top: f32, bottom: f32| {
-            egui::Rect::from_min_max(
-                egui::pos2(water.left() + 6.0, top),
-                egui::pos2(water.right() - 6.0, bottom),
-            )
-        };
-        let rect = match edge {
-            SurgeEdge::Top => strip(water.top() + 4.0, water.top() + 56.0),
-            SurgeEdge::Bottom => strip(water.bottom() - 56.0, water.bottom() - 4.0),
-        };
-        self.plunge_with_walls(rect, amp * f32::from(count).sqrt(), WallSet::Vertical);
+            self.surf.scroll_coupling,
+            self.surf.scroll_tau,
+        );
+        if self.scroll_tilt.abs() > 0.015 {
+            self.arm_water();
+            ctx.request_repaint();
+        }
     }
 
     /// Drops a plate into the water: one ring, radiating from `rect`'s hull.
     pub(super) fn plunge(&mut self, rect: egui::Rect, amp: f32) {
-        self.plunge_with_walls(rect, amp, WallSet::All);
-    }
-
-    fn plunge_with_walls(&mut self, rect: egui::Rect, amp: f32, walls: WallSet) {
         if self.plunges.len() >= crate::frost::SPLASH_SLOTS {
             let victim = self
                 .plunges
@@ -141,7 +125,6 @@ impl Bayonet {
             rect,
             born: Instant::now(),
             amp,
-            walls,
         });
         self.arm_water();
     }
@@ -175,7 +158,7 @@ impl Bayonet {
         &mut self,
         ctx: &egui::Context,
         pixels_per_point: f32,
-    ) -> (egui::Rect, Vec<crate::frost::Splash>) {
+    ) -> (egui::Rect, f32, Vec<crate::frost::Splash>) {
         self.plunges
             .retain(|plunge| plunge.born.elapsed().as_secs_f32() <= PLUNGE_SOURCE_LIFE);
         if !self.plunges.is_empty() {
@@ -201,11 +184,10 @@ impl Bayonet {
                     rect: scale(plunge.rect),
                     age,
                     amp: plunge.amp,
-                    walls: plunge.walls.into(),
                 }
             })
             .collect();
-        (scale(surface), splashes)
+        (scale(surface), self.scroll_tilt, splashes)
     }
 
     pub fn frost_touches(
@@ -276,22 +258,6 @@ pub(super) struct Plunge {
     pub rect: egui::Rect,
     pub born: Instant,
     pub amp: f32,
-    pub walls: WallSet,
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum WallSet {
-    All,
-    Vertical,
-}
-
-impl From<WallSet> for egui::Vec2 {
-    fn from(walls: WallSet) -> Self {
-        match walls {
-            WallSet::All => egui::vec2(1.0, 1.0),
-            WallSet::Vertical => egui::vec2(0.0, 1.0),
-        }
-    }
 }
 
 /// Fingertip ripple inside the full-image viewer pond.

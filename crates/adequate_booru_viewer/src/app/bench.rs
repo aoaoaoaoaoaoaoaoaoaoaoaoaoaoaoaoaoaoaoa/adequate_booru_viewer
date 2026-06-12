@@ -61,6 +61,7 @@ impl super::Bayonet {
                     knob(ui, "source width px", &mut brine.wave_sigma, 3.0..=60.0);
                     knob(ui, "bulk damping s", &mut brine.wave_damp, 0.2..=6.0);
                     knob(ui, "impulse gain", &mut brine.source_gain, 0.0..=120.0);
+                    knob(ui, "tilt gain", &mut brine.tilt_gain, 0.0..=360.0);
                     knob(
                         ui,
                         "height retention",
@@ -69,9 +70,8 @@ impl super::Bayonet {
                     );
                 });
                 section(ui, "SCROLL SLOSH", |ui| {
-                    knob(ui, "event spacing px", &mut surf.surge_quantum, 8.0..=240.0);
-                    knob(ui, "sheet impulse", &mut surf.surge_amp, 0.0..=24.0);
-                    knob(ui, "velocity memory s", &mut surf.surge_tau, 0.02..=0.8);
+                    knob(ui, "tilt per px/s", &mut surf.scroll_coupling, 0.0..=0.008);
+                    knob(ui, "tray memory s", &mut surf.scroll_tau, 0.02..=0.8);
                 });
                 section(ui, "BOUNDARIES", |ui| {
                     knob(ui, "shelf reflection", &mut brine.r_panel, 0.0..=1.0);

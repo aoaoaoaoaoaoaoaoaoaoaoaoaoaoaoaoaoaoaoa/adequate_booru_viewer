@@ -40,7 +40,7 @@ mod viewer;
 mod water;
 
 use refresh::{AsyncPulse, PulseGate};
-use scroll::ScrollSea;
+use scroll::TrayTilt;
 use viewer::ZoomGate;
 use water::{LiftPlate, Plunge, TouchPlunge};
 
@@ -77,10 +77,10 @@ struct Surf {
     viewer_life: f32,
     /// Button plates ring down in the boiler after pointer contact leaves.
     quiver_release: f32,
-    /// Scroll inertia: every quantum px of travel plunges one planar surge.
-    surge_quantum: f32,
-    surge_amp: f32,
-    surge_tau: f32,
+    /// Scroll inertia: tray velocity maps to a bounded surface tilt; the
+    /// persistent solver performs the ensuing slosh.
+    scroll_coupling: f32,
+    scroll_tau: f32,
     /// First-order relaxation of the lift plates: rise a little faster than
     /// sink, so the slosh settles slowly.
     tau_rise: f32,
@@ -128,9 +128,8 @@ impl Default for Surf {
             viewer_amp: 1.6,
             viewer_life: 8.0,
             quiver_release: 0.48,
-            surge_quantum: 32.0,
-            surge_amp: 14.0,
-            surge_tau: 0.10,
+            scroll_coupling: 0.0028,
+            scroll_tau: 0.11,
             tau_rise: 0.09,
             tau_fall: 0.24,
         }
@@ -185,7 +184,8 @@ pub struct Bayonet {
     viewer_pond: egui::Rect,
     water_rect: egui::Rect,
     water_ui: WaterUi,
-    scroll: ScrollSea,
+    scroll: TrayTilt,
+    scroll_tilt: f32,
     brine: crate::frost::Brine,
     surf: Surf,
     bench_open: bool,
@@ -288,7 +288,8 @@ impl Bayonet {
             viewer_pond: egui::Rect::ZERO,
             water_rect: egui::Rect::ZERO,
             water_ui: WaterUi::from_slate(slate.water_wet, slate.water_hd),
-            scroll: ScrollSea::default(),
+            scroll: TrayTilt::default(),
+            scroll_tilt: 0.0,
             brine: crate::frost::Brine::default(),
             surf: Surf::default(),
             bench_open: false,
