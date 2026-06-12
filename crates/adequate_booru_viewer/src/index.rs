@@ -735,19 +735,21 @@ where
 }
 
 fn conjunction(children: Vec<Candidate>) -> Candidate {
-    let mut finite = None::<RoaringBitmap>;
+    let mut finite = Vec::<RoaringBitmap>::new();
     let mut excluded = RoaringBitmap::new();
     for child in children {
         match child {
-            Candidate::Finite(bitmap) => match &mut finite {
-                Some(acc) => *acc &= bitmap,
-                None => finite = Some(bitmap),
-            },
+            Candidate::Finite(bitmap) => finite.push(bitmap),
             Candidate::Cofinite(bitmap) => excluded |= bitmap,
         }
     }
-    match finite {
+    finite.sort_unstable_by_key(RoaringBitmap::len);
+    let mut finite = finite.into_iter();
+    match finite.next() {
         Some(mut bitmap) => {
+            for child in finite {
+                bitmap &= child;
+            }
             bitmap -= excluded;
             Candidate::Finite(bitmap)
         }
