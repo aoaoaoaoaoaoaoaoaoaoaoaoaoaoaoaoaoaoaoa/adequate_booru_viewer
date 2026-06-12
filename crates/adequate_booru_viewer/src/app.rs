@@ -932,11 +932,11 @@ impl Bayonet {
         }
         // With the tag menu up, a click anywhere only dismisses it; opening
         // the viewer underneath would make the menu feel clingy.
-        if response.clicked() && !self.tag_menu.is_open() {
+        if response.clicked() && !self.tag_menu.is_open() && self.zoom.is_none() {
             self.plunge(rect, self.surf.click_amp);
             self.open_full(post);
         }
-        if response.secondary_clicked() {
+        if response.secondary_clicked() && self.zoom.is_none() {
             if self.tag_menu.post_id() == Some(post.id) {
                 // Right-click on the same image toggles its menu away.
                 self.close_tag_menu();
