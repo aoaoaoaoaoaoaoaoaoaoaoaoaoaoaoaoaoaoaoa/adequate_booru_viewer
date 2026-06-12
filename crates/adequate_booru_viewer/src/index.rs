@@ -27,7 +27,7 @@ const SCORE_POSTS: TableDefinition<'_, u64, u32> = TableDefinition::new("score_p
 const FAV_POSTS: TableDefinition<'_, u64, u32> = TableDefinition::new("fav_posts");
 const META: TableDefinition<'_, &str, u64> = TableDefinition::new("meta");
 
-const SMALL_SORT: u64 = 1_000;
+const SMALL_SORT: u64 = 50_000;
 const DANBOORU_CRAWL_BEFORE: &str = "danbooru.crawl.before";
 const QUICK_REPAIR_V1: &str = "redb.quick_repair.v1";
 const POSTING_FACT_NEXT_SEQ: &str = "posting_facts.v1.next_seq";
@@ -90,7 +90,7 @@ const ANCHOR_GAP: Duration = Duration::from_secs(30);
 /// Decoded postings the vault may hold; eviction scans are O(cap) and rare.
 const VAULT_CAP: usize = 96;
 const RECORD_VAULT_CAP: usize = 4096;
-const SORT_HEAD_CAP: usize = 1_048_576;
+const SORT_HEAD_CAP: usize = 262_144;
 
 /// Cache of decoded posting bitmaps for the merged tables. Hot tags skip the
 /// redb chunk scan and roaring deserialization on every query; the merge loop
