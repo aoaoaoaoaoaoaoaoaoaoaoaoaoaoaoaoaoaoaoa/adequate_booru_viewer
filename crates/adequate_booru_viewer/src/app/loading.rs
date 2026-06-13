@@ -4,6 +4,27 @@ const CARD_W: f32 = 250.0;
 const CARD_H: f32 = 150.0;
 const DWELL: Duration = Duration::from_millis(180);
 
+#[derive(Clone, Copy)]
+enum EmptyState {
+    Loading,
+    Warming,
+    Settled,
+}
+
+impl EmptyState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Loading => "LOADING",
+            Self::Warming => "WARMING",
+            Self::Settled => "NO MATCHES",
+        }
+    }
+
+    fn wet(self) -> bool {
+        !matches!(self, Self::Settled)
+    }
+}
+
 impl Bayonet {
     pub(super) fn empty_gallery(&mut self, ui: &mut egui::Ui, arena: egui::Rect) {
         let now = Instant::now();
@@ -14,16 +35,26 @@ impl Bayonet {
             ui.ctx().request_repaint_after(DWELL.saturating_sub(age));
             return;
         }
-        self.loading_card(ui, arena);
+        self.loading_card(ui, arena, self.empty_state());
     }
 
-    fn loading_card(&mut self, ui: &mut egui::Ui, arena: egui::Rect) {
+    fn empty_state(&self) -> EmptyState {
+        if self.refresh_pulse.inflight_serial().is_some() {
+            EmptyState::Loading
+        } else if self.warm_state == WarmState::InFlight {
+            EmptyState::Warming
+        } else {
+            EmptyState::Settled
+        }
+    }
+
+    fn loading_card(&mut self, ui: &mut egui::Ui, arena: egui::Rect, state: EmptyState) {
         let size = egui::vec2(
             CARD_W.min((arena.width() - 24.0).max(120.0)),
             CARD_H.min((arena.height() - 24.0).max(96.0)),
         );
         let rect = egui::Rect::from_center_size(arena.center(), size);
-        if self.water_mode.wet() {
+        if state.wet() && self.water_mode.wet() {
             self.loading_raft.show(ui.ctx(), rect);
             self.arm_water();
         } else {
@@ -39,7 +70,7 @@ impl Bayonet {
             egui::StrokeKind::Inside,
         );
         let font = egui::FontId::new(36.0, egui::FontFamily::Proportional);
-        let text = "LOADING";
+        let text = state.label();
         let galley = painter.layout_no_wrap(text.to_owned(), font.clone(), chrome::HOT);
         let at = rect.center() - galley.size() * 0.5;
         let _text = painter.text(at, egui::Align2::LEFT_TOP, text, font, chrome::HOT);
