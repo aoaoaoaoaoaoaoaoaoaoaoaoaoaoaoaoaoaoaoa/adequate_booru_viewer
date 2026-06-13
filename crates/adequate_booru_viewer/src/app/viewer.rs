@@ -1,6 +1,14 @@
 use super::*;
 
 const GUTTER: f32 = 8.0;
+const FULL_FADE: Duration = Duration::from_millis(50);
+const NETWORK_TEXT_DWELL: Duration = Duration::from_millis(50);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FullWait {
+    LocalDecode,
+    NetworkFetch { born: Instant },
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ViewerAction {
@@ -97,6 +105,8 @@ impl Bayonet {
         }
         self.full.retain(|id, _| *id == post.id);
         self.full_rgba.retain(|id, _| *id == post.id);
+        self.full_loaded_at.retain(|id, _| *id == post.id);
+        self.full_wait.retain(|id, _| *id == post.id);
         self.open_full(&post);
     }
 
@@ -112,12 +122,21 @@ impl Bayonet {
             self.status = format!("#{id} has no full image URL", id = post.id);
             return;
         };
+        let media_dir = self.lair.media_dir();
+        let born = Instant::now();
+        let wait = if crate::media::cached(&media_dir, post.id, &url) {
+            FullWait::LocalDecode
+        } else {
+            FullWait::NetworkFetch { born }
+        };
+        let _old = self.full_wait.insert(post.id, wait);
         let _now_inflight = self.full_inflight.insert(post.id);
         if let Err(err) = self.worker.send(Command::FullBlade {
             id: post.id,
             url: Some(url),
         }) {
             let _was_inflight = self.full_inflight.remove(&post.id);
+            let _was_waiting = self.full_wait.remove(&post.id);
             let _faulted = self.full_faults.insert(post.id);
             self.status = format!("{err:#}");
         }
@@ -172,9 +191,13 @@ impl Bayonet {
                     |ui| {
                         ui.spacing_mut().item_spacing.x = gutter;
                         if let Some(texture) = self.full.get(&post.id) {
+                            let alpha = self.full_alpha(ctx, post.id);
                             let response = ui.add(
                                 egui::Image::new(texture)
                                     .fit_to_exact_size(image_box)
+                                    .tint(egui::Color32::from_white_alpha(
+                                        (alpha * 255.0).round() as u8
+                                    ))
                                     .sense(egui::Sense::click()),
                             );
                             self.viewer_pond = response.rect;
@@ -188,8 +211,10 @@ impl Bayonet {
                             }
                         } else if self.full_faults.contains(&post.id) {
                             centered_box(ui, image_box, "full image failed");
+                        } else if let Some(wait) = self.full_wait.get(&post.id).copied() {
+                            wait_box(ui, image_box, wait.opacity());
                         } else {
-                            centered_box(ui, image_box, "loading full image");
+                            wait_box(ui, image_box, 0.0);
                         }
                         if self.viewer_tags_open {
                             self.viewer_tag_drawer(ui, &post, image_box.y);
@@ -210,6 +235,8 @@ impl Bayonet {
             self.zoom_gate = ZoomGate::Fresh;
             self.full.clear();
             self.full_rgba.clear();
+            self.full_loaded_at.clear();
+            self.full_wait.clear();
             self.full_faults.clear();
             self.viewer_tag_groups = None;
             self.viewer_touches.clear();
@@ -217,6 +244,17 @@ impl Bayonet {
         } else {
             self.zoom_gate = ZoomGate::Armed;
         }
+    }
+
+    fn full_alpha(&self, ctx: &egui::Context, id: PostId) -> f32 {
+        let Some(born) = self.full_loaded_at.get(&id) else {
+            return 1.0;
+        };
+        let t = (born.elapsed().as_secs_f32() / FULL_FADE.as_secs_f32()).clamp(0.0, 1.0);
+        if t < 1.0 {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+        smooth(t)
     }
 
     fn save_full(&mut self, post: &PostRecord) {
@@ -276,6 +314,21 @@ impl Bayonet {
     }
 }
 
+impl FullWait {
+    fn opacity(self) -> f32 {
+        let Self::NetworkFetch { born } = self else {
+            return 0.0;
+        };
+        let age = born.elapsed();
+        if age <= NETWORK_TEXT_DWELL {
+            return 0.0;
+        }
+        let t = (age.saturating_sub(NETWORK_TEXT_DWELL).as_secs_f32() / FULL_FADE.as_secs_f32())
+            .clamp(0.0, 1.0);
+        smooth(t)
+    }
+}
+
 fn full_image_box(
     post: &PostRecord,
     texture: Option<&TextureHandle>,
@@ -326,6 +379,26 @@ fn centered_box(ui: &mut egui::Ui, size: egui::Vec2, text: &str) {
             let _label = ui.label(text);
         },
     );
+}
+
+fn wait_box(ui: &mut egui::Ui, size: egui::Vec2, opacity: f32) {
+    let _box = ui.allocate_ui_with_layout(
+        size,
+        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+        |ui| {
+            let alpha = (opacity * 255.0).round() as u8;
+            if alpha > 0 {
+                let text = egui::RichText::new("loading full image")
+                    .color(egui::Color32::from_white_alpha(alpha));
+                let _label = ui.label(text);
+                ui.ctx().request_repaint_after(Duration::from_millis(16));
+            }
+        },
+    );
+}
+
+fn smooth(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn outside_click(ctx: &egui::Context, rect: egui::Rect) -> bool {

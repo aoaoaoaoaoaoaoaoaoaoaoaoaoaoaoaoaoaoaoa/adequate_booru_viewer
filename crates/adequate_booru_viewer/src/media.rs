@@ -51,7 +51,7 @@ impl MediaCache {
     }
 
     pub fn bytes(&self, id: PostId, url: &str) -> Result<Vec<u8>> {
-        let path = self.path_for(id, url);
+        let path = cache_path(&self.root, id, url);
         match std::fs::read(&path) {
             Ok(bytes) => Ok(bytes),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -78,11 +78,14 @@ impl MediaCache {
             .with_context(|| format!("GET media {url}"))?;
         response.body_mut().read_to_vec().context("read media body")
     }
+}
 
-    fn path_for(&self, id: PostId, url: &str) -> PathBuf {
-        self.root
-            .join(format!("{}-{:016x}.{}", id.0, fnv1a(url), extension(url)))
-    }
+pub fn cached(root: &Path, id: PostId, url: &str) -> bool {
+    cache_path(root, id, url).is_file()
+}
+
+pub fn cache_path(root: &Path, id: PostId, url: &str) -> PathBuf {
+    root.join(format!("{}-{:016x}.{}", id.0, fnv1a(url), extension(url)))
 }
 
 fn decode(id: PostId, bytes: &[u8]) -> Result<RgbaBlade> {

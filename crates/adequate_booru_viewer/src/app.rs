@@ -45,7 +45,7 @@ mod water;
 
 use refresh::{AsyncPulse, PulseGate};
 use scroll::TrayTilt;
-use viewer::ZoomGate;
+use viewer::{FullWait, ZoomGate};
 use water::{EmptyDrain, LiftPlate, LoadingRaft, Plunge, TouchPlunge};
 
 const RESULT_LIMIT: usize = 360;
@@ -190,6 +190,8 @@ pub struct Bayonet {
     warm_state: WarmState,
     full: HashMap<PostId, TextureHandle>,
     full_rgba: HashMap<PostId, RgbaBlade>,
+    full_loaded_at: HashMap<PostId, Instant>,
+    full_wait: HashMap<PostId, FullWait>,
     full_inflight: HashSet<PostId>,
     full_faults: HashSet<PostId>,
     zoom: Option<PostRecord>,
@@ -300,6 +302,8 @@ impl Bayonet {
             warm_state: WarmState::Idle,
             full: HashMap::new(),
             full_rgba: HashMap::new(),
+            full_loaded_at: HashMap::new(),
+            full_wait: HashMap::new(),
             full_inflight: HashSet::new(),
             full_faults: HashSet::new(),
             zoom: None,
@@ -900,6 +904,7 @@ impl Bayonet {
                 }
                 Event::FullBladeFault { id, fault } => {
                     let _was_inflight = self.full_inflight.remove(&id);
+                    let _was_waiting = self.full_wait.remove(&id);
                     let _faulted = self.full_faults.insert(id);
                     self.status = fault;
                     ctx.request_repaint();
@@ -948,12 +953,14 @@ impl Bayonet {
             }
             BladeKind::Full => {
                 let _was_inflight = self.full_inflight.remove(&blade.id);
+                let _was_waiting = self.full_wait.remove(&blade.id);
                 let _was_faulted = self.full_faults.remove(&blade.id);
                 // A blade landing after its viewer closed would pin GPU memory forever.
                 if self.zoom.as_ref().is_none_or(|post| post.id != blade.id) {
                     return;
                 }
                 let _old_texture = self.full.insert(blade.id, blade_texture(ctx, &blade, kind));
+                let _old_born = self.full_loaded_at.insert(blade.id, Instant::now());
                 let _old_rgba = self.full_rgba.insert(blade.id, blade);
             }
         }
