@@ -262,11 +262,11 @@ impl Bayonet {
             self.advance_thumb_epoch();
             self.save_config();
         }
-        if ui
+        let prefetch = ui
             .checkbox(&mut self.prefetch_on_hover, "prefetch on hover")
-            .on_hover_text("warm the disk cache with the full image while hovering")
-            .changed()
-        {
+            .on_hover_text("warm the disk cache with the full image while hovering");
+        if prefetch.changed() {
+            self.bump_plunge(prefetch.rect);
             self.save_config();
         }
     }

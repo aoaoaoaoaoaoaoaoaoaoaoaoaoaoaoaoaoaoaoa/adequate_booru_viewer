@@ -44,7 +44,7 @@ mod viewer;
 mod water;
 
 use refresh::{AsyncPulse, PulseGate};
-use scroll::TrayTilt;
+use scroll::{ThumbCruise, TrayTilt};
 use viewer::{FullWait, ZoomGate};
 use water::{EmptyDrain, LiftPlate, LoadingRaft, Plunge, TouchPlunge};
 
@@ -61,6 +61,7 @@ const VIEWER_CHROME: f32 = 40.0;
 const MAX_GROUP_DEPTH: usize = 8;
 const PLATE_PAD: f32 = 4.0;
 const PREFETCH_DWELL: Duration = Duration::from_millis(120);
+const THUMB_PREFETCH_BUDGET: usize = 48;
 const CONFIG_SETTLE: Duration = Duration::from_millis(400);
 const VEIL_RADIUS: f32 = 2.0;
 const VEIL_RISE: f32 = 0.12;
@@ -215,6 +216,7 @@ pub struct Bayonet {
     water_rect: egui::Rect,
     water_mode: WaterMode,
     scroll: TrayTilt,
+    thumb_cruise: ThumbCruise,
     scroll_tilt: f32,
     brine: crate::frost::Brine,
     surf: Surf,
@@ -329,6 +331,7 @@ impl Bayonet {
             water_rect: egui::Rect::ZERO,
             water_mode: slate.water,
             scroll: TrayTilt::default(),
+            thumb_cruise: ThumbCruise::default(),
             scroll_tilt: 0.0,
             brine: crate::frost::Brine::default(),
             surf: Surf::default(),
@@ -571,6 +574,7 @@ impl Bayonet {
     fn advance_thumb_epoch(&mut self) {
         self.thumb_epoch = self.thumb_epoch.advance();
         self.thumb_inflight.clear();
+        self.thumb_cruise = ThumbCruise::default();
         if let Err(err) = self.worker.send(Command::CullBlades {
             epoch: self.thumb_epoch,
         }) {
@@ -976,10 +980,12 @@ impl Bayonet {
         let rows = posts.len().div_ceil(cols);
         let row_height = tile + GAP;
         let mut menu_opened = false;
+        let mut visible_rows = 0..0;
         self.hover_tile = None;
         let arena = ui.max_rect();
         self.water_rect = arena;
         let scroll = egui::ScrollArea::vertical().show_rows(ui, row_height, rows, |ui, range| {
+            visible_rows = range.clone();
             ui.spacing_mut().item_spacing.x = GAP;
             for row in range {
                 let start = row * cols;
@@ -997,6 +1003,18 @@ impl Bayonet {
             self.empty_since = None;
             self.loading_raft.hide();
         }
+        self.prefetch_scroll_thumbs(
+            ui.ctx(),
+            &posts,
+            GridScan {
+                cols,
+                tile,
+                row_height,
+                rows,
+                visible_rows,
+                offset: scroll.state.offset.y,
+            },
+        );
         self.heave(ui.ctx(), scroll.state.offset.y, ui.ctx().pixels_per_point());
         self.hit.posts = posts;
         menu_opened
@@ -1123,34 +1141,89 @@ impl Bayonet {
         groups
     }
 
-    fn thumb(&mut self, post: &PostRecord, edge: f32) -> Option<ThumbLoad<'_>> {
+    fn thumb(&mut self, post: &PostRecord, edge: f32) -> Option<ThumbLoad> {
         let bucket = thumb_bucket(edge);
         let key = ThumbKey {
             id: post.id,
             bucket,
         };
-        if let Some(texture) = self.thumbs.get(&key) {
+        if let Some(texture) = self.thumbs.get(&key).cloned() {
             return Some(ThumbLoad::Ready(texture));
         }
         if self.thumb_faults.contains(&key) {
             return Some(ThumbLoad::Fault);
         }
-        if !self.thumb_inflight.contains(&key) {
-            let url = post.thumb_url(edge).map(ToOwned::to_owned)?;
-            let _now_inflight = self.thumb_inflight.insert(key);
-            if let Err(err) = self.worker.send(Command::Blade {
-                epoch: self.thumb_epoch,
-                id: post.id,
-                bucket,
-                url: Some(url),
-            }) {
-                let _was_inflight = self.thumb_inflight.remove(&key);
-                let _faulted = self.thumb_faults.insert(key);
-                self.status = format!("{err:#}");
-                return Some(ThumbLoad::Fault);
+        match self.arm_thumb(post, edge) {
+            ThumbArm::Missing => None,
+            ThumbArm::Fault => Some(ThumbLoad::Fault),
+            ThumbArm::Armed | ThumbArm::Pending => Some(ThumbLoad::Loading),
+        }
+    }
+
+    fn prefetch_scroll_thumbs(
+        &mut self,
+        ctx: &egui::Context,
+        posts: &[PostRecord],
+        scan: GridScan,
+    ) {
+        if posts.is_empty() {
+            return;
+        }
+        let dt = ctx.input(|input| input.stable_dt).clamp(1.0 / 240.0, 0.08);
+        let Some(band) = self.thumb_cruise.wake(
+            scan.offset,
+            ctx.pixels_per_point(),
+            dt,
+            scan.row_height,
+            scan.rows,
+            scan.visible_rows,
+        ) else {
+            return;
+        };
+        let mut armed = 0;
+        for row in band {
+            let start = row * scan.cols;
+            let end = (start + scan.cols).min(posts.len());
+            for post in &posts[start..end] {
+                if armed >= THUMB_PREFETCH_BUDGET {
+                    return;
+                }
+                armed += usize::from(self.arm_thumb(post, scan.tile) == ThumbArm::Armed);
             }
         }
-        Some(ThumbLoad::Loading)
+    }
+
+    fn arm_thumb(&mut self, post: &PostRecord, edge: f32) -> ThumbArm {
+        let bucket = thumb_bucket(edge);
+        let key = ThumbKey {
+            id: post.id,
+            bucket,
+        };
+        if self.thumbs.contains_key(&key) {
+            return ThumbArm::Pending;
+        }
+        if self.thumb_faults.contains(&key) {
+            return ThumbArm::Fault;
+        }
+        if self.thumb_inflight.contains(&key) {
+            return ThumbArm::Pending;
+        }
+        let Some(url) = post.thumb_url(edge).map(ToOwned::to_owned) else {
+            return ThumbArm::Missing;
+        };
+        let _now_inflight = self.thumb_inflight.insert(key);
+        if let Err(err) = self.worker.send(Command::Blade {
+            epoch: self.thumb_epoch,
+            id: post.id,
+            bucket,
+            url: Some(url),
+        }) {
+            let _was_inflight = self.thumb_inflight.remove(&key);
+            let _faulted = self.thumb_faults.insert(key);
+            self.status = format!("{err:#}");
+            return ThumbArm::Fault;
+        }
+        ThumbArm::Armed
     }
 
     fn zoom_tiles(&mut self, ctx: &egui::Context) {
@@ -1272,10 +1345,27 @@ enum BladeKind {
     Full,
 }
 
-enum ThumbLoad<'a> {
-    Ready(&'a TextureHandle),
+enum ThumbLoad {
+    Ready(TextureHandle),
     Loading,
     Fault,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ThumbArm {
+    Armed,
+    Pending,
+    Missing,
+    Fault,
+}
+
+struct GridScan {
+    cols: usize,
+    tile: f32,
+    row_height: f32,
+    rows: usize,
+    visible_rows: std::ops::Range<usize>,
+    offset: f32,
 }
 
 impl BladeKind {
