@@ -151,15 +151,19 @@ impl Bayonet {
         let focus_entry = !ui.ctx().egui_wants_keyboard_input()
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Slash));
         let entry_id = ui.make_persistent_id("tag-entry");
+        if focus_entry {
+            discard_text(ui, "/");
+        }
+        let seeded_entry = !focus_entry && self.seed_tag_entry(ui);
+        if focus_entry || seeded_entry {
+            ui.memory_mut(|mem| mem.request_focus(entry_id));
+        }
         let entry = ui.add_sized(
             [ui.available_width(), 20.0],
             egui::TextEdit::singleline(&mut self.tag_entry)
                 .id(entry_id)
                 .hint_text("add tag to selected group…"),
         );
-        if focus_entry {
-            entry.request_focus();
-        }
         if let Some(wake) = chrome::text_wake(ui, &entry, &before, &self.tag_entry) {
             self.text_plunge(wake);
         }
@@ -186,6 +190,29 @@ impl Bayonet {
             }
         });
         self.apply_query_actions(actions);
+    }
+
+    fn seed_tag_entry(&mut self, ui: &mut egui::Ui) -> bool {
+        if self.zoom.is_some() || self.tag_menu.is_open() || ui.ctx().egui_wants_keyboard_input() {
+            return false;
+        }
+        let seed = ui.input_mut(|input| {
+            if input.modifiers.ctrl || input.modifiers.command || input.modifiers.alt {
+                return None;
+            }
+            let index = input.events.iter().position(
+                |event| matches!(event, egui::Event::Text(text) if tag_seed(text).is_some()),
+            )?;
+            match input.events.remove(index) {
+                egui::Event::Text(text) => tag_seed(&text),
+                _ => None,
+            }
+        });
+        let Some(seed) = seed else {
+            return false;
+        };
+        self.tag_entry.push_str(&seed);
+        true
     }
 
     fn gallery_panel(&mut self, ui: &mut egui::Ui) {
@@ -434,5 +461,42 @@ impl Bayonet {
             }
             QueryAction::Pulse(rect) => self.bump_plunge(rect),
         }
+    }
+}
+
+fn discard_text(ui: &mut egui::Ui, text: &str) {
+    ui.input_mut(|input| {
+        if let Some(index) = input
+            .events
+            .iter()
+            .position(|event| matches!(event, egui::Event::Text(found) if found == text))
+        {
+            let _discarded = input.events.remove(index);
+        }
+    });
+}
+
+fn tag_seed(text: &str) -> Option<String> {
+    let seed = text
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>();
+    seed.chars().any(|ch| !ch.is_whitespace()).then_some(seed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tag_seed;
+
+    #[test]
+    fn tag_seed_accepts_printable_query_glyphs() {
+        assert_eq!(tag_seed("b"), Some("b".to_owned()));
+        assert_eq!(tag_seed("-rating:g"), Some("-rating:g".to_owned()));
+    }
+
+    #[test]
+    fn tag_seed_rejects_blank_and_control_text() {
+        assert_eq!(tag_seed(" "), None);
+        assert_eq!(tag_seed("\n"), None);
     }
 }
