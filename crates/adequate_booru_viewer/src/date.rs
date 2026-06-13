@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const UNIX_EPOCH_DAY: i32 = 719_468;
 
@@ -32,12 +33,16 @@ impl CreatedDay {
         Self::parse(raw)
     }
 
-    fn from_ymd(year: i32, month: u32, day: u32) -> Option<Self> {
-        if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+    pub fn from_ymd(year: i32, month: u32, day: u32) -> Option<Self> {
+        if !(1..=12).contains(&month) || day == 0 || day > Self::days_in_month(year, month) {
             return None;
         }
         let days = days_from_civil(year, month, day);
         (days >= 0).then_some(Self(days as u32))
+    }
+
+    pub fn days_in_month(year: i32, month: u32) -> u32 {
+        days_in_month(year, month)
     }
 
     pub fn get(self) -> u32 {
@@ -46,6 +51,13 @@ impl CreatedDay {
 
     pub fn from_unix_days(days: u32) -> Self {
         Self(days)
+    }
+
+    pub fn today_utc() -> Self {
+        let days = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |age| age.as_secs() / 86_400);
+        Self(days.min(u64::from(u32::MAX)) as u32)
     }
 
     pub fn ymd(self) -> (i32, u32, u32) {

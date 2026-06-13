@@ -12,7 +12,7 @@ use std::{
 use crate::{
     chrome,
     config::{Config, FilterConfig, FilterName, QueryConfig, SavedFilter, Slate, WaterMode},
-    date::{CreatedDay, DateRange},
+    date::DateRange,
     filter_bank::Bank,
     frost::{Cut, Veil},
     index::{CacheStats, Index, TagSuggestion},
@@ -35,6 +35,7 @@ use crate::{
 };
 
 mod bench;
+mod date_spool;
 mod debug;
 mod loading;
 mod palette;
@@ -174,8 +175,6 @@ pub struct Bayonet {
     shelf_edit: Option<ShelfEdit>,
     sort: Sort,
     date_range: DateRange,
-    date_from_entry: String,
-    date_to_entry: String,
     refresh_serial: u64,
     refresh_pulse: AsyncPulse,
     refresh_gate: PulseGate,
@@ -291,8 +290,6 @@ impl Bayonet {
             shelf_edit: None,
             sort,
             date_range,
-            date_from_entry: date_text(date_range.first),
-            date_to_entry: date_text(date_range.last),
             refresh_serial: 0,
             refresh_pulse: AsyncPulse::Idle,
             refresh_gate: PulseGate::refresh(),
@@ -519,12 +516,14 @@ impl Bayonet {
         }
         self.remember_hit();
         self.date_range = dates;
-        self.date_from_entry = date_text(dates.first);
-        self.date_to_entry = date_text(dates.last);
         if !self.restore_hit() {
             self.clear_hit();
         }
         self.save_config();
+        if dates.active() {
+            self.warm_state = WarmState::Idle;
+            "date range active; upstream warm suspended".clone_into(&mut self.warm_status);
+        }
         self.strike(false, 0);
     }
 
@@ -765,6 +764,11 @@ impl Bayonet {
     }
 
     fn dispatch_warm(&mut self, query: Query, pages: u32) -> Result<()> {
+        if self.date_range.active() {
+            self.warm_state = WarmState::Idle;
+            "date range active; upstream warm suspended".clone_into(&mut self.warm_status);
+            return Ok(());
+        }
         self.align_warm(&query);
         if pages == 0 {
             return Ok(());
@@ -845,7 +849,11 @@ impl Bayonet {
                         query: query_key,
                         sort,
                     };
-                    if self.warm_key == event_key {
+                    if self.date_range.active() {
+                        self.warm_state = WarmState::Idle;
+                        "date range active; upstream warm suspended"
+                            .clone_into(&mut self.warm_status);
+                    } else if self.warm_key == event_key {
                         self.warm_state = if exhausted {
                             WarmState::Exhausted
                         } else {
@@ -1608,10 +1616,6 @@ fn thumb_bucket(edge: f32) -> u8 {
     } else {
         u8::from(edge > 190.0)
     }
-}
-
-fn date_text(day: Option<CreatedDay>) -> String {
-    day.map_or_else(String::new, |day| day.to_string())
 }
 
 fn consume_wheel(ctx: &egui::Context) {

@@ -33,7 +33,7 @@ pub(super) fn viewer_title_bar(
             let _row = ui.horizontal(|ui| {
                 let _link = ui
                     .hyperlink_to(
-                        egui::RichText::new(format!("#{}", post.id))
+                        egui::RichText::new(viewer_id_date(post))
                             .size(13.0)
                             .strong(),
                         crate::booru::post_url(post.id),
@@ -68,6 +68,11 @@ pub(super) fn viewer_title_bar(
             });
         });
     actions
+}
+
+fn viewer_id_date(post: &PostRecord) -> String {
+    let day = post.created_at.get(..10).unwrap_or("????-??-??");
+    format!("#{}  {}", post.id, day)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

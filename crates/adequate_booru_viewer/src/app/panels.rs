@@ -276,34 +276,18 @@ impl Bayonet {
         ui.add_space(2.0);
         let _title = ui.label(chrome::eyebrow("DATE RANGE"));
         let mut next = self.date_range;
-        let from = date_field(ui, "FROM", &mut self.date_from_entry);
-        if let Some(wake) = from.wake {
-            self.text_plunge(wake);
-        }
-        if from.clear {
-            self.bump_plunge(from.rect);
-            next.first = None;
-        } else if from.changed
-            && let Some(commit) = parse_date_control(&self.date_from_entry)
-        {
-            match commit {
-                DateCommit::Clear => next.first = None,
-                DateCommit::Set(day) => next.first = Some(day),
+        let from = date_spool::date_bound(ui, "date-from", "FROM", next.first);
+        if from.changed {
+            next.first = from.value;
+            if let Some(rect) = from.pulse {
+                self.bump_plunge(rect);
             }
         }
-        let to = date_field(ui, "UNTIL", &mut self.date_to_entry);
-        if let Some(wake) = to.wake {
-            self.text_plunge(wake);
-        }
-        if to.clear {
-            self.bump_plunge(to.rect);
-            next.last = None;
-        } else if to.changed
-            && let Some(commit) = parse_date_control(&self.date_to_entry)
-        {
-            match commit {
-                DateCommit::Clear => next.last = None,
-                DateCommit::Set(day) => next.last = Some(day),
+        let to = date_spool::date_bound(ui, "date-to", "UNTIL", next.last);
+        if to.changed {
+            next.last = to.value;
+            if let Some(rect) = to.pulse {
+                self.bump_plunge(rect);
             }
         }
         if next.normalized() != self.date_range {
@@ -536,56 +520,6 @@ fn discard_text(ui: &mut egui::Ui, text: &str) {
             let _discarded = input.events.remove(index);
         }
     });
-}
-
-struct DateEdit {
-    changed: bool,
-    clear: bool,
-    wake: Option<chrome::TextWake>,
-    rect: egui::Rect,
-}
-
-enum DateCommit {
-    Clear,
-    Set(CreatedDay),
-}
-
-fn date_field(ui: &mut egui::Ui, label: &'static str, value: &mut String) -> DateEdit {
-    let before = value.clone();
-    let mut changed = false;
-    let mut clear = false;
-    let mut wake = None;
-    let mut rect = egui::Rect::NOTHING;
-    let _row = ui.horizontal(|ui| {
-        let _label = ui.label(chrome::muted(label));
-        let response = egui::TextEdit::singleline(value)
-            .hint_text("YYYY-MM-DD")
-            .desired_width((ui.available_width() - 30.0).max(80.0))
-            .show(ui)
-            .response;
-        changed = response.changed();
-        wake = chrome::text_wake(ui, &response, &before, value);
-        let wipe = chrome::icon_still(ui, "×").on_hover_text("clear date bound");
-        rect = wipe.rect;
-        clear = wipe.clicked();
-    });
-    DateEdit {
-        changed,
-        clear,
-        wake,
-        rect,
-    }
-}
-
-fn parse_date_control(raw: &str) -> Option<DateCommit> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        Some(DateCommit::Clear)
-    } else if raw.len() == 10 {
-        CreatedDay::parse(raw).map(DateCommit::Set)
-    } else {
-        None
-    }
 }
 
 fn tag_seed(text: &str) -> Option<String> {
