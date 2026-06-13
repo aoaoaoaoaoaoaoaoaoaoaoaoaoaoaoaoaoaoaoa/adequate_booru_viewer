@@ -33,6 +33,7 @@ use crate::{
 };
 
 mod bench;
+mod debug;
 mod loading;
 mod palette;
 mod panels;

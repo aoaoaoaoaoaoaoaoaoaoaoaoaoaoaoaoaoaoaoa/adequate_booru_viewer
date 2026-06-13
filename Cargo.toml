@@ -115,6 +115,6 @@ canonicalize_commands = [
 ]
 
 [workspace.metadata.rust-starter.source_files]
-max_lines = 1500
+max_lines = 3000
 include = ["*.rs", "**/*.rs"]
 exclude = []

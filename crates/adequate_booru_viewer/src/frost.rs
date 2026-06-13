@@ -6,6 +6,7 @@ use std::f32::consts::TAU;
 
 #[cfg(test)]
 mod audit;
+mod dump;
 mod guard;
 
 const LEVELS: usize = 3;
@@ -261,6 +262,7 @@ struct Water {
 }
 
 struct Target {
+    texture: wgpu::Texture,
     view: wgpu::TextureView,
     /// Bind group for passes that sample this target.
     bind: wgpu::BindGroup,
@@ -434,7 +436,8 @@ impl Frost {
                 dimension: wgpu::TextureDimension::D2,
                 format: self.format,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[self.format],
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -452,7 +455,11 @@ impl Frost {
                     },
                 ],
             });
-            Target { view, bind }
+            Target {
+                texture,
+                view,
+                bind,
+            }
         };
         let scene = target("frost-scene", width, height);
         let chain = (1..=LEVELS as u32)

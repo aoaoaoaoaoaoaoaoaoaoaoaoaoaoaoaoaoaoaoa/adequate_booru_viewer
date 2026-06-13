@@ -280,6 +280,12 @@ impl Bayonet {
                 self.water_mode = WaterMode::ReallyWet;
                 changed = true;
             }
+            if chrome::glyph(ui, "PURGE DUMPS", false)
+                .on_hover_text("delete saved water debug dumps")
+                .clicked()
+            {
+                self.purge_debug_dumps();
+            }
         });
         if changed {
             self.save_config();
@@ -302,6 +308,8 @@ impl Bayonet {
             "viewer right-click / esc: close",
             "viewer copy / save: export full image",
             "ctrl-wheel gallery: images per row",
+            "f10: dump water debug state",
+            "shift-f10: purge water debug dumps",
             "f12: water physics bench",
         ] {
             let _line = chrome::note(ui, line);

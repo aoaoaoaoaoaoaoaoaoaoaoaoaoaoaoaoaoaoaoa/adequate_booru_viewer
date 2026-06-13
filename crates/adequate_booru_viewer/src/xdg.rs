@@ -49,6 +49,10 @@ impl Lair {
         self.data.join("models")
     }
 
+    pub fn debug_dir(&self) -> PathBuf {
+        self.state.join("debug")
+    }
+
     fn mkdir(&self) -> Result<()> {
         for path in [
             &self.config,
@@ -57,6 +61,7 @@ impl Lair {
             &self.state,
             &self.media_dir(),
             &self.model_dir(),
+            &self.debug_dir(),
         ] {
             std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
         }

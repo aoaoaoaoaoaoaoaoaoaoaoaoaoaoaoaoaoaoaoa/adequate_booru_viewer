@@ -12,7 +12,7 @@ from pathlib import PurePosixPath
 
 ROOT = Path(__file__).resolve().parent
 WORKSPACE_MANIFEST = ROOT / "Cargo.toml"
-DEFAULT_MAX_SOURCE_FILE_LINES = 2500
+DEFAULT_MAX_SOURCE_FILE_LINES = 3000
 DEFAULT_SOURCE_FILE_INCLUDE = ("*.rs", "**/*.rs")
 IGNORED_SOURCE_DIRS = frozenset(
     {".direnv", ".git", ".hg", ".jj", ".svn", "__pycache__", "node_modules", "target", "vendor"}

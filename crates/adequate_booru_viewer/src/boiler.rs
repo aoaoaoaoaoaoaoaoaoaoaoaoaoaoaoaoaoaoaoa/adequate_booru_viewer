@@ -11,11 +11,13 @@ use egui_wgpu::{RenderState, RendererOptions, ScreenDescriptor, WgpuConfiguratio
 use egui_winit::winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalSize},
-    event::{StartCause, WindowEvent},
+    event::{ElementState, StartCause, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
+    keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowAttributes},
 };
 use std::{
+    path::Path,
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
@@ -123,6 +125,8 @@ pub fn run(ctx: egui::Context, app: Bayonet) -> Result<()> {
         quivers: Vec::new(),
         quiver_tick: Instant::now(),
         quiver_until: None,
+        modifiers: ModifiersState::empty(),
+        dump_next: false,
     };
     startup("boiler.loop.enter");
     event_loop.run_app(&mut boiler).context("run event loop")
@@ -163,11 +167,17 @@ struct Boiler {
     quivers: Vec<Quiver>,
     quiver_tick: Instant,
     quiver_until: Option<Instant>,
+    modifiers: ModifiersState,
+    dump_next: bool,
 }
 
 impl Boiler {
     fn paint(&mut self) {
-        let Some(rig) = &mut self.rig else {
+        if self.rig.is_none() {
+            return;
+        }
+        let dump_path = self.take_dump_path();
+        let Some(rig) = self.rig.as_mut() else {
             return;
         };
         let raw_input = rig.input.take_egui_input(&rig.window);
@@ -204,7 +214,7 @@ impl Boiler {
             self.quiver_until = None;
         }
         let wake = self.app.frost_wake(&self.ctx) || quiver_wake;
-        rig.render(
+        let dump = rig.render(
             &primitives,
             &output.textures_delta,
             output.pixels_per_point,
@@ -224,12 +234,30 @@ impl Boiler {
                 brine: self.app.brine(),
                 guard: self.app.water_guard(),
             },
+            dump_path.as_deref(),
         );
+        if let (Some(path), Some(result)) = (dump_path.as_deref(), dump) {
+            self.app.report_debug_dump(result.map(|()| path));
+        }
         if let Some(viewport) = output.viewport_output.get(&egui::ViewportId::ROOT) {
             if viewport.repaint_delay.is_zero() {
                 rig.window.request_redraw();
             } else if let Some(when) = Instant::now().checked_add(viewport.repaint_delay) {
                 advance_alarm(&self.alarm, when);
+            }
+        }
+    }
+
+    fn take_dump_path(&mut self) -> Option<std::path::PathBuf> {
+        if !self.dump_next {
+            return None;
+        }
+        self.dump_next = false;
+        match self.app.debug_dump_path() {
+            Ok(path) => Some(path),
+            Err(err) => {
+                self.app.report_debug_dump(Err(err));
+                None
             }
         }
     }
@@ -290,6 +318,23 @@ impl ApplicationHandler<Spark> for Boiler {
         match &event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
+                return;
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && matches!(&event.logical_key, Key::Named(NamedKey::F10)) =>
+            {
+                if self.modifiers.shift_key() {
+                    self.app.purge_debug_dumps();
+                } else {
+                    self.dump_next = true;
+                }
+                if let Some(rig) = &self.rig {
+                    rig.window.request_redraw();
+                }
                 return;
             }
             WindowEvent::RedrawRequested => {
@@ -405,7 +450,8 @@ impl Rig {
         delta: &egui::TexturesDelta,
         pixels_per_point: f32,
         surge: &crate::frost::Surge<'_>,
-    ) {
+        dump_path: Option<&Path>,
+    ) -> Option<Result<()>> {
         let screen = ScreenDescriptor {
             size_in_pixels: [self.config.width, self.config.height],
             pixels_per_point,
@@ -434,18 +480,18 @@ impl Rig {
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Timeout => {
                 self.window.request_redraw();
-                return;
+                return None;
             }
             // Minimized / fully covered: skip; the next window event repaints.
-            wgpu::CurrentSurfaceTexture::Occluded => return,
+            wgpu::CurrentSurfaceTexture::Occluded => return None,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.gpu.device, &self.config);
                 self.window.request_redraw();
-                return;
+                return None;
             }
             wgpu::CurrentSurfaceTexture::Validation => {
                 eprintln!("boiler: surface texture validation failure");
-                return;
+                return None;
             }
         };
         let surface_view = frame
@@ -500,6 +546,16 @@ impl Rig {
         {
             self.window.request_redraw();
         }
+        let dump = dump_path.map(|path| {
+            self.frost.dump(
+                &self.gpu.device,
+                &self.gpu.queue,
+                path,
+                surge,
+                screen.size_in_pixels,
+                pixels_per_point,
+            )
+        });
         self.window.pre_present_notify();
         frame.present();
         // Free only after submit: destroying a texture the just-recorded
@@ -510,5 +566,6 @@ impl Rig {
                 renderer.free_texture(id);
             }
         }
+        dump
     }
 }

@@ -1,6 +1,6 @@
 use super::*;
 use anyhow::{Context as _, Result, bail};
-use std::{sync::mpsc, time::Duration};
+use std::{fs, process, sync::mpsc, time::Duration};
 
 const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const W: u32 = 640;
@@ -63,6 +63,40 @@ fn water_allocates_half_resolution_field() -> Result<()> {
             return Ok(());
         };
         bench.assert_size(W.div_ceil(2), H.div_ceil(2))
+    })
+}
+
+#[test]
+fn water_dump_writes_forensic_sections() -> Result<()> {
+    pollster::block_on(async {
+        let Some(mut bench) = Bench::make().await? else {
+            return Ok(());
+        };
+        let surge = quiet(0.125);
+        bench.step(&surge)?;
+        let path = std::env::temp_dir().join(format!(
+            "abv-water-dump-test-{}-{}.abvdump",
+            process::id(),
+            W
+        ));
+        let _gone = fs::remove_file(&path);
+        bench
+            .frost
+            .dump(&bench.device, &bench.queue, &path, &surge, [W, H], 1.0)?;
+        let blob = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+        if !blob.starts_with(b"ABV_WATER_DUMP\0") {
+            bail!("water dump missing magic header");
+        }
+        for needle in [b"meta.txt".as_slice(), b"water0.rg32f", b"water1.rg32f"] {
+            if !blob.windows(needle.len()).any(|window| window == needle) {
+                bail!(
+                    "water dump missing section {}",
+                    String::from_utf8_lossy(needle)
+                );
+            }
+        }
+        Ok(())
     })
 }
 
