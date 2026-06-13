@@ -49,6 +49,7 @@ use viewer::ZoomGate;
 use water::{EmptyDrain, LiftPlate, LoadingRaft, Plunge, TouchPlunge};
 
 const RESULT_LIMIT: usize = 360;
+const HIT_CACHE_LIMIT: usize = 24;
 const EVENT_BUDGET: usize = 12;
 const AUTO_WARM_PAGES: u32 = 1;
 const DANBOORU_SEARCH_PAGE_LIMIT: u32 = 1_000;
@@ -177,6 +178,7 @@ pub struct Bayonet {
     stats_pulse: AsyncPulse,
     stats_gate: PulseGate,
     hit: SearchHit,
+    hit_cache: HitCache,
     parked_hit: Option<SearchHit>,
     thumbs: HashMap<ThumbKey, TextureHandle>,
     thumb_inflight: HashSet<ThumbKey>,
@@ -286,6 +288,7 @@ impl Bayonet {
             stats_pulse: AsyncPulse::Idle,
             stats_gate: PulseGate::stats(),
             hit: SearchHit::default(),
+            hit_cache: HitCache::default(),
             parked_hit: None,
             thumbs: HashMap::new(),
             thumb_inflight: HashSet::new(),
@@ -497,13 +500,31 @@ impl Bayonet {
     fn install_query_at(&mut self, query: Query, active_group: Vec<usize>) {
         let mut query = query;
         query.sort_atoms();
+        self.remember_hit();
         self.active_group = query.clamp_group_path(&active_group);
         self.query = query;
-        self.clear_hit();
+        if !self.restore_hit() {
+            self.clear_hit();
+        }
         let query = self.query.clone();
         self.align_warm(&query);
         self.save_config();
         self.strike(true, AUTO_WARM_PAGES);
+    }
+
+    fn remember_hit(&mut self) {
+        self.hit_cache
+            .put(WarmKey::new(&self.query, self.sort), self.hit.clone());
+    }
+
+    fn restore_hit(&mut self) -> bool {
+        let key = WarmKey::new(&self.query, self.sort);
+        let Some(hit) = self.hit_cache.get(&key) else {
+            return false;
+        };
+        self.parked_hit = None;
+        self.commit_hit(hit);
+        true
     }
 
     fn clear_hit(&mut self) {
@@ -1289,6 +1310,32 @@ impl WarmKey {
         } else {
             format!("{} {}", self.sort.label(), self.query)
         }
+    }
+}
+
+#[derive(Default)]
+struct HitCache {
+    slots: Vec<(WarmKey, SearchHit)>,
+}
+
+impl HitCache {
+    fn get(&mut self, key: &WarmKey) -> Option<SearchHit> {
+        let slot = self.slots.iter().position(|(found, _)| found == key)?;
+        let pair = self.slots.remove(slot);
+        let hit = pair.1.clone();
+        self.slots.insert(0, pair);
+        Some(hit)
+    }
+
+    fn put(&mut self, key: WarmKey, hit: SearchHit) {
+        if hit.posts.is_empty() {
+            return;
+        }
+        if let Some(slot) = self.slots.iter().position(|(found, _)| found == &key) {
+            let _old = self.slots.remove(slot);
+        }
+        self.slots.insert(0, (key, hit));
+        self.slots.truncate(HIT_CACHE_LIMIT);
     }
 }
 

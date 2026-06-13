@@ -110,6 +110,8 @@ impl Bayonet {
     fn install_refresh(&mut self, hit: SearchHit) {
         let posts = hit.posts.len();
         let candidates = hit.candidates;
+        self.hit_cache
+            .put(WarmKey::new(&self.query, self.sort), hit.clone());
         self.install_hit(hit);
         self.status = format!(
             "{} hits from {} candidates; {}",
