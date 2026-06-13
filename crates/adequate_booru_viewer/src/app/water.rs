@@ -125,7 +125,10 @@ impl Bayonet {
     }
 
     fn plunge_as(&mut self, rect: egui::Rect, amp: f32, shape: crate::frost::SplashShape) {
-        let amp = amp * self.water_amp();
+        self.plunge_scaled(rect, amp * self.water_amp(), shape);
+    }
+
+    fn plunge_scaled(&mut self, rect: egui::Rect, amp: f32, shape: crate::frost::SplashShape) {
         if amp.abs() <= f32::EPSILON {
             return;
         }
@@ -167,9 +170,13 @@ impl Bayonet {
     }
 
     pub(super) fn text_plunge(&mut self, wake: chrome::TextWake) {
-        let amp = wake.amp(self.surf.text_amp).clamp(0.25, 6.6);
-        if amp >= 0.25 {
-            self.plunge(wake.rect, amp);
+        let raw = wake.amp(self.surf.text_amp).clamp(0.25, 6.6);
+        if raw >= 0.25 {
+            self.plunge_scaled(
+                wake.rect,
+                raw * self.glyph_amp(),
+                crate::frost::SplashShape::Ring,
+            );
         }
     }
 

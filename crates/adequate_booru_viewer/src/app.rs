@@ -93,7 +93,8 @@ struct Surf {
 
 #[derive(Clone, Copy, Debug)]
 struct Drench {
-    amp: f32,
+    wave: f32,
+    glyph: f32,
     optics: f32,
     decay: f32,
 }
@@ -101,13 +102,21 @@ struct Drench {
 impl WaterMode {
     fn drench(self) -> Drench {
         match self {
-            Self::Dry | Self::Wet => Drench {
-                amp: 1.0,
+            Self::Dry => Drench {
+                wave: 0.0,
+                glyph: 0.0,
+                optics: 0.0,
+                decay: 1.0,
+            },
+            Self::Wet => Drench {
+                wave: 1.25,
+                glyph: 0.75,
                 optics: 1.0,
                 decay: 1.0,
             },
             Self::ReallyWet => Drench {
-                amp: 2.0,
+                wave: 2.0,
+                glyph: 2.0,
                 optics: 2.0,
                 decay: 2.0,
             },
@@ -119,8 +128,8 @@ impl Drench {
     fn brine(self, mut brine: crate::frost::Brine) -> crate::frost::Brine {
         brine.refract_px *= self.optics;
         brine.ior_spread *= self.optics;
-        brine.meniscus_px *= self.amp;
-        brine.tremor_amp *= self.amp;
+        brine.meniscus_px *= self.wave;
+        brine.tremor_amp *= self.wave;
         brine.wave_damp *= self.decay;
         brine.height_retention = 1.0 - (1.0 - brine.height_retention) / self.decay;
         brine
@@ -382,7 +391,11 @@ impl Bayonet {
     }
 
     fn water_amp(&self) -> f32 {
-        self.water_mode.drench().amp
+        self.water_mode.drench().wave
+    }
+
+    fn glyph_amp(&self) -> f32 {
+        self.water_mode.drench().glyph
     }
 
     fn viewer_life(&self) -> f32 {
@@ -1414,5 +1427,23 @@ impl Bayonet {
         }
         self.retain_tag_menu(&ctx, menu_opened);
         self.full_frame(&ctx);
+    }
+}
+
+#[cfg(test)]
+mod wet_calibration {
+    use super::*;
+
+    #[test]
+    fn wet_retunes_glyphs_without_moving_really_wet() {
+        let wet = WaterMode::Wet.drench();
+        assert_eq!(wet.wave, 1.25);
+        assert_eq!(wet.glyph, 0.75);
+
+        let really = WaterMode::ReallyWet.drench();
+        assert_eq!(really.wave, 2.0);
+        assert_eq!(really.glyph, 2.0);
+        assert_eq!(really.optics, 2.0);
+        assert_eq!(really.decay, 2.0);
     }
 }
