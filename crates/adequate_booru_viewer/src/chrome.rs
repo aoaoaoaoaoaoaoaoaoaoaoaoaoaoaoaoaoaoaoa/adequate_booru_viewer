@@ -355,12 +355,15 @@ pub fn hover_started(ui: &egui::Ui, response: &egui::Response) -> bool {
     })
 }
 
-pub fn shallow_small(ui: &mut egui::Ui, text: RichText, selected: bool) -> egui::Response {
-    let button = egui::Button::new(text).small();
+pub fn complete_chip(ui: &mut egui::Ui, text: RichText, selected: bool) -> egui::Response {
+    let button = egui::Button::new(text.strong()).small();
     let button = if selected {
-        button.fill(RAISED).stroke(Stroke::new(1.0, HOT))
+        button.fill(RAISED).stroke(Stroke::new(1.4, HOT))
     } else {
-        button
+        // Autocomplete has a real keyboard cursor. Do not let ordinary mouse
+        // hover impersonate it: explicit fill/stroke keeps non-selected chips
+        // visually quiet even when the pointer sits over the first candidate.
+        button.fill(CONTROL).stroke(Stroke::new(1.0, EDGE))
     };
     let response = ui.add(button);
     shallow_tension(ui, &response);

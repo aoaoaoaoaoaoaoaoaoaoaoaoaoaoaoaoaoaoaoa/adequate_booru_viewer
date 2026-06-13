@@ -54,13 +54,15 @@ impl Bayonet {
         let _row = ui.horizontal_wrapped(|ui| {
             let _label = ui.label("complete");
             for (slot, suggestion) in suggestions.iter().enumerate() {
-                if chrome::shallow_small(
+                let selected = slot == self.suggest_pick;
+                let cursor = if selected { "▸ " } else { "" };
+                if chrome::complete_chip(
                     ui,
                     tag_chroma::text(
-                        format!("{} ({})", suggestion.tag, suggestion.posts),
+                        format!("{cursor}{} ({})", suggestion.tag, suggestion.posts),
                         suggestion.kind,
                     ),
-                    slot == self.suggest_pick,
+                    selected,
                 )
                 .clicked()
                 {
@@ -144,15 +146,6 @@ impl Bayonet {
     }
 
     fn query_panel(&mut self, ui: &mut egui::Ui) {
-        if let Some(cycle) = self.take_group_cycle(ui) {
-            let active = self.query.cycle_group_path(&self.active_group, cycle);
-            if self.active_group != active {
-                self.active_group = active;
-                self.sync_active_filter();
-                self.save_config();
-                ui.ctx().request_repaint();
-            }
-        }
         let query = self.query.clone();
         let active_group = self.active_group.clone();
         let mut actions = Vec::new();
@@ -199,21 +192,6 @@ impl Bayonet {
             }
         });
         self.apply_query_actions(actions);
-    }
-
-    fn take_group_cycle(&self, ui: &mut egui::Ui) -> Option<GroupCycle> {
-        if self.zoom.is_some() || self.tag_menu.is_open() || ui.ctx().egui_wants_keyboard_input() {
-            return None;
-        }
-        ui.input_mut(|input| {
-            if input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab) {
-                Some(GroupCycle::Backward)
-            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
-                Some(GroupCycle::Forward)
-            } else {
-                None
-            }
-        })
     }
 
     fn seed_tag_entry(&mut self, ui: &mut egui::Ui) -> bool {
@@ -343,7 +321,7 @@ impl Bayonet {
             "enter: add typed tag(s) to highlighted group",
             "/: focus tag field",
             "tab in tag field: cycle completions",
-            "tab / shift-tab: cycle highlighted group",
+            "tab / shift-tab: cycle reference-query groups",
             "-tag: add a negative tag atom",
             "right-click thumbnail: inspect tags",
             "thumbnail tag menu: + require, - exclude, × remove",

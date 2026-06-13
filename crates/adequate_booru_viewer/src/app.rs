@@ -369,6 +369,7 @@ impl Bayonet {
         self.drain(&ctx);
         self.flush_pulse_gates(&ctx);
         self.flush_config(&ctx);
+        self.cycle_query_group(&ctx);
         self.paint(ui);
         // Quivering buttons shed continuous wavetrains; while any seed lives
         // the water moves, so keep painting.
@@ -381,6 +382,34 @@ impl Bayonet {
         }
         self.bench(&ctx);
         self.report_startup_probe();
+    }
+
+    fn cycle_query_group(&mut self, ctx: &egui::Context) {
+        if self.zoom.is_some() || self.tag_menu.is_open() || ctx.text_edit_focused() {
+            return;
+        }
+        let cycle = ctx.input_mut(|input| {
+            if input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab) {
+                Some(GroupCycle::Backward)
+            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
+                Some(GroupCycle::Forward)
+            } else {
+                None
+            }
+        });
+        let Some(cycle) = cycle else {
+            return;
+        };
+        if let Some(focus) = ctx.memory(|mem| mem.focused()) {
+            ctx.memory_mut(|mem| mem.surrender_focus(focus));
+        }
+        let active = self.query.cycle_group_path(&self.active_group, cycle);
+        if self.active_group != active {
+            self.active_group = active;
+            self.sync_active_filter();
+            self.save_config();
+            ctx.request_repaint();
+        }
     }
 
     /// The water chemistry for the compose pass.
