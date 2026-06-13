@@ -150,7 +150,7 @@ impl Bayonet {
         let active_group = self.active_group.clone();
         let mut actions = Vec::new();
         let before = self.tag_entry.clone();
-        let focus_entry = !ui.ctx().egui_wants_keyboard_input()
+        let focus_entry = !ui.ctx().text_edit_focused()
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Slash));
         let entry_id = ui.make_persistent_id("tag-entry");
         if focus_entry {
@@ -195,7 +195,7 @@ impl Bayonet {
     }
 
     fn seed_tag_entry(&mut self, ui: &mut egui::Ui) -> bool {
-        if self.zoom.is_some() || self.tag_menu.is_open() || ui.ctx().egui_wants_keyboard_input() {
+        if self.zoom.is_some() || self.tag_menu.is_open() || ui.ctx().text_edit_focused() {
             return false;
         }
         let seed = ui.input_mut(|input| {

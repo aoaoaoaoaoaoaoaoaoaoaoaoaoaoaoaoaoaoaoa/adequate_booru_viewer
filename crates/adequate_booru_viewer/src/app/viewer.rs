@@ -127,7 +127,7 @@ impl Bayonet {
         if self.zoom.is_some() && tab_pressed(ctx) {
             self.toggle_viewer_tags();
         }
-        if self.zoom.is_some() && !ctx.egui_wants_keyboard_input() {
+        if self.zoom.is_some() && !ctx.text_edit_focused() {
             let step = ctx.input(|input| {
                 i32::from(input.key_pressed(egui::Key::ArrowRight))
                     - i32::from(input.key_pressed(egui::Key::ArrowLeft))
