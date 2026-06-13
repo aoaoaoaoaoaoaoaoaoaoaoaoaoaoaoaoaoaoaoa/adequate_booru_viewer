@@ -273,21 +273,21 @@ ms = 340
 [[steps]]
 action = "scroll"
 direction = "down"
-clicks = 10
-delay_ms = 70
+clicks = 5
+delay_ms = 90
 
 [[steps]]
 action = "scroll"
 direction = "down"
-clicks = 18
-delay_ms = 22
+clicks = 8
+delay_ms = 32
 
 [[steps]]
 action = "scroll"
 direction = "down"
-clicks = 38
+clicks = 15
 delay_ms = 4
 
 [[steps]]
 action = "wait"
-ms = 4800
+ms = 5200
