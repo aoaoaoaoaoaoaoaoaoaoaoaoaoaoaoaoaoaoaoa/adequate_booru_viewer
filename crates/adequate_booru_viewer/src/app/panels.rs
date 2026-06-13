@@ -31,6 +31,8 @@ impl Bayonet {
                 self.status = format!("{err:#}");
             }
         }
+        let owns_keys = focused || !ui.ctx().text_edit_focused();
+        let picked_by_key = owns_keys.then(|| ui.input_mut(take_tab_cycle)).flatten();
         let Some((_, suggestions)) = &self.suggest_memo else {
             return false;
         };
@@ -38,12 +40,16 @@ impl Bayonet {
             return false;
         }
         self.suggest_pick = self.suggest_pick.min(suggestions.len().saturating_sub(1));
-        let picked_by_key = focused
-            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
-        if picked_by_key {
-            self.suggest_pick = (self.suggest_pick + 1) % suggestions.len();
+        if let Some(cycle) = picked_by_key {
+            self.suggest_pick = match cycle {
+                GroupCycle::Forward => (self.suggest_pick + 1) % suggestions.len(),
+                GroupCycle::Backward => self
+                    .suggest_pick
+                    .checked_sub(1)
+                    .unwrap_or(suggestions.len() - 1),
+            };
         }
-        let accepted_by_key = focused
+        let accepted_by_key = owns_keys
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
         if accepted_by_key {
             let suggestion = suggestions[self.suggest_pick].clone();
@@ -320,8 +326,8 @@ impl Bayonet {
         for line in [
             "enter: add typed tag(s) to highlighted group",
             "/: focus tag field",
-            "tab in tag field: cycle completions",
-            "tab / shift-tab: cycle reference-query groups",
+            "tag field tab / shift-tab: cycle completions",
+            "global tab / shift-tab: cycle reference-query groups",
             "-tag: add a negative tag atom",
             "right-click thumbnail: inspect tags",
             "thumbnail tag menu: + require, - exclude, × remove",

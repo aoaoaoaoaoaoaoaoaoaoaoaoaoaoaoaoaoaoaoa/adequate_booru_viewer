@@ -385,18 +385,14 @@ impl Bayonet {
     }
 
     fn cycle_query_group(&mut self, ctx: &egui::Context) {
-        if self.zoom.is_some() || self.tag_menu.is_open() || ctx.text_edit_focused() {
+        if self.zoom.is_some()
+            || self.tag_menu.is_open()
+            || ctx.text_edit_focused()
+            || self.tag_entry_arms_completion()
+        {
             return;
         }
-        let cycle = ctx.input_mut(|input| {
-            if input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab) {
-                Some(GroupCycle::Backward)
-            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
-                Some(GroupCycle::Forward)
-            } else {
-                None
-            }
-        });
+        let cycle = ctx.input_mut(take_tab_cycle);
         let Some(cycle) = cycle else {
             return;
         };
@@ -410,6 +406,10 @@ impl Bayonet {
             self.save_config();
             ctx.request_repaint();
         }
+    }
+
+    fn tag_entry_arms_completion(&self) -> bool {
+        active_prefix(&self.tag_entry).is_some()
     }
 
     /// The water chemistry for the compose pass.
@@ -1333,6 +1333,16 @@ fn active_prefix(text: &str) -> Option<ActivePrefix> {
         body: body.to_owned(),
         negative,
     })
+}
+
+fn take_tab_cycle(input: &mut egui::InputState) -> Option<GroupCycle> {
+    if input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab) {
+        Some(GroupCycle::Backward)
+    } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
+        Some(GroupCycle::Forward)
+    } else {
+        None
+    }
 }
 
 /// Veil opacity for an open/closed source: rises gently, falls twice as fast.
