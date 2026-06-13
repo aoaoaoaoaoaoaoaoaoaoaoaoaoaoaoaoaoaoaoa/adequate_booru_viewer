@@ -217,13 +217,25 @@ fn sane_height(x: f32) -> f32 {
     return clamp(select(0.0, x, finite(x)), -FIELD_HEIGHT_CEIL, FIELD_HEIGHT_CEIL);
 }
 
-fn field_uv(px: vec2f) -> vec2f {
+fn field_coord(px: vec2f) -> vec2f {
     let dims = vec2f(textureDimensions(water_tex));
-    return clamp(px / (dims * FIELD_SCALE), vec2f(0.0), vec2f(1.0));
+    return clamp(px / FIELD_SCALE - vec2f(0.5), vec2f(0.0), dims - vec2f(1.0));
+}
+
+fn cell_height(p: vec2i) -> f32 {
+    let dims = vec2i(textureDimensions(water_tex));
+    return sane_height(textureLoad(water_tex, clamp(p, vec2i(0), dims - vec2i(1)), 0).x);
 }
 
 fn sample_height(px: vec2f) -> f32 {
-    return sane_height(textureSampleLevel(water_tex, comp_samp, field_uv(px), 0.0).x);
+    let q = field_coord(px);
+    let p = vec2i(floor(q));
+    let f = fract(q);
+    let h00 = cell_height(p);
+    let h10 = cell_height(p + vec2i(1, 0));
+    let h01 = cell_height(p + vec2i(0, 1));
+    let h11 = cell_height(p + vec2i(1, 1));
+    return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
 }
 
 fn sample_visible_height(px: vec2f, center_h: f32) -> f32 {

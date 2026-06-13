@@ -5,7 +5,6 @@ use std::{sync::mpsc, time::Duration};
 const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const W: u32 = 640;
 const H: u32 = 360;
-const HALF_INF: u16 = 0x7c00;
 
 #[test]
 fn poisoned_water_cells_are_extinguished() -> Result<()> {
@@ -135,13 +134,7 @@ impl Bench {
 
     fn poison(&mut self, x: u32, y: u32) -> Result<()> {
         let rig = self.frost.rig.as_ref().context("missing frost rig")?;
-        let bits = [
-            HALF_INF.to_le_bytes(),
-            HALF_INF.to_le_bytes(),
-            0_u16.to_le_bytes(),
-            0_u16.to_le_bytes(),
-        ]
-        .concat();
+        let bits = [f32::INFINITY.to_le_bytes(), f32::INFINITY.to_le_bytes()].concat();
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &rig.water.textures[rig.water.phase],
@@ -278,16 +271,20 @@ impl Field {
     }
 
     fn assert_clean(&self) -> Result<()> {
-        for (slot, chunk) in self.bytes.chunks_exact(2).enumerate() {
-            let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
-            if bits & 0x7c00 == 0x7c00 {
-                let px = slot / 4;
-                bail!(
-                    "nonfinite half in water field at ({}, {}), channel {}, bits=0x{bits:04x}",
-                    px as u32 % self.width,
-                    px as u32 / self.width,
-                    slot % 4,
-                );
+        for (cell, chunk) in self.bytes.chunks_exact(SIM_BYTES as usize).enumerate() {
+            for channel in 0..2 {
+                let at = channel * 4;
+                let value =
+                    f32::from_le_bytes([chunk[at], chunk[at + 1], chunk[at + 2], chunk[at + 3]]);
+                if !value.is_finite() {
+                    bail!(
+                        "nonfinite f32 in water field at ({}, {}), channel {}, bits=0x{:08x}",
+                        cell as u32 % self.width,
+                        cell as u32 / self.width,
+                        channel,
+                        value.to_bits(),
+                    );
+                }
             }
         }
         Ok(())
@@ -296,13 +293,18 @@ impl Field {
     fn assert_quiet(&self, x: u32, y: u32, limit: f32) -> Result<()> {
         let at = ((y * self.width + x) * SIM_BYTES) as usize;
         for channel in 0..2 {
-            let bits = u16::from_le_bytes([
-                self.bytes[at + channel * 2],
-                self.bytes[at + channel * 2 + 1],
+            let at = at + channel * 4;
+            let value = f32::from_le_bytes([
+                self.bytes[at],
+                self.bytes[at + 1],
+                self.bytes[at + 2],
+                self.bytes[at + 3],
             ]);
-            let value = f16(bits).abs();
-            if value > limit {
-                bail!("poisoned cell survived as {value} in channel {channel}, limit {limit}");
+            if value.abs() > limit {
+                bail!(
+                    "poisoned cell survived as {} in channel {channel}, limit {limit}",
+                    value.abs(),
+                );
             }
         }
         Ok(())
@@ -419,16 +421,4 @@ fn water_rect() -> egui::Rect {
 
 fn far_rect() -> egui::Rect {
     egui::Rect::from_min_size(egui::pos2(-4e6, -4e6), egui::Vec2::ZERO)
-}
-
-fn f16(bits: u16) -> f32 {
-    let sign = if bits & 0x8000 == 0 { 1.0 } else { -1.0 };
-    let exp = (bits >> 10) & 0x1f;
-    let frac = bits & 0x03ff;
-    match exp {
-        0 => sign * f32::from(frac) * 2.0_f32.powi(-24),
-        31 if frac == 0 => sign * f32::INFINITY,
-        31 => f32::NAN,
-        _ => sign * (1.0 + f32::from(frac) / 1024.0) * 2.0_f32.powi(i32::from(exp) - 15),
-    }
 }

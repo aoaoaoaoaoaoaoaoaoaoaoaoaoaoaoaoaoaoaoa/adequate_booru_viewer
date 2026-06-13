@@ -67,9 +67,10 @@ const H_CEIL: f32 = 48.0;
 const V_CEIL: f32 = 1440.0;
 const TILT_FORCE_CEIL: f32 = 48.0;
 const RAFT_STIFFNESS: f32 = 420.0;
+const KO_EPSILON: f32 = 0.018;
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
-@group(0) @binding(1) var dst_tex: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(1) var dst_tex: texture_storage_2d<rg32float, write>;
 @group(0) @binding(2) var<uniform> mask: Mask;
 
 fn cell_px(p: vec2i) -> vec2f {
@@ -125,12 +126,10 @@ fn source_shell(px: vec2f, rect: vec4f, age: f32, amp: f32) -> f32 {
         return 0.0;
     }
     let d = sd_cut(px, rect.xy, rect.zw, LIFT_RADIUS);
-    if (d < -PLATE_FEATHER) {
-        return 0.0;
-    }
+    let hull = smoothstep(-PLATE_FEATHER, 0.0, d);
     let shell = exp(-0.5 * pow(max(d, 0.0) / max(mask.wave_sigma, 1.0), 2.0));
     let birth = 1.0 - smoothstep(0.0, SOURCE_LIFE, age);
-    return amp * shell * birth;
+    return amp * hull * shell * birth;
 }
 
 fn source_basin(px: vec2f, rect: vec4f, age: f32, amp: f32) -> f32 {
@@ -218,6 +217,20 @@ fn step(@builtin(global_invocation_id) gid: vec3u) {
     let u = wall_height(p + vec2i(0, -1), dims, h);
     let d = wall_height(p + vec2i(0, 1), dims, h);
     let lap = (l + r + u + d - 4.0 * h) / (SIM_SCALE * SIM_SCALE);
+    let lu = wall_height(p + vec2i(-1, -1), dims, h);
+    let ru = wall_height(p + vec2i(1, -1), dims, h);
+    let ld = wall_height(p + vec2i(-1, 1), dims, h);
+    let rd = wall_height(p + vec2i(1, 1), dims, h);
+    let ll = wall_height(p + vec2i(-2, 0), dims, h);
+    let rr = wall_height(p + vec2i(2, 0), dims, h);
+    let uu = wall_height(p + vec2i(0, -2), dims, h);
+    let dd = wall_height(p + vec2i(0, 2), dims, h);
+    let ko = (
+        20.0 * h
+            - 8.0 * (l + r + u + d)
+            + 2.0 * (lu + ru + ld + rd)
+            + ll + rr + uu + dd
+    ) * (KO_EPSILON / 64.0);
 
     let shelf = smoothstep(-mask.shore_feather, mask.shore_feather, px.x - mask.water_min.x);
     let shelf_speed = clamp((1.0 - mask.r_panel) / (1.0 + mask.r_panel), 0.2, 1.0);
@@ -232,7 +245,7 @@ fn step(@builtin(global_invocation_id) gid: vec3u) {
     let block = obstacle(px);
     v = mix(v, 0.0, block);
     let keep = clamp(mask.height_retention, 0.95, 1.0);
-    var next_h = mix((h + v * DT) * keep, h * keep, block);
+    var next_h = mix((h + v * DT) * keep - ko, h * keep, block);
     v = sane(v, V_CEIL);
     next_h = sane(next_h, H_CEIL);
     textureStore(dst_tex, p, vec4f(next_h, v, 0.0, 0.0));

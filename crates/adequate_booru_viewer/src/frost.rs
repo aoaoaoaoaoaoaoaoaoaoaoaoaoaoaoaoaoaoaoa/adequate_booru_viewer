@@ -9,7 +9,7 @@ mod audit;
 mod guard;
 
 const LEVELS: usize = 3;
-const SIM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+const SIM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Float;
 const SIM_BYTES: u32 = 8;
 const SIM_WORKGROUP: u32 = 8;
 const FIELD_SCALE: u32 = 2;
@@ -296,7 +296,7 @@ impl Frost {
                     },
                     count: None,
                 },
-                texture_entry(4),
+                unfilterable_texture_entry(4, wgpu::ShaderStages::FRAGMENT),
             ],
         });
         let sim_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

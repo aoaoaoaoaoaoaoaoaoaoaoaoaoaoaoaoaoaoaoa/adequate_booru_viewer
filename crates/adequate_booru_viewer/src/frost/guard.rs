@@ -174,34 +174,38 @@ impl Readback {
             for x in 0..self.size.width {
                 let px = row + (x * SIM_BYTES) as usize;
                 debug_assert!(px + SIM_BYTES as usize <= bytes.len());
-                for channel in 0..4 {
-                    let at = px + channel * 2;
-                    let bits = u16::from_le_bytes([bytes[at], bytes[at + 1]]);
-                    if bits & 0x7c00 == 0x7c00 {
+                for channel in 0..2 {
+                    let at = px + channel * 4;
+                    let bits = u32::from_le_bytes([
+                        bytes[at],
+                        bytes[at + 1],
+                        bytes[at + 2],
+                        bytes[at + 3],
+                    ]);
+                    let raw = f32::from_bits(bits);
+                    let value = raw.abs();
+                    if !raw.is_finite() {
                         return Some(Fault {
                             x,
                             y,
                             channel,
                             bits,
-                            value: half_abs(bits),
+                            value,
                         });
                     }
-                    if channel < 2 {
-                        let value = half_abs(bits);
-                        let limit = if channel == 0 {
-                            HEIGHT_LIMIT
-                        } else {
-                            VELOCITY_LIMIT
-                        };
-                        if value > limit {
-                            return Some(Fault {
-                                x,
-                                y,
-                                channel,
-                                bits,
-                                value,
-                            });
-                        }
+                    let limit = if channel == 0 {
+                        HEIGHT_LIMIT
+                    } else {
+                        VELOCITY_LIMIT
+                    };
+                    if value > limit {
+                        return Some(Fault {
+                            x,
+                            y,
+                            channel,
+                            bits,
+                            value,
+                        });
                     }
                 }
             }
@@ -237,7 +241,7 @@ struct Fault {
     x: u32,
     y: u32,
     channel: usize,
-    bits: u16,
+    bits: u32,
     value: f32,
 }
 
@@ -245,19 +249,8 @@ impl fmt::Display for Fault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "({}, {}) channel {} bits=0x{:04x} value={}",
+            "({}, {}) channel {} bits=0x{:08x} value={}",
             self.x, self.y, self.channel, self.bits, self.value
         )
-    }
-}
-
-fn half_abs(bits: u16) -> f32 {
-    let exp = (bits >> 10) & 0x1f;
-    let frac = bits & 0x03ff;
-    match exp {
-        0 => f32::from(frac) * 2.0_f32.powi(-24),
-        31 if frac == 0 => f32::INFINITY,
-        31 => f32::NAN,
-        _ => (1.0 + f32::from(frac) / 1024.0) * 2.0_f32.powi(i32::from(exp) - 15),
     }
 }
