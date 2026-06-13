@@ -105,6 +105,8 @@ pub fn section(
 ) -> Option<FoldWake> {
     let id = ui.make_persistent_id(id);
     let rect_id = id.with("rect");
+    let wake_id = id.with("fold-wake");
+    let frame_nr = ui.ctx().cumulative_frame_nr();
     let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
         ui.ctx(),
         id,
@@ -154,17 +156,53 @@ pub fn section(
             header.response
         });
     let rect = _frame.response.rect;
+    if flux.is_some() {
+        ui.ctx().request_repaint();
+    }
     ui.ctx().data_mut(|data| {
         let prior = data.get_temp::<egui::Rect>(rect_id);
         let _old = data.insert_temp(rect_id, rect);
-        flux.map(|flux| FoldWake {
-            rect: match flux {
-                FoldFlux::Open => rect,
-                FoldFlux::Close => prior.unwrap_or(rect),
-            },
-            flux,
+        if let Some(flux) = flux {
+            let height = match flux {
+                FoldFlux::Open => 0.0,
+                FoldFlux::Close => prior.map_or(rect.height(), |prior| prior.height()),
+            };
+            let _old = data.insert_temp(
+                wake_id,
+                Some(PendingFoldWake {
+                    flux,
+                    height,
+                    born: frame_nr,
+                }),
+            );
+            return None;
+        }
+        let pending = data
+            .get_temp::<Option<PendingFoldWake>>(wake_id)
+            .flatten()?;
+        if pending.born >= frame_nr {
+            return None;
+        }
+        let _cleared = data.remove_temp::<Option<PendingFoldWake>>(wake_id);
+        Some(FoldWake {
+            rect: pending.rect(rect),
+            flux: pending.flux,
         })
     })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingFoldWake {
+    flux: FoldFlux,
+    height: f32,
+    born: u64,
+}
+
+impl PendingFoldWake {
+    fn rect(self, settled: egui::Rect) -> egui::Rect {
+        let height = self.height.max(settled.height());
+        egui::Rect::from_min_size(settled.min, egui::vec2(settled.width(), height))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
