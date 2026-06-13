@@ -1,10 +1,11 @@
 use super::*;
 
 impl Bayonet {
-    fn autocomplete(&mut self, ui: &mut egui::Ui) {
+    fn autocomplete(&mut self, ui: &mut egui::Ui, focused: bool) -> bool {
         let Some(prefix) = active_prefix(&self.tag_entry) else {
             self.suggest_memo = None;
-            return;
+            self.suggest_pick = 0;
+            return false;
         };
         // Suggestion lookups walk chunked bitmap ranges — far too expensive
         // for the UI thread. A keystroke requests them from the refresh
@@ -22,6 +23,7 @@ impl Bayonet {
                 .unwrap_or_default();
             // Keep the previous hits visible while the worker catches up.
             self.suggest_memo = Some((prefix.body.clone(), kept));
+            self.suggest_pick = 0;
             if let Err(err) = self.worker.send(Command::Suggest {
                 serial: self.suggest_serial,
                 prefix: prefix.body.clone(),
@@ -30,31 +32,48 @@ impl Bayonet {
             }
         }
         let Some((_, suggestions)) = &self.suggest_memo else {
-            return;
+            return false;
         };
         if suggestions.is_empty() {
-            return;
+            return false;
+        }
+        self.suggest_pick = self.suggest_pick.min(suggestions.len().saturating_sub(1));
+        let picked_by_key = focused
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+        if picked_by_key {
+            self.suggest_pick = (self.suggest_pick + 1) % suggestions.len();
+        }
+        let accepted_by_key = focused
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        if accepted_by_key {
+            let suggestion = suggestions[self.suggest_pick].clone();
+            self.complete_active(&suggestion, prefix.negative);
+            return true;
         }
         let mut picked = None;
         let _row = ui.horizontal_wrapped(|ui| {
             let _label = ui.label("complete");
-            for suggestion in suggestions {
+            for (slot, suggestion) in suggestions.iter().enumerate() {
                 if chrome::shallow_small(
                     ui,
                     tag_chroma::text(
                         format!("{} ({})", suggestion.tag, suggestion.posts),
                         suggestion.kind,
                     ),
+                    slot == self.suggest_pick,
                 )
                 .clicked()
                 {
                     picked = Some(suggestion.clone());
+                    self.suggest_pick = slot;
                 }
             }
         });
         if let Some(suggestion) = picked {
             self.complete_active(&suggestion, prefix.negative);
+            return true;
         }
+        false
     }
 
     fn complete_active(&mut self, suggestion: &TagSuggestion, negative: bool) {
@@ -129,18 +148,26 @@ impl Bayonet {
         let active_group = self.active_group.clone();
         let mut actions = Vec::new();
         let before = self.tag_entry.clone();
+        let focus_entry = !ui.ctx().egui_wants_keyboard_input()
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Slash));
+        let entry_id = ui.make_persistent_id("tag-entry");
         let entry = ui.add_sized(
             [ui.available_width(), 20.0],
-            egui::TextEdit::singleline(&mut self.tag_entry).hint_text("add tag to selected group…"),
+            egui::TextEdit::singleline(&mut self.tag_entry)
+                .id(entry_id)
+                .hint_text("add tag to selected group…"),
         );
+        if focus_entry {
+            entry.request_focus();
+        }
         if let Some(wake) = chrome::text_wake(ui, &entry, &before, &self.tag_entry) {
             self.text_plunge(wake);
         }
+        let accepted_completion = self.autocomplete(ui, entry.has_focus());
         let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
-        if enter && (entry.has_focus() || entry.lost_focus()) {
+        if !accepted_completion && enter && (entry.has_focus() || entry.lost_focus()) {
             self.commit_tag_entry();
         }
-        self.autocomplete(ui);
         ui.add_space(5.0);
         if query.is_empty() {
             let _empty = ui.label(chrome::muted("neutral query"));
@@ -263,6 +290,8 @@ impl Bayonet {
     fn help_panel(ui: &mut egui::Ui) {
         for line in [
             "enter: add typed tag(s) to highlighted group",
+            "/: focus tag field",
+            "tab in tag field: cycle completions",
             "-tag: add a negative tag atom",
             "right-click thumbnail: inspect tags",
             "thumbnail tag menu: + require, - exclude, × remove",

@@ -1,43 +1,44 @@
 # Window-relative choreography for `cargo xtask wet-demo`.
 # The fixture opens at 1440×920, with live index/cache but staged config/state.
+#
+# The query starts with committed rating:g, then builds a visible filter by
+# typing into the tag field. Autocomplete is demonstrated with both a click and
+# Tab acceptance, but every essential term is also a valid literal so a slow
+# suggestion worker cannot poison the filmed search.
 
 [[steps]]
 action = "wait"
-ms = 1400
+ms = 900
 
 [[steps]]
-action = "move"
-x = 36
-y = 18
-ms = 450
-
-[[steps]]
-action = "click"
+action = "key"
+value = "slash"
 
 [[steps]]
 action = "wait"
-ms = 520
-
-[[steps]]
-action = "click"
-
-[[steps]]
-action = "wait"
-ms = 520
-
-[[steps]]
-action = "move"
-x = 92
-y = 255
-ms = 600
-
-[[steps]]
-action = "click"
+ms = 220
 
 [[steps]]
 action = "type"
-text = "solo"
-delay_ms = 32
+text = "1girl"
+delay_ms = 24
+
+[[steps]]
+action = "wait"
+ms = 850
+
+[[steps]]
+action = "move"
+x = 96
+y = 310
+ms = 140
+
+[[steps]]
+action = "click"
+
+[[steps]]
+action = "wait"
+ms = 180
 
 [[steps]]
 action = "key"
@@ -45,81 +46,139 @@ value = "Return"
 
 [[steps]]
 action = "wait"
-ms = 450
+ms = 520
 
 [[steps]]
-action = "drag"
-from = [61, 415]
-to = [52, 550]
-ms = 700
+action = "move"
+x = 116
+y = 286
+ms = 90
+
+[[steps]]
+action = "click"
 
 [[steps]]
 action = "wait"
-ms = 500
+ms = 110
+
+[[steps]]
+action = "type"
+text = "looking_at_viewer"
+delay_ms = 14
+
+[[steps]]
+action = "key"
+value = "Return"
+
+[[steps]]
+action = "wait"
+ms = 650
+
+[[steps]]
+action = "move"
+x = 116
+y = 286
+ms = 90
+
+[[steps]]
+action = "click"
+
+[[steps]]
+action = "wait"
+ms = 100
+
+[[steps]]
+action = "type"
+text = "-comic"
+delay_ms = 21
+
+[[steps]]
+action = "key"
+value = "Return"
+
+[[steps]]
+action = "wait"
+ms = 430
+
+[[steps]]
+action = "move"
+x = 116
+y = 286
+ms = 90
+
+[[steps]]
+action = "click"
+
+[[steps]]
+action = "wait"
+ms = 100
+
+[[steps]]
+action = "type"
+text = "-greyscale"
+delay_ms = 19
+
+[[steps]]
+action = "key"
+value = "Return"
+
+[[steps]]
+action = "wait"
+ms = 720
+
+[[steps]]
+action = "move"
+x = 116
+y = 286
+ms = 90
+
+[[steps]]
+action = "click"
+
+[[steps]]
+action = "wait"
+ms = 100
+
+[[steps]]
+action = "type"
+text = "solo"
+delay_ms = 25
+
+[[steps]]
+action = "wait"
+ms = 950
+
+[[steps]]
+action = "key"
+value = "Tab"
+
+[[steps]]
+action = "wait"
+ms = 220
+
+[[steps]]
+action = "key"
+value = "Enter"
+
+[[steps]]
+action = "wait"
+ms = 1350
 
 [[steps]]
 action = "move"
 x = 420
 y = 260
-ms = 520
+ms = 180
 
 [[steps]]
 action = "move"
 x = 760
 y = 370
-ms = 820
-
-[[steps]]
-action = "move"
-x = 1120
-y = 260
-ms = 820
-
-[[steps]]
-action = "move"
-x = 940
-y = 700
-ms = 880
-
-[[steps]]
-action = "scroll"
-direction = "down"
-clicks = 26
-delay_ms = 14
+ms = 300
 
 [[steps]]
 action = "wait"
-ms = 900
-
-[[steps]]
-action = "scroll"
-direction = "up"
-clicks = 14
-delay_ms = 16
-
-[[steps]]
-action = "wait"
-ms = 760
-
-[[steps]]
-action = "move"
-x = 820
-y = 420
-ms = 500
-
-[[steps]]
-action = "click"
-button = 3
-
-[[steps]]
-action = "wait"
-ms = 850
-
-[[steps]]
-action = "move"
-x = 910
-y = 530
-ms = 700
+ms = 220
 
 [[steps]]
 action = "click"
@@ -129,17 +188,18 @@ action = "wait"
 ms = 650
 
 [[steps]]
-action = "move"
-x = 760
-y = 420
-ms = 520
+action = "click"
+
+[[steps]]
+action = "wait"
+ms = 650
 
 [[steps]]
 action = "click"
 
 [[steps]]
 action = "wait"
-ms = 1500
+ms = 2100
 
 [[steps]]
 action = "key"
@@ -147,20 +207,24 @@ value = "Tab"
 
 [[steps]]
 action = "wait"
-ms = 900
+ms = 2300
 
 [[steps]]
 action = "move"
 x = 720
 y = 510
-ms = 620
+ms = 220
+
+[[steps]]
+action = "wait"
+ms = 120
 
 [[steps]]
 action = "click"
 
 [[steps]]
 action = "wait"
-ms = 800
+ms = 1150
 
 [[steps]]
 action = "key"
@@ -168,7 +232,7 @@ value = "Right"
 
 [[steps]]
 action = "wait"
-ms = 850
+ms = 1200
 
 [[steps]]
 action = "key"
@@ -176,7 +240,7 @@ value = "Left"
 
 [[steps]]
 action = "wait"
-ms = 850
+ms = 1200
 
 [[steps]]
 action = "key"
@@ -184,7 +248,7 @@ value = "Tab"
 
 [[steps]]
 action = "wait"
-ms = 650
+ms = 950
 
 [[steps]]
 action = "key"
@@ -192,4 +256,67 @@ value = "Escape"
 
 [[steps]]
 action = "wait"
-ms = 1600
+ms = 700
+
+[[steps]]
+action = "move"
+x = 1120
+y = 260
+ms = 300
+
+[[steps]]
+action = "move"
+x = 940
+y = 700
+ms = 340
+
+[[steps]]
+action = "scroll"
+direction = "down"
+clicks = 58
+delay_ms = 4
+
+[[steps]]
+action = "wait"
+ms = 520
+
+[[steps]]
+action = "scroll"
+direction = "up"
+clicks = 28
+delay_ms = 5
+
+[[steps]]
+action = "wait"
+ms = 640
+
+[[steps]]
+action = "move"
+x = 940
+y = 710
+ms = 180
+
+[[steps]]
+action = "wait"
+ms = 180
+
+[[steps]]
+action = "click"
+button = 3
+
+[[steps]]
+action = "wait"
+ms = 1350
+
+[[steps]]
+action = "move"
+x = 34
+y = 620
+ms = 160
+
+[[steps]]
+action = "click"
+
+[[steps]]
+action = "wait"
+ms = 1000

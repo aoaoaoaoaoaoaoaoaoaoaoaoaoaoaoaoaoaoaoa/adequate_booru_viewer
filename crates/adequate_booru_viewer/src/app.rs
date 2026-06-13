@@ -205,6 +205,7 @@ pub struct Bayonet {
     bench_open: bool,
     tag_kinds: HashMap<Tag, TagKind>,
     suggest_memo: Option<(String, Vec<TagSuggestion>)>,
+    suggest_pick: usize,
     suggest_serial: u64,
     refetch_inflight: HashSet<PostId>,
     prefetch_on_hover: bool,
@@ -314,6 +315,7 @@ impl Bayonet {
             bench_open: false,
             tag_kinds: HashMap::new(),
             suggest_memo: None,
+            suggest_pick: 0,
             suggest_serial: 0,
             refetch_inflight: HashSet::new(),
             prefetch_on_hover: config.prefetch_on_hover,
@@ -789,6 +791,7 @@ impl Bayonet {
                         && let Some((_, memo)) = &mut self.suggest_memo
                     {
                         *memo = hits;
+                        self.suggest_pick = self.suggest_pick.min(memo.len().saturating_sub(1));
                         ctx.request_repaint();
                     }
                 }

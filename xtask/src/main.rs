@@ -16,6 +16,8 @@ const DEMO: &str = "demo/wet";
 const DEFAULT_W: u32 = 1440;
 const DEFAULT_H: u32 = 920;
 const DEFAULT_FPS: u32 = 60;
+const X264_CRF: &str = "16";
+const X264_PRESET: &str = "slow";
 
 fn main() -> Result<()> {
     match env::args().nth(1).as_deref() {
@@ -442,10 +444,18 @@ impl Recorder {
                 &input,
                 "-t",
                 &seconds,
+                "-c:v",
+                "libx264",
+                "-preset",
+                X264_PRESET,
+                "-crf",
+                X264_CRF,
+                "-tune",
+                "animation",
                 "-pix_fmt",
                 "yuv420p",
-                "-preset",
-                "veryfast",
+                "-movflags",
+                "+faststart",
                 out,
             ])
             .spawn()
@@ -571,7 +581,10 @@ impl Step {
             Self::Click { button } => xdotool(display, ["click", &button.to_string()])?,
             Self::Key { value } => xdotool(display, ["key", value])?,
             Self::Type { text, delay_ms } => {
-                xdotool(display, ["type", "--delay", &delay_ms.to_string(), text])?;
+                xdotool(
+                    display,
+                    ["type", "--delay", &delay_ms.to_string(), "--", text],
+                )?;
             }
             Self::Scroll {
                 clicks,
