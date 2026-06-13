@@ -352,6 +352,20 @@ impl Query {
         }
     }
 
+    pub fn cycle_group_path(&self, active: &[usize], cycle: GroupCycle) -> Vec<usize> {
+        let mut paths = Vec::new();
+        self.root.group_paths(&mut Vec::new(), &mut paths);
+        let active = self.clamp_group_path(active);
+        let Some(slot) = paths.iter().position(|path| path == &active) else {
+            return Vec::new();
+        };
+        let next = match cycle {
+            GroupCycle::Forward => (slot + 1) % paths.len(),
+            GroupCycle::Backward => slot.checked_sub(1).unwrap_or(paths.len() - 1),
+        };
+        paths[next].clone()
+    }
+
     pub fn polarity(&self, tag: &Tag) -> Option<TagPolarity> {
         self.atom_polarity(&QueryAtom::Tag(tag.clone()))
     }
@@ -404,6 +418,12 @@ impl Default for Query {
             },
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GroupCycle {
+    Forward,
+    Backward,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -489,6 +509,19 @@ impl QueryExpr {
                 };
                 group.children.get(*child)?.expr(tail)
             }
+        }
+    }
+
+    fn group_paths(&self, path: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        let (_, expr) = self.denote();
+        let Self::Group { group } = expr else {
+            return;
+        };
+        out.push(path.clone());
+        for (child, expr) in group.children.iter().enumerate() {
+            path.push(child);
+            expr.group_paths(path, out);
+            let _old = path.pop();
         }
     }
 
@@ -1217,6 +1250,26 @@ mod tests {
 
         assert_eq!(query.move_atom(&[], 0, &[]), None);
         assert_eq!(query.root.to_text(), "∧(red_hair)");
+        Ok(())
+    }
+
+    #[test]
+    fn group_cycle_walks_groups_depth_first() -> Result<()> {
+        let mut query = Query::default();
+        let left = query.push_group(&[], BoolOp::And).context("left group")?;
+        let nested = query
+            .push_group(&left, BoolOp::Or)
+            .context("nested group")?;
+        let right = query.push_group(&[], BoolOp::Xor).context("right group")?;
+
+        assert_eq!(query.cycle_group_path(&[], GroupCycle::Forward), left);
+        assert_eq!(query.cycle_group_path(&left, GroupCycle::Forward), nested);
+        assert_eq!(query.cycle_group_path(&nested, GroupCycle::Forward), right);
+        assert_eq!(
+            query.cycle_group_path(&right, GroupCycle::Forward),
+            Vec::<usize>::new()
+        );
+        assert_eq!(query.cycle_group_path(&[], GroupCycle::Backward), right);
         Ok(())
     }
 

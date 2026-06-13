@@ -17,7 +17,8 @@ use crate::{
     index::{CacheStats, Index, TagSuggestion},
     media::{MediaCache, RgbaBlade, extension},
     model::{
-        BoolOp, PostId, PostRecord, Query, QueryAtom, SearchHit, Sort, Tag, TagKind, TagPolarity,
+        BoolOp, GroupCycle, PostId, PostRecord, Query, QueryAtom, SearchHit, Sort, Tag, TagKind,
+        TagPolarity,
     },
     query_ui::{QueryAction, render_query_tree},
     saved_filter_ui::{self, Action as SavedFilterAction, NameEdit, ShelfEdit},
