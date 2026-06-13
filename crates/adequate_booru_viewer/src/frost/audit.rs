@@ -40,6 +40,38 @@ fn water_guard_resets_poisoned_field() -> Result<()> {
 }
 
 #[test]
+fn water_guard_resets_saturated_field() -> Result<()> {
+    pollster::block_on(async {
+        let Some(mut bench) = Bench::make().await? else {
+            return Ok(());
+        };
+        bench.saturate()?;
+        bench.field()?.assert_railed(512)?;
+        if !bench.guard()? {
+            bail!("water guard did not report a saturated reset");
+        }
+        let field = bench.field()?;
+        field.assert_clean()?;
+        field.assert_quiet(37, 29, 0.25)
+    })
+}
+
+#[test]
+fn clear_water_zeros_persistent_field() -> Result<()> {
+    pollster::block_on(async {
+        let Some(mut bench) = Bench::make().await? else {
+            return Ok(());
+        };
+        bench.saturate()?;
+        bench.field()?.assert_railed(512)?;
+        bench.frost.clear_water(&bench.queue);
+        let field = bench.field()?;
+        field.assert_clean()?;
+        field.assert_quiet(37, 29, 0.25)
+    })
+}
+
+#[test]
 fn aggressive_water_script_never_writes_nonfinite_state() -> Result<()> {
     pollster::block_on(async {
         let Some(mut bench) = Bench::make().await? else {
@@ -53,6 +85,22 @@ fn aggressive_water_script_never_writes_nonfinite_state() -> Result<()> {
             }
         }
         bench.field()?.assert_clean()
+    })
+}
+
+#[test]
+fn overlapping_image_plate_wakes_do_not_rail_field() -> Result<()> {
+    pollster::block_on(async {
+        let Some(mut bench) = Bench::make().await? else {
+            return Ok(());
+        };
+        for frame in 0..180 {
+            let script = Script::spaz(frame);
+            bench.step(&script.very_wet_surge(frame as f32 / 60.0))?;
+        }
+        let field = bench.field()?;
+        field.assert_clean()?;
+        field.assert_not_railed(512)
     })
 }
 
@@ -191,6 +239,35 @@ impl Bench {
         Ok(())
     }
 
+    fn saturate(&mut self) -> Result<()> {
+        let rig = self.frost.rig.as_ref().context("missing frost rig")?;
+        let size = rig.water.size;
+        let mut bytes = Vec::with_capacity((size.width * size.height * SIM_BYTES) as usize);
+        for y in 0..size.height {
+            for x in 0..size.width {
+                let sign = if (x + y).is_multiple_of(2) { 1.0 } else { -1.0 };
+                bytes.extend_from_slice(&(sign * 48.0_f32).to_le_bytes());
+                bytes.extend_from_slice(&(sign * 1440.0_f32).to_le_bytes());
+            }
+        }
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &rig.water.textures[rig.water.phase],
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size.width * SIM_BYTES),
+                rows_per_image: Some(size.height),
+            },
+            size,
+        );
+        Ok(())
+    }
+
     fn field(&self) -> Result<Field> {
         let rig = self.frost.rig.as_ref().context("missing frost rig")?;
         Field::read(&self.device, &self.queue, &rig.water)
@@ -324,6 +401,33 @@ impl Field {
         Ok(())
     }
 
+    fn assert_railed(&self, min_cells: usize) -> Result<()> {
+        let cells = self.railed_cells();
+        if cells < min_cells {
+            bail!("only {cells} railed cells, expected at least {min_cells}");
+        }
+        Ok(())
+    }
+
+    fn assert_not_railed(&self, max_cells: usize) -> Result<()> {
+        let cells = self.railed_cells();
+        if cells > max_cells {
+            bail!("{cells} railed cells, expected at most {max_cells}");
+        }
+        Ok(())
+    }
+
+    fn railed_cells(&self) -> usize {
+        self.bytes
+            .chunks_exact(SIM_BYTES as usize)
+            .filter(|chunk| {
+                let h = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).abs();
+                let v = f32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]).abs();
+                h >= 47.0 || v >= 1410.0
+            })
+            .count()
+    }
+
     fn assert_quiet(&self, x: u32, y: u32, limit: f32) -> Result<()> {
         let at = ((y * self.width + x) * SIM_BYTES) as usize;
         for channel in 0..2 {
@@ -429,6 +533,29 @@ impl Script {
         }
     }
 
+    fn spaz(frame: usize) -> Self {
+        let mut splashes = Vec::with_capacity(SPLASH_SLOTS);
+        let rect = egui::Rect::from_min_size(egui::pos2(260.0, 120.0), egui::vec2(104.0, 132.0));
+        for i in 0..SPLASH_SLOTS {
+            let jitter = egui::vec2(
+                ((i * 19 + frame * 7) % 21) as f32 - 10.0,
+                ((i * 23 + frame * 11) % 21) as f32 - 10.0,
+            );
+            splashes.push(Splash {
+                rect: rect.translate(jitter),
+                age: ((i + frame) % 8) as f32 * 0.006,
+                amp: 1.8,
+                shape: SplashShape::Ring,
+            });
+        }
+        Self {
+            tensions: Vec::new(),
+            lifts: vec![Lift::surface(rect, 1.0)],
+            splashes,
+            raft: None,
+        }
+    }
+
     fn surge(&self, tide: f32) -> Surge<'_> {
         Surge {
             dry: false,
@@ -444,6 +571,28 @@ impl Script {
             wake: true,
             tide,
             brine: Brine::default(),
+            guard: true,
+        }
+    }
+
+    fn very_wet_surge(&self, tide: f32) -> Surge<'_> {
+        let mut brine = Brine::default();
+        brine.wave_damp *= 2.0;
+        brine.height_retention = 1.0 - (1.0 - brine.height_retention) / 2.0;
+        Surge {
+            dry: false,
+            veil: None,
+            tensions: &self.tensions,
+            lifts: &self.lifts,
+            water: water_rect(),
+            scroll_tilt: 0.0,
+            splashes: &self.splashes,
+            raft: self.raft,
+            viewer: far_rect(),
+            touches: &[],
+            wake: true,
+            tide,
+            brine,
             guard: true,
         }
     }

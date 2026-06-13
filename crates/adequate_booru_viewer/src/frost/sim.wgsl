@@ -63,11 +63,14 @@ const SOURCE_LIFE: f32 = 0.22;
 const BASIN_TAPER: f32 = 28.0;
 const BASIN_GAIN: f32 = 0.5;
 const SOURCE_CEIL: f32 = 72.0;
+const SOURCE_KICK_CEIL: f32 = 96.0;
 const H_CEIL: f32 = 48.0;
 const V_CEIL: f32 = 1440.0;
 const TILT_FORCE_CEIL: f32 = 48.0;
 const RAFT_STIFFNESS: f32 = 420.0;
 const KO_EPSILON: f32 = 0.018;
+const KO_SHOCK_GAIN: f32 = 10.0;
+const RAIL_DAMPING: f32 = 0.52;
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var dst_tex: texture_storage_2d<rg32float, write>;
@@ -91,6 +94,11 @@ fn finite(x: f32) -> bool { return x == x && abs(x) < 1e20; }
 fn sane(x: f32, ceil: f32) -> f32 { return clamp(select(0.0, x, finite(x)), -ceil, ceil); }
 
 fn soft_limiter(x: f32, ceil: f32) -> f32 { return ceil * x / (abs(x) + ceil); }
+
+fn rail_damp(h: f32, v: f32) -> f32 {
+    let strain = max(abs(h) / H_CEIL, abs(v) / V_CEIL);
+    return mix(1.0, RAIL_DAMPING, smoothstep(0.62, 0.92, strain));
+}
 
 fn quiver_omega(q: Quiver) -> f32 { return select(mask.tremor_omega, q.touch.w, q.touch.w > 0.0); }
 
@@ -225,22 +233,26 @@ fn step(@builtin(global_invocation_id) gid: vec3u) {
     let rr = wall_height(p + vec2i(2, 0), dims, h);
     let uu = wall_height(p + vec2i(0, -2), dims, h);
     let dd = wall_height(p + vec2i(0, 2), dims, h);
+    let rough = clamp(abs(l + r + u + d - 4.0 * h) / (4.0 * H_CEIL), 0.0, 1.0);
+    let ko_gain = KO_EPSILON * mix(1.0, KO_SHOCK_GAIN, smoothstep(0.18, 0.72, rough));
     let ko = (
         20.0 * h
             - 8.0 * (l + r + u + d)
             + 2.0 * (lu + ru + ld + rd)
             + ll + rr + uu + dd
-    ) * (KO_EPSILON / 64.0);
+    ) * (ko_gain / 64.0);
 
     let shelf = smoothstep(-mask.shore_feather, mask.shore_feather, px.x - mask.water_min.x);
     let shelf_speed = clamp((1.0 - mask.r_panel) / (1.0 + mask.r_panel), 0.2, 1.0);
     let cfl = 0.66 * SIM_SCALE / DT;
     let c = min(mask.wave_v * mix(shelf_speed, 1.0, shelf), cfl);
+    let kick = soft_limiter(source(px) * mask.source_gain * IMPULSE_GAIN, SOURCE_KICK_CEIL);
     var v = here.y
         + c * c * lap * DT
-        + source(px) * mask.source_gain * IMPULSE_GAIN
+        + kick
         + (tilt_drive(px) + raft_drive(px, h)) * DT;
     v = v * exp(-DT / max(mask.wave_damp, 0.08)) * mix(0.985, 1.0, shelf);
+    v = v * rail_damp(h, v);
 
     let block = obstacle(px);
     v = mix(v, 0.0, block);

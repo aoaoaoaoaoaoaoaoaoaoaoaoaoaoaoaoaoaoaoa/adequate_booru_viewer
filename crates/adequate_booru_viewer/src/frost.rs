@@ -542,6 +542,13 @@ impl Frost {
         }
     }
 
+    pub fn clear_water(&mut self, queue: &wgpu::Queue) {
+        self.sentinel.disarm();
+        if let Some(rig) = &self.rig {
+            rig.water.clear(queue);
+        }
+    }
+
     fn water(
         &self,
         device: &wgpu::Device,

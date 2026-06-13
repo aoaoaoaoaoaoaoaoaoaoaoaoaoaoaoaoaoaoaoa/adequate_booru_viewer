@@ -8,6 +8,10 @@ use std::{
 const PERIOD: Duration = Duration::from_millis(850);
 const HEIGHT_LIMIT: f32 = 96.0;
 const VELOCITY_LIMIT: f32 = 2880.0;
+const HEIGHT_RAIL: f32 = 47.0;
+const VELOCITY_RAIL: f32 = 1410.0;
+const SATURATION_MIN_CELLS: u32 = 512;
+const SATURATION_DENOMINATOR: u32 = 200;
 
 #[derive(Default)]
 pub(super) struct Sentinel {
@@ -169,6 +173,9 @@ impl Readback {
     }
 
     fn fault(&self, bytes: &[u8]) -> Option<Fault> {
+        let saturation_limit =
+            SATURATION_MIN_CELLS.max(self.size.width * self.size.height / SATURATION_DENOMINATOR);
+        let mut saturated = 0_u32;
         for y in 0..self.size.height {
             let row = (y * self.pitch) as usize;
             for x in 0..self.size.width {
@@ -186,6 +193,7 @@ impl Readback {
                     let value = raw.abs();
                     if !raw.is_finite() {
                         return Some(Fault {
+                            kind: FaultKind::Nonfinite,
                             x,
                             y,
                             channel,
@@ -200,12 +208,31 @@ impl Readback {
                     };
                     if value > limit {
                         return Some(Fault {
+                            kind: FaultKind::Oversize,
                             x,
                             y,
                             channel,
                             bits,
                             value,
                         });
+                    }
+                    let rail = if channel == 0 {
+                        HEIGHT_RAIL
+                    } else {
+                        VELOCITY_RAIL
+                    };
+                    if value >= rail {
+                        saturated += 1;
+                        if saturated > saturation_limit {
+                            return Some(Fault {
+                                kind: FaultKind::Saturated { saturated },
+                                x,
+                                y,
+                                channel,
+                                bits,
+                                value,
+                            });
+                        }
                     }
                 }
             }
@@ -215,7 +242,7 @@ impl Readback {
 }
 
 impl Water {
-    fn clear(&self, queue: &wgpu::Queue) {
+    pub(super) fn clear(&self, queue: &wgpu::Queue) {
         let zeros = vec![0_u8; (self.size.width * self.size.height * SIM_BYTES) as usize];
         for texture in &self.textures {
             queue.write_texture(
@@ -238,6 +265,7 @@ impl Water {
 }
 
 struct Fault {
+    kind: FaultKind,
     x: u32,
     y: u32,
     channel: usize,
@@ -245,11 +273,28 @@ struct Fault {
     value: f32,
 }
 
+enum FaultKind {
+    Nonfinite,
+    Oversize,
+    Saturated { saturated: u32 },
+}
+
 impl fmt::Display for Fault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self.kind {
+            FaultKind::Nonfinite => "nonfinite",
+            FaultKind::Oversize => "oversize",
+            FaultKind::Saturated { saturated } => {
+                return write!(
+                    f,
+                    "saturation flood after {saturated} railed samples near ({}, {}) channel {} bits=0x{:08x} value={}",
+                    self.x, self.y, self.channel, self.bits, self.value
+                );
+            }
+        };
         write!(
             f,
-            "({}, {}) channel {} bits=0x{:08x} value={}",
+            "{kind} at ({}, {}) channel {} bits=0x{:08x} value={}",
             self.x, self.y, self.channel, self.bits, self.value
         )
     }
