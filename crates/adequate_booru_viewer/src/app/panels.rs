@@ -166,12 +166,24 @@ impl Bayonet {
         if focus_entry || seeded_entry {
             ui.memory_mut(|mem| mem.request_focus(entry_id));
         }
-        let entry = ui.add_sized(
-            [ui.available_width(), 20.0],
-            egui::TextEdit::singleline(&mut self.tag_entry)
-                .id(entry_id)
-                .hint_text("add tag to selected group…"),
-        );
+        let text = egui::TextEdit::singleline(&mut self.tag_entry)
+            .id(entry_id)
+            .hint_text("add tag to selected group…")
+            .desired_width(ui.available_width());
+        let mut output = ui.scope(|ui| {
+            ui.set_min_height(20.0);
+            text.show(ui)
+        });
+        let entry = output.inner.response.clone();
+        if seeded_entry {
+            let tail = egui::text::CCursor::new(self.tag_entry.chars().count());
+            output
+                .inner
+                .state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(tail)));
+            output.inner.state.store(ui.ctx(), entry.id);
+        }
         if let Some(wake) = chrome::text_wake(ui, &entry, &before, &self.tag_entry) {
             self.text_plunge(wake);
         }
