@@ -46,7 +46,7 @@ mod water;
 use refresh::{AsyncPulse, PulseGate};
 use scroll::TrayTilt;
 use viewer::ZoomGate;
-use water::{LiftPlate, LoadingRaft, Plunge, TouchPlunge};
+use water::{EmptyDrain, LiftPlate, LoadingRaft, Plunge, TouchPlunge};
 
 const RESULT_LIMIT: usize = 360;
 const EVENT_BUDGET: usize = 12;
@@ -205,6 +205,7 @@ pub struct Bayonet {
     plunges: Vec<Plunge>,
     viewer_touches: Vec<TouchPlunge>,
     loading_raft: LoadingRaft,
+    empty_drain: EmptyDrain,
     water_until: Option<Instant>,
     viewer_pond: egui::Rect,
     water_rect: egui::Rect,
@@ -315,6 +316,7 @@ impl Bayonet {
             plunges: Vec::new(),
             viewer_touches: Vec::new(),
             loading_raft: LoadingRaft::new(),
+            empty_drain: EmptyDrain::new(),
             water_until: None,
             viewer_pond: egui::Rect::ZERO,
             water_rect: egui::Rect::ZERO,

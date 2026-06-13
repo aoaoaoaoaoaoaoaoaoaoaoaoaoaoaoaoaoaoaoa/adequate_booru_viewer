@@ -12,6 +12,12 @@ const RAFT_RISE: Duration = Duration::from_millis(70);
 const RAFT_SINK_TAU: f32 = 0.5;
 const RAFT_PEAK_MIN: f32 = 13.0;
 const RAFT_PEAK_SPAN: f32 = 10.0;
+const DRAIN_COLS: usize = 3;
+const DRAIN_ROWS: usize = 2;
+const DRAIN_CELLS: usize = DRAIN_COLS * DRAIN_ROWS;
+const DRAIN_RATE: f32 = 1.15;
+const DRAIN_AMP_MIN: f32 = -0.52;
+const DRAIN_AMP_SPAN: f32 = -0.48;
 
 impl Bayonet {
     /// Hover-lift for the grid, modelled as bang-bang force plates over a
@@ -167,6 +173,10 @@ impl Bayonet {
             chrome::FoldFlux::Close => FOLD_CLOSE_AMP,
         };
         self.plunge_as(wake.rect, amp, crate::frost::SplashShape::Basin);
+    }
+
+    pub(super) fn drain_plunge(&mut self, rect: egui::Rect, amp: f32) {
+        self.plunge_as(rect, amp, crate::frost::SplashShape::Basin);
     }
 
     pub(super) fn text_plunge(&mut self, wake: chrome::TextWake) {
@@ -327,6 +337,11 @@ pub(super) struct TouchPlunge {
     pub amp: f32,
 }
 
+pub(super) struct DrainPulse {
+    pub rect: egui::Rect,
+    pub amp: f32,
+}
+
 /// The empty-gallery loading plate: a bilinear high-tension membrane pulled by
 /// four independent corner pistons. Each corner fires as a Poisson clock,
 /// ramps up quickly, then sinks exponentially with a 500 ms time constant.
@@ -442,4 +457,79 @@ impl RaftPiston {
         let sink = age.saturating_sub(RAFT_RISE).as_secs_f32();
         self.peak * (-sink / RAFT_SINK_TAU).exp()
     }
+}
+
+/// The settled empty-gallery card: a quiet six-cell drain field. Each cell is
+/// an independent Poisson clock; a fire withdraws a random small volume from
+/// its basin, letting the persistent solver do the funneling.
+pub(super) struct EmptyDrain {
+    cells: [Instant; DRAIN_CELLS],
+    rng: u64,
+    visible: bool,
+}
+
+impl EmptyDrain {
+    pub fn new() -> Self {
+        let now = Instant::now();
+        let mut drain = Self {
+            cells: [now; DRAIN_CELLS],
+            rng: 0x83f6_1d05_a04d_e357,
+            visible: false,
+        };
+        for slot in 0..DRAIN_CELLS {
+            drain.cells[slot] = now + Duration::from_secs_f32(drain.wait());
+        }
+        drain
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context, rect: egui::Rect) -> Vec<DrainPulse> {
+        self.visible = true;
+        let now = Instant::now();
+        let mut pulses = Vec::new();
+        for slot in 0..DRAIN_CELLS {
+            if now < self.cells[slot] {
+                continue;
+            }
+            pulses.push(DrainPulse {
+                rect: drain_cell(rect, slot),
+                amp: DRAIN_AMP_MIN + self.unit() * DRAIN_AMP_SPAN,
+            });
+            self.cells[slot] = now + Duration::from_secs_f32(self.wait());
+        }
+        ctx.request_repaint_after(Duration::from_millis(33));
+        pulses
+    }
+
+    pub fn hide(&mut self) {
+        if !self.visible {
+            return;
+        }
+        self.visible = false;
+        let now = Instant::now();
+        for slot in 0..DRAIN_CELLS {
+            self.cells[slot] = now + Duration::from_secs_f32(self.wait());
+        }
+    }
+
+    fn wait(&mut self) -> f32 {
+        -(1.0 - self.unit()).ln() / DRAIN_RATE
+    }
+
+    fn unit(&mut self) -> f32 {
+        self.rng ^= self.rng << 7;
+        self.rng ^= self.rng >> 9;
+        self.rng ^= self.rng << 8;
+        ((self.rng >> 40) as u32 as f32 + 0.5) / 16_777_216.0
+    }
+}
+
+fn drain_cell(rect: egui::Rect, slot: usize) -> egui::Rect {
+    let col = slot % DRAIN_COLS;
+    let row = slot / DRAIN_COLS;
+    let cell = egui::vec2(
+        rect.width() / DRAIN_COLS as f32,
+        rect.height() / DRAIN_ROWS as f32,
+    );
+    let min = rect.min + egui::vec2(col as f32 * cell.x, row as f32 * cell.y);
+    egui::Rect::from_min_size(min, cell).shrink(6.0)
 }

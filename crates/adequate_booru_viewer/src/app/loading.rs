@@ -16,12 +16,16 @@ impl EmptyState {
         match self {
             Self::Loading => "LOADING",
             Self::Warming => "WARMING",
-            Self::Settled => "NO MATCHES",
+            Self::Settled => "EMPTY",
         }
     }
 
-    fn wet(self) -> bool {
-        !matches!(self, Self::Settled)
+    fn raised(self) -> bool {
+        matches!(self, Self::Loading | Self::Warming)
+    }
+
+    fn draining(self) -> bool {
+        matches!(self, Self::Settled)
     }
 }
 
@@ -54,11 +58,18 @@ impl Bayonet {
             CARD_H.min((arena.height() - 24.0).max(96.0)),
         );
         let rect = egui::Rect::from_center_size(arena.center(), size);
-        if state.wet() && self.water_mode.wet() {
+        if state.raised() && self.water_mode.wet() {
             self.loading_raft.show(ui.ctx(), rect);
             self.arm_water();
         } else {
             self.loading_raft.hide();
+        }
+        if state.draining() && self.water_mode.wet() {
+            for drain in self.empty_drain.show(ui.ctx(), rect) {
+                self.drain_plunge(drain.rect, drain.amp);
+            }
+        } else {
+            self.empty_drain.hide();
         }
 
         let painter = ui.painter();
