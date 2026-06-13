@@ -4,6 +4,7 @@
 )]
 
 use adequate_booru_viewer::{
+    date::DateRange,
     index::Index,
     model::{BoolOp, PostId, Query, QueryAtom, SearchHit, Sort, TagPolarity},
     xdg::Lair,
@@ -44,7 +45,7 @@ fn main() -> Result<()> {
 
     for case in &cases {
         for _ in 0..args.warmups {
-            let hit = index.search(&case.query, case.sort, args.limit)?;
+            let hit = index.search(&case.query, case.sort, DateRange::default(), args.limit)?;
             if let Some(oracle) = &oracle {
                 oracle.check(case, &hit)?;
             }
@@ -64,7 +65,7 @@ fn main() -> Result<()> {
         for idx in permutation(cases.len(), round) {
             let case = &cases[idx];
             let start = Instant::now();
-            let hit = index.search(&case.query, case.sort, args.limit)?;
+            let hit = index.search(&case.query, case.sort, DateRange::default(), args.limit)?;
             let elapsed = start.elapsed();
             if let Some(oracle) = &oracle {
                 oracle.check(case, &hit)?;
@@ -89,7 +90,7 @@ fn main() -> Result<()> {
         let median = percentile(times, 0.50);
         let p95 = percentile(times, 0.95);
         medians.push(median.as_secs_f64());
-        let hit = index.search(&case.query, case.sort, args.limit)?;
+        let hit = index.search(&case.query, case.sort, DateRange::default(), args.limit)?;
         println!(
             "{}\t{}\t{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{}",
             case.name,
@@ -268,7 +269,11 @@ fn small_candidate(index: &Index, limit: usize) -> Result<Case> {
             raw,
             Sort::Score,
         )?;
-        if index.search(&case.query, case.sort, limit)?.candidates > 0 {
+        if index
+            .search(&case.query, case.sort, DateRange::default(), limit)?
+            .candidates
+            > 0
+        {
             return Ok(case);
         }
     }
@@ -330,7 +335,7 @@ impl Oracle {
         }
         let mut body = String::new();
         for case in cases {
-            let hit = index.search(&case.query, case.sort, limit)?;
+            let hit = index.search(&case.query, case.sort, DateRange::default(), limit)?;
             writeln!(
                 body,
                 "{}\t{}\t{}",

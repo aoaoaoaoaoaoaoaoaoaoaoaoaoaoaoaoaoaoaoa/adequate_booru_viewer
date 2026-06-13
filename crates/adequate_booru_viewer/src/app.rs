@@ -12,6 +12,7 @@ use std::{
 use crate::{
     chrome,
     config::{Config, FilterConfig, FilterName, QueryConfig, SavedFilter, Slate, WaterMode},
+    date::{CreatedDay, DateRange},
     filter_bank::Bank,
     frost::{Cut, Veil},
     index::{CacheStats, Index, TagSuggestion},
@@ -172,6 +173,9 @@ pub struct Bayonet {
     filters: Bank,
     shelf_edit: Option<ShelfEdit>,
     sort: Sort,
+    date_range: DateRange,
+    date_from_entry: String,
+    date_to_entry: String,
     refresh_serial: u64,
     refresh_pulse: AsyncPulse,
     refresh_gate: PulseGate,
@@ -263,6 +267,7 @@ impl Bayonet {
             .map_or_else(|| slate.query.tree.clone(), |filter| filter.tree.clone());
         query.sort_atoms();
         let sort = slate.sort;
+        let date_range = slate.dates.normalized();
         let active_group = active_filter
             .as_ref()
             .and_then(|active| filters.get(active))
@@ -285,6 +290,9 @@ impl Bayonet {
             filters,
             shelf_edit: None,
             sort,
+            date_range,
+            date_from_entry: date_text(date_range.first),
+            date_to_entry: date_text(date_range.last),
             refresh_serial: 0,
             refresh_pulse: AsyncPulse::Idle,
             refresh_gate: PulseGate::refresh(),
@@ -504,6 +512,22 @@ impl Bayonet {
         self.install_query_at(query, self.active_group.clone());
     }
 
+    fn install_dates(&mut self, dates: DateRange) {
+        let dates = dates.normalized();
+        if self.date_range == dates {
+            return;
+        }
+        self.remember_hit();
+        self.date_range = dates;
+        self.date_from_entry = date_text(dates.first);
+        self.date_to_entry = date_text(dates.last);
+        if !self.restore_hit() {
+            self.clear_hit();
+        }
+        self.save_config();
+        self.strike(false, 0);
+    }
+
     fn install_query_at(&mut self, query: Query, active_group: Vec<usize>) {
         let mut query = query;
         query.sort_atoms();
@@ -520,12 +544,14 @@ impl Bayonet {
     }
 
     fn remember_hit(&mut self) {
-        self.hit_cache
-            .put(WarmKey::new(&self.query, self.sort), self.hit.clone());
+        self.hit_cache.put(
+            HitKey::new(&self.query, self.sort, self.date_range),
+            self.hit.clone(),
+        );
     }
 
     fn restore_hit(&mut self) -> bool {
-        let key = WarmKey::new(&self.query, self.sort);
+        let key = HitKey::new(&self.query, self.sort, self.date_range);
         let Some(hit) = self.hit_cache.get(&key) else {
             return false;
         };
@@ -1305,6 +1331,7 @@ impl Bayonet {
                 active_group: self.active_group.clone(),
             },
             sort: self.sort,
+            dates: self.date_range.normalized(),
             images_per_row: self.images_per_row,
             water: self.water_mode,
             viewer_tags_open: self.viewer_tags_open,
@@ -1410,13 +1437,30 @@ impl WarmKey {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HitKey {
+    query: String,
+    sort: Sort,
+    dates: DateRange,
+}
+
+impl HitKey {
+    fn new(query: &Query, sort: Sort, dates: DateRange) -> Self {
+        Self {
+            query: query.to_text(),
+            sort,
+            dates: dates.normalized(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct HitCache {
-    slots: Vec<(WarmKey, SearchHit)>,
+    slots: Vec<(HitKey, SearchHit)>,
 }
 
 impl HitCache {
-    fn get(&mut self, key: &WarmKey) -> Option<SearchHit> {
+    fn get(&mut self, key: &HitKey) -> Option<SearchHit> {
         let slot = self.slots.iter().position(|(found, _)| found == key)?;
         let pair = self.slots.remove(slot);
         let hit = pair.1.clone();
@@ -1424,7 +1468,7 @@ impl HitCache {
         Some(hit)
     }
 
-    fn put(&mut self, key: WarmKey, hit: SearchHit) {
+    fn put(&mut self, key: HitKey, hit: SearchHit) {
         if hit.posts.is_empty() {
             return;
         }
@@ -1564,6 +1608,10 @@ fn thumb_bucket(edge: f32) -> u8 {
     } else {
         u8::from(edge > 190.0)
     }
+}
+
+fn date_text(day: Option<CreatedDay>) -> String {
+    day.map_or_else(String::new, |day| day.to_string())
 }
 
 fn consume_wheel(ctx: &egui::Context) {

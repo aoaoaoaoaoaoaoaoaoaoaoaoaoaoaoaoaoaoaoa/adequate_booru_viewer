@@ -3,6 +3,7 @@
     reason = "the benchmark-facing library exposes the retrieval core; the GUI binary owns the remaining package dependencies"
 )]
 
+pub mod date;
 pub mod index;
 pub mod model;
 pub mod posting;

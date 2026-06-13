@@ -29,14 +29,20 @@ fn boolean_query_evaluator_cuts_with_roaring_algebra() -> Result<()> {
         QueryAtom::Rating(RatingClass::Explicit),
         TagPolarity::Negative
     ));
-    assert_eq!(ids(index.search(&query, Sort::Score, 10)?), [2, 1]);
+    assert_eq!(
+        ids(index.search(&query, Sort::Score, DateRange::default(), 10)?),
+        [2, 1]
+    );
 
     let mut xor = Query::default();
     let choice = xor.push_group(&[], BoolOp::Xor).context("push XOR")?;
     assert!(xor.push_atom(&choice, atom("bikini")?, TagPolarity::Positive));
     assert!(xor.push_atom(&choice, atom("nude")?, TagPolarity::Positive));
     assert!(xor.push_atom(&choice, atom("swimsuit")?, TagPolarity::Positive));
-    assert_eq!(ids(index.search(&xor, Sort::Newest, 10)?), [6, 2, 1]);
+    assert_eq!(
+        ids(index.search(&xor, Sort::Newest, DateRange::default(), 10)?),
+        [6, 2, 1]
+    );
 
     drop(index);
     let _removed = std::fs::remove_file(&path);
@@ -57,7 +63,10 @@ fn posting_facts_are_query_visible_before_and_after_chunk_merge() -> Result<()> 
     ])?;
 
     let solo = Query::parse("solo");
-    assert_eq!(ids(index.search(&solo, Sort::Newest, 10)?), [2, 1]);
+    assert_eq!(
+        ids(index.search(&solo, Sort::Newest, DateRange::default(), 10)?),
+        [2, 1]
+    );
     assert_eq!(index.stats()?.pending_fact_batches, 1);
 
     let merge = index.merge_pending_facts(FactMergeBudget {
@@ -65,13 +74,24 @@ fn posting_facts_are_query_visible_before_and_after_chunk_merge() -> Result<()> 
         bytes: usize::MAX,
     })?;
     assert_eq!(merge.batches, 1);
-    assert_eq!(ids(index.search(&solo, Sort::Score, 10)?), [2, 1]);
+    assert_eq!(
+        ids(index.search(&solo, Sort::Score, DateRange::default(), 10)?),
+        [2, 1]
+    );
     assert_eq!(index.stats()?.pending_fact_batches, 0);
 
     index.absorb(&[post(2, 30, Rating::General, &["bikini"])?])?;
-    assert_eq!(ids(index.search(&solo, Sort::Newest, 10)?), [1]);
     assert_eq!(
-        ids(index.search(&Query::parse("bikini"), Sort::Score, 10)?),
+        ids(index.search(&solo, Sort::Newest, DateRange::default(), 10)?),
+        [1]
+    );
+    assert_eq!(
+        ids(index.search(
+            &Query::parse("bikini"),
+            Sort::Score,
+            DateRange::default(),
+            10
+        )?),
         [2, 1]
     );
     let merge = index.merge_pending_facts(FactMergeBudget {
@@ -79,7 +99,10 @@ fn posting_facts_are_query_visible_before_and_after_chunk_merge() -> Result<()> 
         bytes: usize::MAX,
     })?;
     assert_eq!(merge.batches, 1);
-    assert_eq!(ids(index.search(&solo, Sort::Newest, 10)?), [1]);
+    assert_eq!(
+        ids(index.search(&solo, Sort::Newest, DateRange::default(), 10)?),
+        [1]
+    );
 
     drop(index);
     let _removed = std::fs::remove_file(&path);
@@ -106,6 +129,33 @@ fn tag_kind_hints_are_durable() -> Result<()> {
             .map(|suggestion| suggestion.kind),
         Some(TagKind::Character)
     );
+    drop(index);
+    let _removed = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn date_range_compiles_to_chronological_id_window() -> Result<()> {
+    let path = std::env::temp_dir().join(format!(
+        "adequate-booru-dates-{}.redb",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ));
+    let _stale = std::fs::remove_file(&path);
+    let index = Index::open(&path)?;
+    index.absorb(&[
+        dated_post(10, 10, "2024-01-01", &["solo"])?,
+        dated_post(20, 40, "2024-06-01", &["solo"])?,
+        dated_post(30, 30, "2024-06-02", &["solo"])?,
+        dated_post(40, 50, "2025-01-01", &["solo"])?,
+    ])?;
+    let dates = DateRange {
+        first: CreatedDay::parse("2024-06-01"),
+        last: CreatedDay::parse("2024-12-31"),
+    };
+    let solo = Query::parse("solo");
+    assert_eq!(ids(index.search(&solo, Sort::Newest, dates, 10)?), [30, 20]);
+    assert_eq!(ids(index.search(&solo, Sort::Score, dates, 10)?), [20, 30]);
+
     drop(index);
     let _removed = std::fs::remove_file(&path);
     Ok(())
@@ -140,5 +190,12 @@ fn post(id: u32, score: i32, rating: Rating, tags: &[&str]) -> Result<PostRecord
         thumb_720_url: None,
         large_url: None,
         file_url: None,
+    })
+}
+
+fn dated_post(id: u32, score: i32, created: &str, tags: &[&str]) -> Result<PostRecord> {
+    Ok(PostRecord {
+        created_at: format!("{created}T00:00:00Z"),
+        ..post(id, score, Rating::General, tags)?
     })
 }

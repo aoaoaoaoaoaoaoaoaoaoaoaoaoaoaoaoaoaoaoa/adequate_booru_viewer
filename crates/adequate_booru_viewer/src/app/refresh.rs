@@ -67,6 +67,7 @@ impl Bayonet {
             serial,
             query: self.query.clone(),
             sort: self.sort,
+            dates: self.date_range.normalized(),
             limit: RESULT_LIMIT,
         });
         match send {
@@ -110,8 +111,10 @@ impl Bayonet {
     fn install_refresh(&mut self, hit: SearchHit) {
         let posts = hit.posts.len();
         let candidates = hit.candidates;
-        self.hit_cache
-            .put(WarmKey::new(&self.query, self.sort), hit.clone());
+        self.hit_cache.put(
+            HitKey::new(&self.query, self.sort, self.date_range),
+            hit.clone(),
+        );
         self.install_hit(hit);
         self.status = format!(
             "{} hits from {} candidates; {}",

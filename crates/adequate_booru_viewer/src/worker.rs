@@ -10,6 +10,7 @@ use std::{
 
 use crate::{
     booru::{Booru as _, Danbooru},
+    date::DateRange,
     index::{CacheStats, FactMergeBudget, Index, TagSuggestion},
     media::{MediaCache, RgbaBlade, required_url},
     model::{PostId, PostRecord, Query, SearchHit, Sort},
@@ -48,6 +49,7 @@ pub enum Command {
         serial: u64,
         query: Query,
         sort: Sort,
+        dates: DateRange,
         limit: usize,
     },
     Stats {
@@ -252,6 +254,7 @@ impl Worker {
                 serial,
                 query,
                 sort,
+                dates,
                 limit,
             } => self
                 .refresh_tx
@@ -259,6 +262,7 @@ impl Worker {
                     serial,
                     query,
                     sort,
+                    dates,
                     limit,
                 })
                 .context("send refresh worker command"),
@@ -332,6 +336,7 @@ enum RefreshCommand {
         serial: u64,
         query: Query,
         sort: Sort,
+        dates: DateRange,
         limit: usize,
     },
     Stats {
@@ -396,8 +401,8 @@ fn refresh_loop(index: Index, commands: Receiver<RefreshCommand>, events: Klaxon
             };
             events.send(event);
         }
-        if let Some((serial, query, sort, limit)) = search {
-            let event = match index.search(&query, sort, limit) {
+        if let Some((serial, query, sort, dates, limit)) = search {
+            let event = match index.search(&query, sort, dates, limit) {
                 Ok(hit) => Event::Refreshed { serial, hit },
                 Err(err) => Event::RefreshFault {
                     serial,
@@ -419,7 +424,7 @@ fn refresh_loop(index: Index, commands: Receiver<RefreshCommand>, events: Klaxon
     }
 }
 
-type PendingSearch = Option<(u64, Query, Sort, usize)>;
+type PendingSearch = Option<(u64, Query, Sort, DateRange, usize)>;
 
 fn collect_refresh(
     command: RefreshCommand,
@@ -432,8 +437,9 @@ fn collect_refresh(
             serial,
             query,
             sort,
+            dates,
             limit,
-        } => *search = Some((serial, query, sort, limit)),
+        } => *search = Some((serial, query, sort, dates, limit)),
         RefreshCommand::Stats { serial } => *stats = Some(serial),
         RefreshCommand::Suggest { serial, prefix } => *suggest = Some((serial, prefix)),
     }

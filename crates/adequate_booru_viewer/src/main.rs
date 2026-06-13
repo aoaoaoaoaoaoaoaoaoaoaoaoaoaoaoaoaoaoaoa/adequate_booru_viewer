@@ -8,6 +8,7 @@ mod boiler;
 mod booru;
 mod chrome;
 mod config;
+mod date;
 mod filter_bank;
 mod frost;
 mod index;

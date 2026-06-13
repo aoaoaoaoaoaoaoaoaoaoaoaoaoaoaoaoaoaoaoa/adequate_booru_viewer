@@ -6,7 +6,10 @@ use std::{
     sync::Arc,
 };
 
-use crate::model::{Query, Sort};
+use crate::{
+    date::DateRange,
+    model::{Query, Sort},
+};
 
 /// User-authored intent only: everything here is something a person could
 /// reasonably write into the file by hand. View ephemera live in [`Slate`].
@@ -114,6 +117,7 @@ pub struct Slate {
     pub active_filter: Option<FilterName>,
     pub query: QueryConfig,
     pub sort: Sort,
+    pub dates: DateRange,
     pub images_per_row: u16,
     pub water: WaterMode,
     pub viewer_tags_open: bool,
@@ -126,6 +130,7 @@ impl Default for Slate {
             active_filter: None,
             query: QueryConfig::default(),
             sort: Sort::Score,
+            dates: DateRange::default(),
             images_per_row: 5,
             water: WaterMode::Wet,
             viewer_tags_open: false,
@@ -271,6 +276,10 @@ mod tests {
                 active_group: Vec::new(),
             },
             sort: Sort::Newest,
+            dates: DateRange {
+                first: crate::date::CreatedDay::parse("2024-01-01"),
+                last: crate::date::CreatedDay::parse("2024-12-31"),
+            },
             images_per_row: 7,
             water: WaterMode::ReallyWet,
             viewer_tags_open: true,
@@ -280,6 +289,7 @@ mod tests {
         assert_eq!(roundtrip.query.tree, query);
         assert!(roundtrip.closed_folders.contains("trips"));
         assert_eq!(roundtrip.images_per_row, 7);
+        assert_eq!(roundtrip.dates, slate.dates);
         assert_eq!(roundtrip.water, WaterMode::ReallyWet);
         assert!(roundtrip.viewer_tags_open);
         Ok(())

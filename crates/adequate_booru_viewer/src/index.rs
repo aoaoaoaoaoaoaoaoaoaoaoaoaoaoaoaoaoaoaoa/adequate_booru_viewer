@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::date::{CreatedDay, DateRange};
 use crate::model::{
     BoolOp, PostId, PostRecord, Query, QueryAtom, QueryExpr, RatingClass, SearchHit, Sort, Tag,
     TagKind, decode_record, encode_record, narrow_post_id,
@@ -26,11 +27,14 @@ const RATING_CHUNKS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("ra
 const POSTING_FACTS: TableDefinition<'_, u64, &[u8]> = TableDefinition::new("posting_facts.v1");
 const SCORE_POSTS: TableDefinition<'_, u64, u32> = TableDefinition::new("score_posts");
 const FAV_POSTS: TableDefinition<'_, u64, u32> = TableDefinition::new("fav_posts");
+const DAY_BY_ID: TableDefinition<'_, u64, u32> = TableDefinition::new("day_by_id.v1");
+const DAY_BOUNDS: TableDefinition<'_, u32, u64> = TableDefinition::new("day_bounds.v1");
 const META: TableDefinition<'_, &str, u64> = TableDefinition::new("meta");
 
 const SMALL_SORT: u64 = 50_000;
 const DANBOORU_CRAWL_BEFORE: &str = "danbooru.crawl.before";
 const QUICK_REPAIR_V1: &str = "redb.quick_repair.v1";
+const CHRONOLOGY_V1: &str = "chronology.v1";
 const POSTING_FACT_NEXT_SEQ: &str = "posting_facts.v1.next_seq";
 const CHUNK_BITS: u32 = 16;
 
@@ -346,6 +350,8 @@ impl Index {
             let mut post_table = tx.open_table(POSTS).context("open posts")?;
             let mut score_table = tx.open_table(SCORE_POSTS).context("open score_posts")?;
             let mut fav_table = tx.open_table(FAV_POSTS).context("open fav_posts")?;
+            let mut day_by_id = tx.open_table(DAY_BY_ID).context("open day_by_id")?;
+            let mut day_bounds = tx.open_table(DAY_BOUNDS).context("open day_bounds")?;
             let mut tag_kinds = tx.open_table(TAG_KINDS).context("open tag kind table")?;
             let mut facts = FactBatch::default();
 
@@ -360,6 +366,7 @@ impl Index {
                 };
                 if let Some(old) = old.as_ref() {
                     stage_record_delta(&mut facts, Some(old), indexable.then_some(post));
+                    remove_chronology(&mut day_by_id, &mut day_bounds, old)?;
                     remove_record_core(&mut post_table, &mut score_table, &mut fav_table, old)?;
                 }
 
@@ -382,6 +389,7 @@ impl Index {
                 let _old_fav = fav_table
                     .insert(sort_key_u32(post.favs, post.id), post.id.0)
                     .context("upsert favorite lane")?;
+                insert_chronology(&mut day_by_id, &mut day_bounds, post)?;
             }
             if !facts.is_empty() {
                 append_facts(tx, &facts)?;
@@ -547,48 +555,76 @@ impl Index {
         })
     }
 
-    pub fn search(&self, query: &Query, sort: Sort, limit: usize) -> Result<SearchHit> {
+    pub fn search(
+        &self,
+        query: &Query,
+        sort: Sort,
+        dates: DateRange,
+        limit: usize,
+    ) -> Result<SearchHit> {
         startup("index.search.enter");
+        let dates = dates.normalized();
+        if dates.active() {
+            self.ensure_chronology()?;
+        }
         let tx = self.db.begin_read().context("begin index read")?;
         startup("index.search.tx");
         let posts = tx.open_table(POSTS).context("open posts")?;
+        let window = date_window(&tx, dates)?;
+        if window.is_some_and(DateWindow::empty) {
+            return Ok(SearchHit::default());
+        }
 
         let candidate = self.candidate_set(&tx, query, &posts)?;
         startup("index.search.candidate");
         let candidates = match &candidate {
-            None => posts.len().context("count posts")?,
-            Some(Candidate::Finite(bitmap)) => bitmap.len(),
-            Some(Candidate::Cofinite(excluded)) => posts
-                .len()
-                .context("count posts")?
-                .saturating_sub(excluded.len()),
-        };
+            None => window.map_or_else(
+                || posts.len().context("count posts"),
+                |window| Ok(window.len()),
+            ),
+            Some(Candidate::Finite(bitmap)) => Ok(candidate_len(bitmap.as_ref(), window)),
+            Some(Candidate::Cofinite(excluded)) => window.map_or_else(
+                || {
+                    posts
+                        .len()
+                        .context("count posts")
+                        .map(|posts| posts.saturating_sub(excluded.len()))
+                },
+                |window| {
+                    Ok(window
+                        .len()
+                        .saturating_sub(candidate_len(excluded.as_ref(), Some(window))))
+                },
+            ),
+        }?;
         startup("index.search.candidates.len");
 
         let ids = match (&candidate, sort) {
-            (None, Sort::Newest) => newest_ids(&posts, limit)?,
+            (None, Sort::Newest) => newest_ids(&posts, window, limit)?,
             (Some(Candidate::Finite(bitmap)), Sort::Newest) => {
-                bitmap.as_ref().iter().rev().take(limit).collect::<Vec<_>>()
+                newest_bitmap_ids(bitmap.as_ref(), window, limit)
             }
             (Some(candidate @ Candidate::Cofinite(_)), Sort::Newest) => {
-                newest_ids_filtered(&posts, candidate, limit)?
+                newest_ids_filtered(&posts, candidate, window, limit)?
             }
-            (None, Sort::Score | Sort::Favorites) => self.ranked_ids(&tx, sort, None, limit)?,
+            (None, Sort::Score | Sort::Favorites) => {
+                self.ranked_ids(&tx, sort, None, window, limit)?
+            }
             (Some(candidate @ Candidate::Finite(bitmap)), Sort::Score)
                 if bitmap.len() > SMALL_SORT =>
             {
-                self.ranked_ids(&tx, sort, Some(candidate), limit)?
+                self.ranked_ids(&tx, sort, Some(candidate), window, limit)?
             }
             (Some(candidate @ Candidate::Finite(bitmap)), Sort::Favorites)
                 if bitmap.len() > SMALL_SORT =>
             {
-                self.ranked_ids(&tx, sort, Some(candidate), limit)?
+                self.ranked_ids(&tx, sort, Some(candidate), window, limit)?
             }
             (Some(candidate @ Candidate::Cofinite(_)), Sort::Score | Sort::Favorites) => {
-                self.ranked_ids(&tx, sort, Some(candidate), limit)?
+                self.ranked_ids(&tx, sort, Some(candidate), window, limit)?
             }
             (Some(Candidate::Finite(bitmap)), Sort::Score | Sort::Favorites) => {
-                self.local_sorted_ids(&tx, bitmap.as_ref(), sort, limit)?
+                self.local_sorted_ids(&tx, bitmap.as_ref(), sort, window, limit)?
             }
         };
         startup("index.search.ids");
@@ -626,21 +662,24 @@ impl Index {
         tx: &redb::ReadTransaction,
         sort: Sort,
         candidate: Option<&Candidate>,
+        window: Option<DateWindow>,
         limit: usize,
     ) -> Result<Vec<u32>> {
         let head = self.sort_head(tx, sort)?;
-        if let Some(ids) = head_ids(&head, candidate, limit) {
+        if let Some(ids) = head_ids(&head, candidate, window, limit) {
             return Ok(ids);
         }
         match sort {
             Sort::Score => lane_ids(
                 &tx.open_table(SCORE_POSTS).context("open score_posts")?,
                 candidate,
+                window,
                 limit,
             ),
             Sort::Favorites => lane_ids(
                 &tx.open_table(FAV_POSTS).context("open fav_posts")?,
                 candidate,
+                window,
                 limit,
             ),
             Sort::Newest => unreachable!("newest is not a ranked sort lane"),
@@ -675,12 +714,13 @@ impl Index {
         tx: &redb::ReadTransaction,
         bitmap: &RoaringBitmap,
         sort: Sort,
+        window: Option<DateWindow>,
         limit: usize,
     ) -> Result<Vec<u32>> {
         match sort {
             Sort::Score | Sort::Favorites => {
                 let keys = self.sort_keys(tx, sort)?;
-                Ok(local_sorted_ids_from_keys(bitmap, &keys, limit))
+                Ok(local_sorted_ids_from_keys(bitmap, &keys, window, limit))
             }
             Sort::Newest => unreachable!("finite newest search iterates candidate IDs directly"),
         }
@@ -725,6 +765,8 @@ impl Index {
                 .context("prime posting facts")?;
             let _score = tx.open_table(SCORE_POSTS).context("prime score_posts")?;
             let _favs = tx.open_table(FAV_POSTS).context("prime fav_posts")?;
+            let _day_by_id = tx.open_table(DAY_BY_ID).context("prime day by id")?;
+            let _day_bounds = tx.open_table(DAY_BOUNDS).context("prime day bounds")?;
             let mut meta = tx.open_table(META).context("prime meta")?;
             let _old = meta
                 .insert(QUICK_REPAIR_V1, 1)
@@ -751,6 +793,8 @@ impl Index {
         open!(POSTING_FACTS);
         open!(SCORE_POSTS);
         open!(FAV_POSTS);
+        open!(DAY_BY_ID);
+        open!(DAY_BOUNDS);
         open!(META);
         Ok(true)
     }
@@ -765,6 +809,36 @@ impl Index {
         meta.get(QUICK_REPAIR_V1)
             .context("read quick repair marker")
             .map(|guard| guard.is_some())
+    }
+
+    fn chronology_marked(&self) -> Result<bool> {
+        let tx = self
+            .db
+            .begin_read()
+            .context("begin chronology marker read")?;
+        let meta = match tx.open_table(META) {
+            Ok(meta) => meta,
+            Err(TableError::TableDoesNotExist(_)) => return Ok(false),
+            Err(err) => return Err(err).context("open meta for chronology marker"),
+        };
+        meta.get(CHRONOLOGY_V1)
+            .context("read chronology marker")
+            .map(|guard| guard.is_some())
+    }
+
+    fn ensure_chronology(&self) -> Result<()> {
+        if self.chronology_marked()? {
+            return Ok(());
+        }
+        let tx = self.begin_quick_write("begin chronology repair")?;
+        rebuild_chronology(&tx)?;
+        {
+            let mut meta = tx.open_table(META).context("open meta")?;
+            let _old = meta
+                .insert(CHRONOLOGY_V1, 1)
+                .context("write chronology marker")?;
+        }
+        tx.commit().context("commit chronology repair")
     }
 
     fn candidate_set(
@@ -877,6 +951,67 @@ impl Candidate {
             }
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DateWindow {
+    lo: u32,
+    hi: u32,
+}
+
+impl DateWindow {
+    fn empty(self) -> bool {
+        self.lo > self.hi
+    }
+
+    fn contains(self, id: u32) -> bool {
+        self.lo <= id && id <= self.hi
+    }
+
+    fn len(self) -> u64 {
+        if self.empty() {
+            0
+        } else {
+            u64::from(self.hi - self.lo) + 1
+        }
+    }
+
+    fn bounds(self) -> std::ops::RangeInclusive<u32> {
+        self.lo..=self.hi
+    }
+}
+
+fn date_window(tx: &redb::ReadTransaction, dates: DateRange) -> Result<Option<DateWindow>> {
+    let dates = dates.normalized();
+    if !dates.active() {
+        return Ok(None);
+    }
+    let bounds = tx.open_table(DAY_BOUNDS).context("open day bounds")?;
+    let first_key = dates.first.map_or(0, CreatedDay::get);
+    let last_key = dates.last.map_or(u32::MAX, CreatedDay::get);
+    if first_key > last_key {
+        return Ok(Some(DateWindow { lo: 1, hi: 0 }));
+    }
+    let lo = bounds
+        .range(first_key..=u32::MAX)
+        .context("range first date bound")?
+        .next()
+        .transpose()
+        .context("read first date bound")?
+        .filter(|(day, _)| day.value() <= last_key)
+        .map(|(_, packed)| unpack_bounds(packed.value()).0);
+    let hi = bounds
+        .range(0_u32..=last_key)
+        .context("range last date bound")?
+        .next_back()
+        .transpose()
+        .context("read last date bound")?
+        .filter(|(day, _)| day.value() >= first_key)
+        .map(|(_, packed)| unpack_bounds(packed.value()).1);
+    Ok(Some(match (lo, hi) {
+        (Some(lo), Some(hi)) => DateWindow { lo, hi },
+        _ => DateWindow { lo: 1, hi: 0 },
+    }))
 }
 
 struct BitmapEval<'a, P, B>
@@ -1035,6 +1170,163 @@ fn remove_record_core(
         .remove(sort_key_u32(post.favs, post.id))
         .context("remove favorite lane")?;
     Ok(())
+}
+
+fn insert_chronology(
+    day_by_id: &mut redb::Table<'_, u64, u32>,
+    day_bounds: &mut redb::Table<'_, u32, u64>,
+    post: &PostRecord,
+) -> Result<()> {
+    let Some(day) = post_day(post) else {
+        return Ok(());
+    };
+    let id = post.id.0;
+    let _old_day = day_by_id
+        .insert(u64::from(id), day.get())
+        .context("upsert post day")?;
+    let (lo, hi) = day_bounds
+        .get(day.get())
+        .context("read day bounds")?
+        .map(|guard| unpack_bounds(guard.value()))
+        .unwrap_or((id, id));
+    let _old = day_bounds
+        .insert(day.get(), pack_bounds(lo.min(id), hi.max(id)))
+        .context("upsert day bounds")?;
+    Ok(())
+}
+
+fn remove_chronology(
+    day_by_id: &mut redb::Table<'_, u64, u32>,
+    day_bounds: &mut redb::Table<'_, u32, u64>,
+    post: &PostRecord,
+) -> Result<()> {
+    let Some(day) = post_day(post) else {
+        return Ok(());
+    };
+    let id = post.id.0;
+    let bounds = day_bounds
+        .get(day.get())
+        .context("read old day bounds")?
+        .map(|guard| unpack_bounds(guard.value()));
+    let old_day = day_by_id.remove(u64::from(id)).context("remove post day")?;
+    drop(old_day);
+    if bounds.is_some_and(|(lo, hi)| lo == id || hi == id) {
+        recompute_day_bounds(day_by_id, day_bounds, day)?;
+    }
+    Ok(())
+}
+
+fn recompute_day_bounds(
+    day_by_id: &redb::Table<'_, u64, u32>,
+    day_bounds: &mut redb::Table<'_, u32, u64>,
+    day: CreatedDay,
+) -> Result<()> {
+    let mut bounds = None::<(u32, u32)>;
+    for row in day_by_id
+        .range(0_u64..=u64::MAX)
+        .context("range post days")?
+    {
+        let (id, found) = row.context("read post day")?;
+        if found.value() != day.get() {
+            continue;
+        }
+        let id = u32::try_from(id.value()).context("post id exceeds u32")?;
+        bounds = Some(match bounds {
+            Some((lo, hi)) => (lo.min(id), hi.max(id)),
+            None => (id, id),
+        });
+    }
+    match bounds {
+        Some((lo, hi)) => {
+            let _old = day_bounds
+                .insert(day.get(), pack_bounds(lo, hi))
+                .context("rewrite day bounds")?;
+        }
+        None => {
+            let _old = day_bounds
+                .remove(day.get())
+                .context("remove empty day bounds")?;
+        }
+    }
+    Ok(())
+}
+
+fn rebuild_chronology(tx: &redb::WriteTransaction) -> Result<()> {
+    let posts = {
+        let posts = tx.open_table(POSTS).context("open posts for chronology")?;
+        let mut out = Vec::<(PostId, CreatedDay)>::new();
+        for row in posts
+            .range(0_u64..=u64::MAX)
+            .context("range chronology posts")?
+        {
+            let (id, bytes) = row.context("read chronology post")?;
+            let post = decode_record(bytes.value())?;
+            if let Some(day) = post_day(&post) {
+                let id = u32::try_from(id.value()).context("post id exceeds u32")?;
+                out.push((PostId(id), day));
+            }
+        }
+        out
+    };
+    let mut day_by_id = tx.open_table(DAY_BY_ID).context("open day_by_id")?;
+    let mut day_bounds = tx.open_table(DAY_BOUNDS).context("open day_bounds")?;
+    clear_u64_u32(&mut day_by_id)?;
+    clear_u32_u64(&mut day_bounds)?;
+    let mut bounds = BTreeMap::<u32, (u32, u32)>::new();
+    for (id, day) in posts {
+        let _old = day_by_id
+            .insert(u64::from(id.0), day.get())
+            .context("write chronology day")?;
+        let _bounds = bounds
+            .entry(day.get())
+            .and_modify(|(lo, hi)| {
+                *lo = (*lo).min(id.0);
+                *hi = (*hi).max(id.0);
+            })
+            .or_insert((id.0, id.0));
+    }
+    for (day, (lo, hi)) in bounds {
+        let _old = day_bounds
+            .insert(day, pack_bounds(lo, hi))
+            .context("write chronology bounds")?;
+    }
+    Ok(())
+}
+
+fn clear_u64_u32(table: &mut redb::Table<'_, u64, u32>) -> Result<()> {
+    let keys = table
+        .range(0_u64..=u64::MAX)
+        .context("range u64 table")?
+        .map(|row| row.map(|(key, _)| key.value()).context("read u64 key"))
+        .collect::<Result<Vec<_>>>()?;
+    for key in keys {
+        let _old = table.remove(key).context("remove u64 row")?;
+    }
+    Ok(())
+}
+
+fn clear_u32_u64(table: &mut redb::Table<'_, u32, u64>) -> Result<()> {
+    let keys = table
+        .range(0_u32..=u32::MAX)
+        .context("range u32 table")?
+        .map(|row| row.map(|(key, _)| key.value()).context("read u32 key"))
+        .collect::<Result<Vec<_>>>()?;
+    for key in keys {
+        let _old = table.remove(key).context("remove u32 row")?;
+    }
+    Ok(())
+}
+
+fn post_day(post: &PostRecord) -> Option<CreatedDay> {
+    CreatedDay::parse_iso(&post.created_at)
+}
+
+fn pack_bounds(lo: u32, hi: u32) -> u64 {
+    (u64::from(lo) << 32) | u64::from(hi)
+}
+
+fn unpack_bounds(raw: u64) -> (u32, u32) {
+    ((raw >> 32) as u32, raw as u32)
 }
 
 fn stage_record_delta(facts: &mut FactBatch, old: Option<&PostRecord>, new: Option<&PostRecord>) {
@@ -1347,10 +1639,14 @@ fn exactly_one(children: impl IntoIterator<Item = BitmapCow>) -> RoaringBitmap {
 
 fn newest_ids(
     table: &impl redb::ReadableTable<u64, &'static [u8]>,
+    window: Option<DateWindow>,
     limit: usize,
 ) -> Result<Vec<u32>> {
+    let range = window.map_or(0_u64..=u64::MAX, |window| {
+        u64::from(window.lo)..=u64::from(window.hi)
+    });
     table
-        .range(0_u64..=u64::MAX)
+        .range(range)
         .context("range posts")?
         .rev()
         .take(limit)
@@ -1361,14 +1657,25 @@ fn newest_ids(
         .collect()
 }
 
+fn newest_bitmap_ids(bitmap: &RoaringBitmap, window: Option<DateWindow>, limit: usize) -> Vec<u32> {
+    match window {
+        Some(window) => bitmap.range(window.bounds()).rev().take(limit).collect(),
+        None => bitmap.iter().rev().take(limit).collect(),
+    }
+}
+
 fn newest_ids_filtered(
     table: &impl redb::ReadableTable<u64, &'static [u8]>,
     candidate: &Candidate,
+    window: Option<DateWindow>,
     limit: usize,
 ) -> Result<Vec<u32>> {
+    let range = window.map_or(0_u64..=u64::MAX, |window| {
+        u64::from(window.lo)..=u64::from(window.hi)
+    });
     let mut ids = Vec::with_capacity(limit);
     for row in table
-        .range(0_u64..=u64::MAX)
+        .range(range)
         .context("range filtered newest posts")?
         .rev()
     {
@@ -1397,6 +1704,7 @@ fn all_post_ids(table: &impl redb::ReadableTable<u64, &'static [u8]>) -> Result<
 fn lane_ids(
     table: &impl redb::ReadableTable<u64, u32>,
     candidate: Option<&Candidate>,
+    window: Option<DateWindow>,
     limit: usize,
 ) -> Result<Vec<u32>> {
     let mut ids = Vec::with_capacity(limit);
@@ -1407,7 +1715,9 @@ fn lane_ids(
     {
         let (_, id) = row.context("read sort row")?;
         let id = id.value();
-        if candidate.is_none_or(|candidate| candidate.contains(id)) {
+        if window.is_none_or(|window| window.contains(id))
+            && candidate.is_none_or(|candidate| candidate.contains(id))
+        {
             ids.push(id);
             if ids.len() == limit {
                 break;
@@ -1430,17 +1740,24 @@ fn lane_head(table: &impl redb::ReadableTable<u64, u32>, cap: usize) -> Result<V
         .collect()
 }
 
-fn head_ids(head: &[u32], candidate: Option<&Candidate>, limit: usize) -> Option<Vec<u32>> {
+fn head_ids(
+    head: &[u32],
+    candidate: Option<&Candidate>,
+    window: Option<DateWindow>,
+    limit: usize,
+) -> Option<Vec<u32>> {
     let mut ids = Vec::with_capacity(limit);
     for id in head {
-        if candidate.is_none_or(|candidate| candidate.contains(*id)) {
+        if window.is_none_or(|window| window.contains(*id))
+            && candidate.is_none_or(|candidate| candidate.contains(*id))
+        {
             ids.push(*id);
             if ids.len() == limit {
                 return Some(ids);
             }
         }
     }
-    (candidate.is_none() && ids.len() == limit).then_some(ids)
+    (candidate.is_none() && window.is_none() && ids.len() == limit).then_some(ids)
 }
 fn lane_sort_keys(table: &impl redb::ReadableTable<u64, u32>) -> Result<Vec<u64>> {
     let mut keys = Vec::new();
@@ -1457,12 +1774,30 @@ fn set_sort_key(keys: &mut Vec<u64>, id: PostId, key: Option<u64>) {
     }
     keys[slot] = key.unwrap_or(0);
 }
-fn local_sorted_ids_from_keys(bitmap: &RoaringBitmap, keys: &[u64], limit: usize) -> Vec<u32> {
+fn local_sorted_ids_from_keys(
+    bitmap: &RoaringBitmap,
+    keys: &[u64],
+    window: Option<DateWindow>,
+    limit: usize,
+) -> Vec<u32> {
     if limit == 0 {
         return Vec::new();
     }
     let mut heap = BinaryHeap::<Reverse<(u64, u32)>>::with_capacity(limit + 1);
-    for id in bitmap {
+    match window {
+        Some(window) => push_sorted_ids(bitmap.range(window.bounds()), keys, limit, &mut heap),
+        None => push_sorted_ids(bitmap.iter(), keys, limit, &mut heap),
+    }
+    finish_sorted_heap(heap)
+}
+
+fn push_sorted_ids(
+    ids: impl IntoIterator<Item = u32>,
+    keys: &[u64],
+    limit: usize,
+    heap: &mut BinaryHeap<Reverse<(u64, u32)>>,
+) {
+    for id in ids {
         let Some(&key) = keys.get(id as usize) else {
             continue;
         };
@@ -1478,12 +1813,22 @@ fn local_sorted_ids_from_keys(bitmap: &RoaringBitmap, keys: &[u64], limit: usize
             *cold = Reverse(item);
         }
     }
+}
+
+fn finish_sorted_heap(heap: BinaryHeap<Reverse<(u64, u32)>>) -> Vec<u32> {
     let mut keyed = heap
         .into_iter()
         .map(|Reverse(item)| item)
         .collect::<Vec<_>>();
     keyed.sort_unstable_by(|a, b| b.cmp(a));
     keyed.into_iter().map(|(_, id)| id).collect()
+}
+
+fn candidate_len(bitmap: &RoaringBitmap, window: Option<DateWindow>) -> u64 {
+    match window {
+        Some(window) => bitmap.range(window.bounds()).count() as u64,
+        None => bitmap.len(),
+    }
 }
 fn sort_key_i32(score: i32, id: PostId) -> u64 {
     let shifted = (i64::from(score) - i64::from(i32::MIN)) as u64;
