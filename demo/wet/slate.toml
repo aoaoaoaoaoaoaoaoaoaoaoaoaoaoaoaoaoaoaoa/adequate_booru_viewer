@@ -2,7 +2,7 @@ closed_folders = []
 active_filter = "harmless screenshot"
 sort = "score"
 images_per_row = 5
-water = "really_wet"
+water = "wet"
 viewer_tags_open = false
 
 [query]

@@ -21,24 +21,24 @@ ms = 220
 [[steps]]
 action = "type"
 text = "1girl"
-delay_ms = 24
+delay_ms = 55
 
 [[steps]]
 action = "wait"
-ms = 850
+ms = 1050
 
 [[steps]]
 action = "move"
 x = 96
 y = 310
-ms = 140
+ms = 260
 
 [[steps]]
 action = "click"
 
 [[steps]]
 action = "wait"
-ms = 180
+ms = 300
 
 [[steps]]
 action = "key"
@@ -52,19 +52,19 @@ ms = 520
 action = "move"
 x = 116
 y = 286
-ms = 90
+ms = 180
 
 [[steps]]
 action = "click"
 
 [[steps]]
 action = "wait"
-ms = 110
+ms = 220
 
 [[steps]]
 action = "type"
 text = "looking_at_viewer"
-delay_ms = 14
+delay_ms = 38
 
 [[steps]]
 action = "key"
@@ -78,19 +78,19 @@ ms = 650
 action = "move"
 x = 116
 y = 286
-ms = 90
+ms = 180
 
 [[steps]]
 action = "click"
 
 [[steps]]
 action = "wait"
-ms = 100
+ms = 220
 
 [[steps]]
 action = "type"
 text = "-comic"
-delay_ms = 21
+delay_ms = 48
 
 [[steps]]
 action = "key"
@@ -104,19 +104,19 @@ ms = 430
 action = "move"
 x = 116
 y = 286
-ms = 90
+ms = 180
 
 [[steps]]
 action = "click"
 
 [[steps]]
 action = "wait"
-ms = 100
+ms = 220
 
 [[steps]]
 action = "type"
 text = "-greyscale"
-delay_ms = 19
+delay_ms = 43
 
 [[steps]]
 action = "key"
@@ -130,23 +130,23 @@ ms = 720
 action = "move"
 x = 116
 y = 286
-ms = 90
+ms = 180
 
 [[steps]]
 action = "click"
 
 [[steps]]
 action = "wait"
-ms = 100
+ms = 220
 
 [[steps]]
 action = "type"
 text = "solo"
-delay_ms = 25
+delay_ms = 55
 
 [[steps]]
 action = "wait"
-ms = 950
+ms = 1150
 
 [[steps]]
 action = "key"
@@ -154,7 +154,7 @@ value = "Tab"
 
 [[steps]]
 action = "wait"
-ms = 220
+ms = 460
 
 [[steps]]
 action = "key"

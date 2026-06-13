@@ -16,7 +16,7 @@ const DEMO: &str = "demo/wet";
 const DEFAULT_W: u32 = 1440;
 const DEFAULT_H: u32 = 920;
 const DEFAULT_FPS: u32 = 60;
-const X264_CRF: &str = "16";
+const X264_CRF: &str = "12";
 const X264_PRESET: &str = "slow";
 
 fn main() -> Result<()> {
@@ -412,6 +412,9 @@ impl Drop for App {
 
 struct Recorder {
     child: Child,
+    raw: PathBuf,
+    out: PathBuf,
+    fps: u32,
 }
 
 impl Recorder {
@@ -424,26 +427,96 @@ impl Recorder {
         out: &Path,
     ) -> Result<Self> {
         let size = format!("{width}x{height}");
-        let fps = fps.to_string();
+        let fps_text = fps.to_string();
         let input = format!("{display}.0");
         let seconds = format!("{:.3}", runtime.as_secs_f64());
-        let out = out.as_os_str().to_str().context("non-utf8 output path")?;
+        let raw = capture_path(out);
+        if raw.exists() {
+            fs::remove_file(&raw).with_context(|| format!("remove {}", raw.display()))?;
+        }
+        let raw_arg = raw.as_os_str().to_str().context("non-utf8 capture path")?;
         let child = Command::new("ffmpeg")
             .args([
                 "-y",
                 "-hide_banner",
                 "-loglevel",
                 "error",
+                "-thread_queue_size",
+                "1024",
                 "-video_size",
                 &size,
                 "-framerate",
-                &fps,
+                &fps_text,
                 "-f",
                 "x11grab",
+                "-draw_mouse",
+                "1",
                 "-i",
                 &input,
                 "-t",
                 &seconds,
+                "-an",
+                "-c:v",
+                "rawvideo",
+                "-f",
+                "nut",
+                raw_arg,
+            ])
+            .spawn()
+            .context("spawn ffmpeg")?;
+        thread::sleep(Duration::from_millis(250));
+        Ok(Self {
+            child,
+            raw,
+            out: out.to_owned(),
+            fps,
+        })
+    }
+
+    fn finish(&mut self, grace: Duration) -> Result<()> {
+        let deadline = Instant::now() + grace;
+        let status = loop {
+            if let Some(status) = self.child.try_wait().context("poll ffmpeg capture")? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                self.child.kill().context("kill ffmpeg capture")?;
+                let _wait = self.child.wait();
+                bail!("ffmpeg capture did not finish within {:?}", grace);
+            }
+            thread::sleep(Duration::from_millis(80));
+        };
+        ensure(status, "ffmpeg capture")?;
+        self.transcode()?;
+        fs::remove_file(&self.raw).with_context(|| format!("remove {}", self.raw.display()))?;
+        Ok(())
+    }
+
+    fn transcode(&self) -> Result<()> {
+        let fps = self.fps.to_string();
+        let raw = self
+            .raw
+            .as_os_str()
+            .to_str()
+            .context("non-utf8 capture path")?;
+        let out = self
+            .out
+            .as_os_str()
+            .to_str()
+            .context("non-utf8 output path")?;
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                raw,
+                "-an",
+                "-fps_mode",
+                "cfr",
+                "-r",
+                &fps,
                 "-c:v",
                 "libx264",
                 "-preset",
@@ -458,23 +531,9 @@ impl Recorder {
                 "+faststart",
                 out,
             ])
-            .spawn()
-            .context("spawn ffmpeg")?;
-        thread::sleep(Duration::from_millis(250));
-        Ok(Self { child })
-    }
-
-    fn finish(&mut self, grace: Duration) -> Result<()> {
-        let deadline = Instant::now() + grace;
-        while Instant::now() < deadline {
-            if self.child.try_wait().context("poll ffmpeg")?.is_some() {
-                return Ok(());
-            }
-            thread::sleep(Duration::from_millis(80));
-        }
-        self.child.kill().context("kill ffmpeg")?;
-        let _wait = self.child.wait();
-        Ok(())
+            .status()
+            .context("spawn ffmpeg transcode")?;
+        ensure(status, "ffmpeg transcode")
     }
 }
 
@@ -484,7 +543,17 @@ impl Drop for Recorder {
             let _killed = self.child.kill();
             let _reaped = self.child.wait();
         }
+        let _removed = fs::remove_file(&self.raw);
     }
+}
+
+fn capture_path(out: &Path) -> PathBuf {
+    let stem = out
+        .file_stem()
+        .map_or_else(|| OsString::from("capture"), OsStr::to_os_string);
+    let mut name = stem;
+    name.push(".capture.nut");
+    out.with_file_name(name)
 }
 
 #[derive(Debug, Deserialize)]
