@@ -280,12 +280,6 @@ impl Bayonet {
                 self.water_mode = WaterMode::ReallyWet;
                 changed = true;
             }
-            if chrome::glyph(ui, "PURGE DUMPS", false)
-                .on_hover_text("delete saved water debug dumps")
-                .clicked()
-            {
-                self.purge_debug_dumps();
-            }
         });
         if changed {
             self.save_config();
