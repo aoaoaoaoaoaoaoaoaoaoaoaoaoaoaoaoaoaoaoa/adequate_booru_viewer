@@ -1,0 +1,195 @@
+# Window-relative choreography for `cargo xtask wet-demo`.
+# The fixture opens at 1440×920, with live index/cache but staged config/state.
+
+[[steps]]
+action = "wait"
+ms = 1400
+
+[[steps]]
+action = "move"
+x = 36
+y = 18
+ms = 450
+
+[[steps]]
+action = "click"
+
+[[steps]]
+action = "wait"
+ms = 520
+
+[[steps]]
+action = "click"
+
+[[steps]]
+action = "wait"
+ms = 520
+
+[[steps]]
+action = "move"
+x = 92
+y = 255
+ms = 600
+
+[[steps]]
+action = "click"
+
+[[steps]]
+action = "type"
+text = "solo"
+delay_ms = 32
+
+[[steps]]
+action = "key"
+value = "Return"
+
+[[steps]]
+action = "wait"
+ms = 450
+
+[[steps]]
+action = "drag"
+from = [61, 415]
+to = [52, 550]
+ms = 700
+
+[[steps]]
+action = "wait"
+ms = 500
+
+[[steps]]
+action = "move"
+x = 420
+y = 260
+ms = 520
+
+[[steps]]
+action = "move"
+x = 760
+y = 370
+ms = 820
+
+[[steps]]
+action = "move"
+x = 1120
+y = 260
+ms = 820
+
+[[steps]]
+action = "move"
+x = 940
+y = 700
+ms = 880
+
+[[steps]]
+action = "scroll"
+direction = "down"
+clicks = 26
+delay_ms = 14
+
+[[steps]]
+action = "wait"
+ms = 900
+
+[[steps]]
+action = "scroll"
+direction = "up"
+clicks = 14
+delay_ms = 16
+
+[[steps]]
+action = "wait"
+ms = 760
+
+[[steps]]
+action = "move"
+x = 820
+y = 420
+ms = 500
+
+[[steps]]
+action = "click"
+button = 3
+
+[[steps]]
+action = "wait"
+ms = 850
+
+[[steps]]
+action = "move"
+x = 910
+y = 530
+ms = 700
+
+[[steps]]
+action = "click"
+
+[[steps]]
+action = "wait"
+ms = 650
+
+[[steps]]
+action = "move"
+x = 760
+y = 420
+ms = 520
+
+[[steps]]
+action = "click"
+
+[[steps]]
+action = "wait"
+ms = 1500
+
+[[steps]]
+action = "key"
+value = "Tab"
+
+[[steps]]
+action = "wait"
+ms = 900
+
+[[steps]]
+action = "move"
+x = 720
+y = 510
+ms = 620
+
+[[steps]]
+action = "click"
+
+[[steps]]
+action = "wait"
+ms = 800
+
+[[steps]]
+action = "key"
+value = "Right"
+
+[[steps]]
+action = "wait"
+ms = 850
+
+[[steps]]
+action = "key"
+value = "Left"
+
+[[steps]]
+action = "wait"
+ms = 850
+
+[[steps]]
+action = "key"
+value = "Tab"
+
+[[steps]]
+action = "wait"
+ms = 650
+
+[[steps]]
+action = "key"
+value = "Escape"
+
+[[steps]]
+action = "wait"
+ms = 1600

@@ -1,0 +1,101 @@
+prefetch_on_hover = true
+
+[filters]
+shelves = []
+
+[[filters.saved]]
+name = "harmless screenshot"
+active_group = []
+
+[filters.saved.tree.root]
+kind = "group"
+
+[filters.saved.tree.root.group]
+op = "and"
+
+[[filters.saved.tree.root.group.children]]
+kind = "atom"
+
+[filters.saved.tree.root.group.children.atom]
+kind = "rating"
+value = "general"
+
+[[filters.saved.tree.root.group.children]]
+kind = "atom"
+
+[filters.saved.tree.root.group.children.atom]
+kind = "tag"
+value = "1girl"
+
+[[filters.saved.tree.root.group.children]]
+kind = "atom"
+
+[filters.saved.tree.root.group.children.atom]
+kind = "tag"
+value = "looking_at_viewer"
+
+[[filters.saved.tree.root.group.children]]
+kind = "not"
+
+[filters.saved.tree.root.group.children.child]
+kind = "atom"
+
+[filters.saved.tree.root.group.children.child.atom]
+kind = "tag"
+value = "comic"
+
+[[filters.saved.tree.root.group.children]]
+kind = "not"
+
+[filters.saved.tree.root.group.children.child]
+kind = "atom"
+
+[filters.saved.tree.root.group.children.child.atom]
+kind = "tag"
+value = "greyscale"
+
+[[filters.saved.tree.root.group.children]]
+kind = "group"
+
+[filters.saved.tree.root.group.children.group]
+op = "or"
+
+[[filters.saved.tree.root.group.children.group.children]]
+kind = "group"
+
+[filters.saved.tree.root.group.children.group.children.group]
+op = "and"
+
+[[filters.saved.tree.root.group.children.group.children.group.children]]
+kind = "atom"
+
+[filters.saved.tree.root.group.children.group.children.group.children.atom]
+kind = "tag"
+value = "blue_eyes"
+
+[[filters.saved.tree.root.group.children.group.children.group.children]]
+kind = "atom"
+
+[filters.saved.tree.root.group.children.group.children.group.children.atom]
+kind = "tag"
+value = "red_hair"
+
+[[filters.saved.tree.root.group.children.group.children]]
+kind = "group"
+
+[filters.saved.tree.root.group.children.group.children.group]
+op = "and"
+
+[[filters.saved.tree.root.group.children.group.children.group.children]]
+kind = "atom"
+
+[filters.saved.tree.root.group.children.group.children.group.children.atom]
+kind = "tag"
+value = "blue_hair"
+
+[[filters.saved.tree.root.group.children.group.children.group.children]]
+kind = "atom"
+
+[filters.saved.tree.root.group.children.group.children.group.children.atom]
+kind = "tag"
+value = "red_eyes"

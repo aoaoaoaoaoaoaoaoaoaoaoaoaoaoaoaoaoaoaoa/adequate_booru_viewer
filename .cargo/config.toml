@@ -1,2 +1,5 @@
 [build]
 target-dir = "/data/main/cargo-target/booru_viewer"
+
+[alias]
+xtask = "run --package xtask --"

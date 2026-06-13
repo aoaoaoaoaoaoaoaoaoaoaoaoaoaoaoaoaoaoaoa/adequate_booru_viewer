@@ -1,0 +1,102 @@
+closed_folders = []
+active_filter = "harmless screenshot"
+sort = "score"
+images_per_row = 5
+water = "really_wet"
+viewer_tags_open = false
+
+[query]
+active_group = []
+
+[query.tree.root]
+kind = "group"
+
+[query.tree.root.group]
+op = "and"
+
+[[query.tree.root.group.children]]
+kind = "atom"
+
+[query.tree.root.group.children.atom]
+kind = "rating"
+value = "general"
+
+[[query.tree.root.group.children]]
+kind = "atom"
+
+[query.tree.root.group.children.atom]
+kind = "tag"
+value = "1girl"
+
+[[query.tree.root.group.children]]
+kind = "atom"
+
+[query.tree.root.group.children.atom]
+kind = "tag"
+value = "looking_at_viewer"
+
+[[query.tree.root.group.children]]
+kind = "not"
+
+[query.tree.root.group.children.child]
+kind = "atom"
+
+[query.tree.root.group.children.child.atom]
+kind = "tag"
+value = "comic"
+
+[[query.tree.root.group.children]]
+kind = "not"
+
+[query.tree.root.group.children.child]
+kind = "atom"
+
+[query.tree.root.group.children.child.atom]
+kind = "tag"
+value = "greyscale"
+
+[[query.tree.root.group.children]]
+kind = "group"
+
+[query.tree.root.group.children.group]
+op = "or"
+
+[[query.tree.root.group.children.group.children]]
+kind = "group"
+
+[query.tree.root.group.children.group.children.group]
+op = "and"
+
+[[query.tree.root.group.children.group.children.group.children]]
+kind = "atom"
+
+[query.tree.root.group.children.group.children.group.children.atom]
+kind = "tag"
+value = "blue_eyes"
+
+[[query.tree.root.group.children.group.children.group.children]]
+kind = "atom"
+
+[query.tree.root.group.children.group.children.group.children.atom]
+kind = "tag"
+value = "red_hair"
+
+[[query.tree.root.group.children.group.children]]
+kind = "group"
+
+[query.tree.root.group.children.group.children.group]
+op = "and"
+
+[[query.tree.root.group.children.group.children.group.children]]
+kind = "atom"
+
+[query.tree.root.group.children.group.children.group.children.atom]
+kind = "tag"
+value = "blue_hair"
+
+[[query.tree.root.group.children.group.children.group.children]]
+kind = "atom"
+
+[query.tree.root.group.children.group.children.group.children.atom]
+kind = "tag"
+value = "red_eyes"
