@@ -33,8 +33,6 @@ const META: TableDefinition<'_, &str, u64> = TableDefinition::new("meta");
 
 const SMALL_SORT: u64 = 50_000;
 const DANBOORU_CRAWL_BEFORE: &str = "danbooru.crawl.before";
-const QUICK_REPAIR_V1: &str = "redb.quick_repair.v1";
-const CHRONOLOGY_V1: &str = "chronology.v1";
 const POSTING_FACT_NEXT_SEQ: &str = "posting_facts.v1.next_seq";
 const CHUNK_BITS: u32 = 16;
 
@@ -564,9 +562,6 @@ impl Index {
     ) -> Result<SearchHit> {
         startup("index.search.enter");
         let dates = dates.normalized();
-        if dates.active() {
-            self.ensure_chronology()?;
-        }
         let tx = self.db.begin_read().context("begin index read")?;
         startup("index.search.tx");
         let posts = tx.open_table(POSTS).context("open posts")?;
@@ -748,7 +743,7 @@ impl Index {
     }
 
     fn prime(&self) -> Result<()> {
-        if self.schema_ready()? && self.quick_repair_marked()? {
+        if self.schema_ready()? {
             startup("index.prime.schema.ready");
             return Ok(());
         }
@@ -767,10 +762,7 @@ impl Index {
             let _favs = tx.open_table(FAV_POSTS).context("prime fav_posts")?;
             let _day_by_id = tx.open_table(DAY_BY_ID).context("prime day by id")?;
             let _day_bounds = tx.open_table(DAY_BOUNDS).context("prime day bounds")?;
-            let mut meta = tx.open_table(META).context("prime meta")?;
-            let _old = meta
-                .insert(QUICK_REPAIR_V1, 1)
-                .context("write quick repair marker")?;
+            let _meta = tx.open_table(META).context("prime meta")?;
         }
         tx.commit().context("commit schema prime")
     }
@@ -797,48 +789,6 @@ impl Index {
         open!(DAY_BOUNDS);
         open!(META);
         Ok(true)
-    }
-
-    fn quick_repair_marked(&self) -> Result<bool> {
-        let tx = self.db.begin_read().context("begin quick repair read")?;
-        let meta = match tx.open_table(META) {
-            Ok(meta) => meta,
-            Err(TableError::TableDoesNotExist(_)) => return Ok(false),
-            Err(err) => return Err(err).context("open meta for quick repair marker"),
-        };
-        meta.get(QUICK_REPAIR_V1)
-            .context("read quick repair marker")
-            .map(|guard| guard.is_some())
-    }
-
-    fn chronology_marked(&self) -> Result<bool> {
-        let tx = self
-            .db
-            .begin_read()
-            .context("begin chronology marker read")?;
-        let meta = match tx.open_table(META) {
-            Ok(meta) => meta,
-            Err(TableError::TableDoesNotExist(_)) => return Ok(false),
-            Err(err) => return Err(err).context("open meta for chronology marker"),
-        };
-        meta.get(CHRONOLOGY_V1)
-            .context("read chronology marker")
-            .map(|guard| guard.is_some())
-    }
-
-    fn ensure_chronology(&self) -> Result<()> {
-        if self.chronology_marked()? {
-            return Ok(());
-        }
-        let tx = self.begin_quick_write("begin chronology repair")?;
-        rebuild_chronology(&tx)?;
-        {
-            let mut meta = tx.open_table(META).context("open meta")?;
-            let _old = meta
-                .insert(CHRONOLOGY_V1, 1)
-                .context("write chronology marker")?;
-        }
-        tx.commit().context("commit chronology repair")
     }
 
     fn candidate_set(
@@ -1247,72 +1197,6 @@ fn recompute_day_bounds(
                 .remove(day.get())
                 .context("remove empty day bounds")?;
         }
-    }
-    Ok(())
-}
-
-fn rebuild_chronology(tx: &redb::WriteTransaction) -> Result<()> {
-    let posts = {
-        let posts = tx.open_table(POSTS).context("open posts for chronology")?;
-        let mut out = Vec::<(PostId, CreatedDay)>::new();
-        for row in posts
-            .range(0_u64..=u64::MAX)
-            .context("range chronology posts")?
-        {
-            let (id, bytes) = row.context("read chronology post")?;
-            let post = decode_record(bytes.value())?;
-            if let Some(day) = post_day(&post) {
-                let id = u32::try_from(id.value()).context("post id exceeds u32")?;
-                out.push((PostId(id), day));
-            }
-        }
-        out
-    };
-    let mut day_by_id = tx.open_table(DAY_BY_ID).context("open day_by_id")?;
-    let mut day_bounds = tx.open_table(DAY_BOUNDS).context("open day_bounds")?;
-    clear_u64_u32(&mut day_by_id)?;
-    clear_u32_u64(&mut day_bounds)?;
-    let mut bounds = BTreeMap::<u32, (u32, u32)>::new();
-    for (id, day) in posts {
-        let _old = day_by_id
-            .insert(u64::from(id.0), day.get())
-            .context("write chronology day")?;
-        let _bounds = bounds
-            .entry(day.get())
-            .and_modify(|(lo, hi)| {
-                *lo = (*lo).min(id.0);
-                *hi = (*hi).max(id.0);
-            })
-            .or_insert((id.0, id.0));
-    }
-    for (day, (lo, hi)) in bounds {
-        let _old = day_bounds
-            .insert(day, pack_bounds(lo, hi))
-            .context("write chronology bounds")?;
-    }
-    Ok(())
-}
-
-fn clear_u64_u32(table: &mut redb::Table<'_, u64, u32>) -> Result<()> {
-    let keys = table
-        .range(0_u64..=u64::MAX)
-        .context("range u64 table")?
-        .map(|row| row.map(|(key, _)| key.value()).context("read u64 key"))
-        .collect::<Result<Vec<_>>>()?;
-    for key in keys {
-        let _old = table.remove(key).context("remove u64 row")?;
-    }
-    Ok(())
-}
-
-fn clear_u32_u64(table: &mut redb::Table<'_, u32, u64>) -> Result<()> {
-    let keys = table
-        .range(0_u32..=u32::MAX)
-        .context("range u32 table")?
-        .map(|row| row.map(|(key, _)| key.value()).context("read u32 key"))
-        .collect::<Result<Vec<_>>>()?;
-    for key in keys {
-        let _old = table.remove(key).context("remove u32 row")?;
     }
     Ok(())
 }

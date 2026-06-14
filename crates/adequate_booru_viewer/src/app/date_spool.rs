@@ -4,7 +4,8 @@ const YEAR_MIN: i32 = 2005;
 const STEP: f32 = 19.0;
 const H: f32 = 76.0;
 const LIP: f32 = 9.0;
-const GAP: f32 = 5.0;
+const PAD: f32 = 12.0;
+const REEL_GAP: f32 = 12.0;
 const MONTHS: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
 ];
@@ -261,20 +262,20 @@ fn hatch(painter: &egui::Painter, rect: egui::Rect, strain: f32) {
 }
 
 fn reel_rects(rect: egui::Rect) -> [(Reel, egui::Rect); 3] {
-    let w = ((rect.width() - 2.0 * GAP) / 3.0).floor();
-    let year_w = (w + 16.0).min(64.0);
-    let month_w = (w - 4.0).max(42.0);
-    let day_w = (rect.width() - year_w - month_w - 2.0 * GAP).max(36.0);
-    let x = rect.left() + 6.0;
+    let inner = (rect.width() - 2.0 * PAD).max(130.0);
+    let scale = (inner / 176.0).min(1.0);
+    let year_w = 58.0 * scale;
+    let month_w = 42.0 * scale;
+    let day_w = 38.0 * scale;
+    let gap = REEL_GAP * scale;
+    let used = year_w + month_w + day_w + 2.0 * gap;
+    let x = rect.left() + ((rect.width() - used) * 0.5).max(PAD);
     let y = rect.top() + 5.0;
     let h = rect.height() - 10.0;
     let year = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(year_w, h));
     let month =
-        egui::Rect::from_min_size(egui::pos2(year.right() + GAP, y), egui::vec2(month_w, h));
-    let day = egui::Rect::from_min_size(
-        egui::pos2(month.right() + GAP, y),
-        egui::vec2(day_w - 6.0, h),
-    );
+        egui::Rect::from_min_size(egui::pos2(year.right() + gap, y), egui::vec2(month_w, h));
+    let day = egui::Rect::from_min_size(egui::pos2(month.right() + gap, y), egui::vec2(day_w, h));
     [(Reel::Year, year), (Reel::Month, month), (Reel::Day, day)]
 }
 
