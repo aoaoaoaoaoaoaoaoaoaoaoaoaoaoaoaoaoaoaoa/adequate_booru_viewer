@@ -290,7 +290,7 @@ impl Bayonet {
                 self.bump_plunge(rect);
             }
         }
-        if next.normalized() != self.date_range {
+        if clean_dates(next) != self.date_range {
             self.install_dates(next);
         }
     }

@@ -55,11 +55,17 @@ pub(super) fn date_bound(
             changed = true;
             pulse = Some(turn.rect);
         }
-        let clear = chrome::icon_still(ui, "×").on_hover_text("clear date bound");
-        if clear.clicked() && next.is_some() {
-            next = None;
+        let icon = if next.is_some() { "×" } else { "+" };
+        let hint = if next.is_some() {
+            "clear date bound"
+        } else {
+            "arm date bound at today"
+        };
+        let action = chrome::icon_still(ui, icon).on_hover_text(hint);
+        if action.clicked() {
+            next = next.is_none().then(CreatedDay::today_utc);
             changed = true;
-            pulse = Some(clear.rect);
+            pulse = Some(action.rect);
         }
     });
     DateEdit {
@@ -94,26 +100,20 @@ fn chronometer(
         .ctx()
         .pointer_latest_pos()
         .and_then(|pos| reel_at(pos, reels));
-    if response.clicked() && value.is_none() {
-        *value = Some(parts.day());
-        changed = true;
-    }
-    if response.hovered()
+    if active
+        && response.hovered()
         && let Some(reel) = hovered_reel
         && let Some(delta) = take_wheel(ui)
     {
-        *value = Some(parts.day());
+        let before = *value;
         let spin = delta_steps(delta);
         let mut over = false;
         for _ in 0..spin.steps {
             over |= !parts.spin(reel, spin.dir, year_max());
         }
-        changed = !over || *value != Some(parts.day());
         *value = Some(parts.day());
+        changed = before != *value;
         jolt(ui, id, reel, spin.dir, over);
-    }
-    if active || changed {
-        *value = Some(parts.day());
     }
     paint(ui, id, rect, reels, active || changed, parts);
     Turn { changed, rect }

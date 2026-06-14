@@ -12,7 +12,7 @@ use std::{
 use crate::{
     chrome,
     config::{Config, FilterConfig, FilterName, QueryConfig, SavedFilter, Slate, WaterMode},
-    date::DateRange,
+    date::{CreatedDay, DateRange},
     filter_bank::Bank,
     frost::{Cut, Veil},
     index::{CacheStats, Index, TagSuggestion},
@@ -266,7 +266,8 @@ impl Bayonet {
             .map_or_else(|| slate.query.tree.clone(), |filter| filter.tree.clone());
         query.sort_atoms();
         let sort = slate.sort;
-        let date_range = slate.dates.normalized();
+        let date_range = clean_dates(slate.dates);
+        let scrubbed_dates = date_range != slate.dates.normalized();
         let active_group = active_filter
             .as_ref()
             .and_then(|active| filters.get(active))
@@ -356,6 +357,9 @@ impl Bayonet {
             startup_probe: StartupProbe::from_env(),
         };
         startup("app.state.built");
+        if scrubbed_dates {
+            app.save_config();
+        }
         app.strike(true, AUTO_WARM_PAGES);
         startup("app.initial.reap.done");
         Ok(app)
@@ -510,7 +514,7 @@ impl Bayonet {
     }
 
     fn install_dates(&mut self, dates: DateRange) {
-        let dates = dates.normalized();
+        let dates = clean_dates(dates);
         if self.date_range == dates {
             return;
         }
@@ -1625,6 +1629,10 @@ fn consume_wheel(ctx: &egui::Context) {
             .retain(|event| !matches!(event, egui::Event::MouseWheel { .. }));
         input.smooth_scroll_delta = egui::Vec2::ZERO;
     });
+}
+
+fn clean_dates(dates: DateRange) -> DateRange {
+    dates.normalized().scrub_before(CreatedDay::booru_floor())
 }
 
 impl Drop for Bayonet {

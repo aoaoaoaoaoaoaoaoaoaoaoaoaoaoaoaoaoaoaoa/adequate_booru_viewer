@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const UNIX_EPOCH_DAY: i32 = 719_468;
+const BOORU_YEAR_MIN: i32 = 2005;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(try_from = "String", into = "String")]
@@ -60,6 +61,10 @@ impl CreatedDay {
         Self(days.min(u64::from(u32::MAX)) as u32)
     }
 
+    pub fn booru_floor() -> Self {
+        Self(days_from_civil(BOORU_YEAR_MIN, 1, 1) as u32)
+    }
+
     pub fn ymd(self) -> (i32, u32, u32) {
         civil_from_days(self.0 as i32)
     }
@@ -107,6 +112,14 @@ impl DateRange {
 
     pub fn active(self) -> bool {
         self.first.is_some() || self.last.is_some()
+    }
+
+    pub fn scrub_before(self, floor: CreatedDay) -> Self {
+        Self {
+            first: self.first.filter(|day| *day >= floor),
+            last: self.last.filter(|day| *day >= floor),
+        }
+        .normalized()
     }
 }
 
@@ -178,5 +191,19 @@ mod tests {
         .normalized();
         assert_eq!(range.first, Some(early));
         assert_eq!(range.last, Some(late));
+    }
+
+    #[test]
+    fn range_scrubs_pre_booru_ghosts() {
+        let ancient = CreatedDay::parse("2001-01-01").expect("ancient");
+        let live = CreatedDay::parse("2024-01-01").expect("live");
+        let range = DateRange {
+            first: Some(ancient),
+            last: Some(live),
+        }
+        .scrub_before(CreatedDay::booru_floor());
+
+        assert_eq!(range.first, None);
+        assert_eq!(range.last, Some(live));
     }
 }
