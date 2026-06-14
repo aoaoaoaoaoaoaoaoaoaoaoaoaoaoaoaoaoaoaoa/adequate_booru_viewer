@@ -88,6 +88,7 @@ struct Mask {
     shore_feather: f32,
     raft_rect: vec4f,
     raft_corners: vec4f,
+    floor_rect: vec4f,
 }
 
 struct Quiver { rect: vec4f, touch: vec4f }
@@ -359,9 +360,16 @@ fn composite(in: VsOut) -> @location(0) vec4f {
     let g = textureSample(sharp_tex, comp_samp, uv_g).g;
     let b = textureSample(sharp_tex, comp_samp, uv_b).b;
     let a = textureSample(sharp_tex, comp_samp, in.uv + lift_flow / size).a;
-    let raft_size = mask.raft_rect.zw - mask.raft_rect.xy;
-    let loading_gate = select(0.0, 1.0, min(raft_size.x, raft_size.y) > 1.0);
-    let floor_gate = shore_px * outside * (1.0 - viewer_wet) * loading_gate;
+    let floor_size = mask.floor_rect.zw - mask.floor_rect.xy;
+    let floor_zone = 1.0 - smoothstep(
+        -1.0,
+        1.0,
+        sd_cut(px, mask.floor_rect.xy, mask.floor_rect.zw, 0.0),
+    );
+    let floor_gate = shore_px
+        * outside
+        * (1.0 - viewer_wet)
+        * select(0.0, floor_zone, min(floor_size.x, floor_size.y) > 1.0);
     let floored = pool_floor(vec3f(r, g, b), px, water_flow, floor_gate);
     let sharp = vec4f(floored * mix(1.0, tint, outside), a);
 

@@ -24,7 +24,7 @@ pub const QUIVER_SLOTS: usize = 4;
 pub const BULGE_CEIL: f32 = 12.0;
 pub const TOUCH_SLOTS: usize = 12;
 
-const MASK_BYTES: u64 = 1648;
+const MASK_BYTES: u64 = 1664;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Brine {
@@ -176,6 +176,7 @@ pub struct Surge<'a> {
     pub scroll_tilt: f32,
     pub splashes: &'a [Splash],
     pub raft: Option<Raft>,
+    pub floor: egui::Rect,
     pub viewer: egui::Rect,
     pub touches: &'a [Touch],
     /// Keep the persistent solver ticking while old energy decays, even after
@@ -857,6 +858,12 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
         ]);
         lanes[408..412].copy_from_slice(&raft.corners);
     }
+    lanes[412..416].copy_from_slice(&[
+        surge.floor.min.x,
+        surge.floor.min.y,
+        surge.floor.max.x,
+        surge.floor.max.y,
+    ]);
     let mut bytes = [0_u8; MASK_BYTES as usize];
     for (slot, lane) in lanes.iter().enumerate() {
         bytes[slot * 4..slot * 4 + 4].copy_from_slice(&lane.to_le_bytes());

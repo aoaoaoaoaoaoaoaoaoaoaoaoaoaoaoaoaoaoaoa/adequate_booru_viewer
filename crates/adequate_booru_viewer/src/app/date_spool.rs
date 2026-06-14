@@ -103,7 +103,7 @@ fn chronometer(
     if active
         && response.hovered()
         && let Some(reel) = hovered_reel
-        && let Some(delta) = take_wheel(ui)
+        && let Some(delta) = wheel_delta(ui)
     {
         let before = *value;
         let spin = delta_steps(delta);
@@ -298,7 +298,7 @@ fn delta_steps(delta: f32) -> Spin {
     }
 }
 
-fn take_wheel(ui: &mut egui::Ui) -> Option<f32> {
+fn wheel_delta(ui: &egui::Ui) -> Option<f32> {
     let delta = ui.input(|input| {
         input
             .events
@@ -321,18 +321,6 @@ fn take_wheel(ui: &mut egui::Ui) -> Option<f32> {
     if delta == 0.0 {
         return None;
     }
-    ui.input_mut(|input| {
-        input.events.retain(|event| {
-            !matches!(
-                event,
-                egui::Event::MouseWheel {
-                    modifiers,
-                    ..
-                } if !modifiers.ctrl && !modifiers.command && !modifiers.alt
-            )
-        });
-        input.smooth_scroll_delta = egui::Vec2::ZERO;
-    });
     Some(delta)
 }
 

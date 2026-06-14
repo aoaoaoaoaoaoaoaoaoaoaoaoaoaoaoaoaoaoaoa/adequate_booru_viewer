@@ -3,7 +3,6 @@ use super::*;
 const CARD_W: f32 = 250.0;
 const CARD_H: f32 = 150.0;
 const DWELL: Duration = Duration::from_millis(180);
-const TILE: f32 = 31.0;
 
 #[derive(Clone, Copy)]
 enum EmptyState {
@@ -37,6 +36,7 @@ impl Bayonet {
         let age = now.saturating_duration_since(empty_since);
         if age < DWELL {
             self.loading_raft.hide();
+            self.floor_rect = egui::Rect::ZERO;
             ui.ctx().request_repaint_after(DWELL.saturating_sub(age));
             return;
         }
@@ -59,6 +59,7 @@ impl Bayonet {
             CARD_H.min((arena.height() - 24.0).max(96.0)),
         );
         let rect = egui::Rect::from_center_size(arena.center(), size);
+        self.floor_rect = arena;
         if state.raised() && self.water_mode.wet() {
             self.loading_raft.show(ui.ctx(), rect);
             self.arm_water();
@@ -75,7 +76,6 @@ impl Bayonet {
 
         let painter = ui.painter();
         let _fill = painter.rect_filled(rect, 2.0, chrome::SURFACE);
-        pool_tiles(painter, rect.shrink(9.0), state);
         let _stroke = painter.rect_stroke(
             rect,
             2.0,
@@ -88,33 +88,4 @@ impl Bayonet {
         let at = rect.center() - galley.size() * 0.5;
         let _text = painter.text(at, egui::Align2::LEFT_TOP, text, font, chrome::HOT);
     }
-}
-
-fn pool_tiles(painter: &egui::Painter, rect: egui::Rect, state: EmptyState) {
-    let glow = if state.draining() { 70 } else { 42 };
-    let grout = egui::Color32::from_rgba_unmultiplied(235, 197, 151, glow);
-    let shade = egui::Color32::from_rgba_unmultiplied(235, 197, 151, glow / 3);
-    let clip = painter.with_clip_rect(rect);
-    let mut x = rect.left() + TILE;
-    while x < rect.right() {
-        let _line = clip.line_segment(
-            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-            egui::Stroke::new(1.0, grout),
-        );
-        x += TILE;
-    }
-    let mut y = rect.top() + TILE;
-    while y < rect.bottom() {
-        let _line = clip.line_segment(
-            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-            egui::Stroke::new(1.0, grout),
-        );
-        y += TILE;
-    }
-    let _inner = clip.rect_stroke(
-        rect,
-        1.0,
-        egui::Stroke::new(1.0, shade),
-        egui::StrokeKind::Inside,
-    );
 }

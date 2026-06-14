@@ -217,6 +217,7 @@ impl Bayonet {
         f32,
         Vec<crate::frost::Splash>,
         Option<crate::frost::Raft>,
+        egui::Rect,
     ) {
         self.plunges
             .retain(|plunge| plunge.born.elapsed().as_secs_f32() <= PLUNGE_SOURCE_LIFE);
@@ -256,7 +257,13 @@ impl Bayonet {
                 }
                 raft
             });
-        (scale(surface), self.scroll_tilt, splashes, raft)
+        (
+            scale(surface),
+            self.scroll_tilt,
+            splashes,
+            raft,
+            scale(self.floor_rect),
+        )
     }
 
     pub fn frost_touches(

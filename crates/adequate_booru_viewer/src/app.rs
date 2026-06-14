@@ -217,6 +217,7 @@ pub struct Bayonet {
     water_until: Option<Instant>,
     viewer_pond: egui::Rect,
     water_rect: egui::Rect,
+    floor_rect: egui::Rect,
     water_mode: WaterMode,
     scroll: TrayTilt,
     thumb_cruise: ThumbCruise,
@@ -335,6 +336,7 @@ impl Bayonet {
             water_until: None,
             viewer_pond: egui::Rect::ZERO,
             water_rect: egui::Rect::ZERO,
+            floor_rect: egui::Rect::ZERO,
             water_mode: slate.water,
             scroll: TrayTilt::default(),
             thumb_cruise: ThumbCruise::default(),
@@ -1039,6 +1041,7 @@ impl Bayonet {
             self.empty_gallery(ui, arena);
         } else {
             self.empty_since = None;
+            self.floor_rect = egui::Rect::ZERO;
             self.loading_raft.hide();
         }
         self.prefetch_scroll_thumbs(

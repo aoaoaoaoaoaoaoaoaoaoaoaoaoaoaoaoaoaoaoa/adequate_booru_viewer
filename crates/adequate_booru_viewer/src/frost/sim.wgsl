@@ -46,6 +46,7 @@ struct Mask {
     shore_feather: f32,
     raft_rect: vec4f,
     raft_corners: vec4f,
+    floor_rect: vec4f,
 }
 
 struct Quiver { rect: vec4f, touch: vec4f }
