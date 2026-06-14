@@ -138,19 +138,21 @@ fn chronometer(
     if active
         && response.hovered()
         && let Some(reel) = hovered_reel
-        && let Some(spin) = wheel_spin(ui, id, reel)
+        && let Some(delta) = wheel_delta(ui)
     {
-        let before = *value;
-        let mut over = false;
-        for _ in 0..spin.steps {
-            over |= !parts.spin(reel, spin.dir, year_max());
-        }
-        *value = Some(parts.day());
-        changed = before != *value;
-        impulse = true;
-        impulse_rect = reel_rect(reels, reel);
-        jolt(ui, id, reel, spin.dir, over);
         swallow_wheel(ui);
+        if let Some(spin) = wheel_spin(ui, id, reel, delta) {
+            let before = *value;
+            let mut over = false;
+            for _ in 0..spin.steps {
+                over |= !parts.spin(reel, spin.dir, year_max());
+            }
+            *value = Some(parts.day());
+            changed = before != *value;
+            impulse = true;
+            impulse_rect = reel_rect(reels, reel);
+            jolt(ui, id, reel, spin.dir, over);
+        }
     } else if active && let Some((reel, spin)) = drag_spin(ui, id, &response, hovered_reel) {
         let before = *value;
         let mut over = false;
@@ -468,23 +470,32 @@ struct Spin {
     steps: u32,
 }
 
-fn wheel_spin(ui: &egui::Ui, id: &'static str, reel: Reel) -> Option<Spin> {
-    let delta = wheel_delta(ui)?;
+impl WheelTape {
+    fn turn(&mut self, delta: f32) -> Option<Spin> {
+        let shove = delta.clamp(-1.0, 1.0);
+        if shove.abs() <= f32::EPSILON {
+            return None;
+        }
+        if self.carry.abs() > f32::EPSILON && self.carry.signum() != shove.signum() {
+            self.carry = 0.0;
+        }
+        self.carry += shove;
+        if self.carry.abs() < 1.0 {
+            return None;
+        }
+        let dir = if self.carry < 0.0 { 1 } else { -1 };
+        self.carry = 0.0;
+        Some(Spin { dir, steps: 1 })
+    }
+}
+
+fn wheel_spin(ui: &egui::Ui, id: &'static str, reel: Reel, delta: f32) -> Option<Spin> {
     let key = egui::Id::new((id, reel as u8, "wheel-tape"));
     ui.ctx().data_mut(|data| {
         let mut wheel = data.get_temp::<WheelTape>(key).unwrap_or_default();
-        if wheel.carry.signum() != delta.signum() {
-            wheel.carry = 0.0;
-        }
-        wheel.carry += delta.clamp(-1.0, 1.0);
-        if wheel.carry.abs() < 1.0 {
-            let _old = data.insert_temp(key, wheel);
-            return None;
-        }
-        let dir = if wheel.carry < 0.0 { 1 } else { -1 };
-        wheel.carry = 0.0;
+        let spin = wheel.turn(delta);
         let _old = data.insert_temp(key, wheel);
-        Some(Spin { dir, steps: 1 })
+        spin
     })
 }
 
@@ -726,6 +737,30 @@ mod tests {
         };
         assert!(!parts.spin(Reel::Year, -1, 2026));
         assert_eq!(parts.year, YEAR_MIN);
+    }
+
+    #[test]
+    fn wheel_tape_turns_symmetrically() {
+        let mut wheel = WheelTape::default();
+        assert_eq!(wheel.turn(0.49).map(|spin| spin.dir), None);
+        assert_eq!(wheel.turn(0.51).map(|spin| spin.dir), Some(-1));
+        assert_eq!(wheel.turn(-0.49).map(|spin| spin.dir), None);
+        assert_eq!(wheel.turn(-0.51).map(|spin| spin.dir), Some(1));
+    }
+
+    #[test]
+    fn wheel_tape_discards_opposed_fractional_debt() {
+        let mut wheel = WheelTape::default();
+        assert!(wheel.turn(0.75).is_none());
+        assert!(wheel.turn(-0.40).is_none());
+        assert_eq!(wheel.turn(-0.60).map(|spin| spin.dir), Some(1));
+    }
+
+    #[test]
+    fn wheel_tape_caps_violent_ticks_to_one_notch() {
+        let mut wheel = WheelTape::default();
+        assert_eq!(wheel.turn(9.0).map(|spin| spin.dir), Some(-1));
+        assert!(wheel.turn(0.01).is_none());
     }
 
     #[test]
