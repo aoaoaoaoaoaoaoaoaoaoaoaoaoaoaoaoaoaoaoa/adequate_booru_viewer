@@ -279,16 +279,16 @@ impl Bayonet {
         let from = date_spool::date_bound(ui, "date-from", "FROM", next.first);
         if from.changed {
             next.first = from.value;
-            if let Some(rect) = from.pulse {
-                self.bump_plunge(rect);
-            }
+        }
+        if let Some(rect) = from.pulse {
+            self.bump_plunge(rect);
         }
         let to = date_spool::date_bound(ui, "date-to", "UNTIL", next.last);
         if to.changed {
             next.last = to.value;
-            if let Some(rect) = to.pulse {
-                self.bump_plunge(rect);
-            }
+        }
+        if let Some(rect) = to.pulse {
+            self.bump_plunge(rect);
         }
         if clean_dates(next) != self.date_range {
             self.install_dates(next);

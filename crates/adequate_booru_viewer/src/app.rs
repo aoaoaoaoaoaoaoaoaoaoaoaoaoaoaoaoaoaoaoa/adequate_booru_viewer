@@ -1653,7 +1653,9 @@ impl Bayonet {
             .resizable(false)
             .exact_size(chrome::INSPECTOR_WIDTH)
             .show_inside(ui, |ui| {
-                let _scroll = egui::ScrollArea::vertical()
+                let scroll_id = ui.make_persistent_id(egui::Id::new("filter-scroll"));
+                let scroll_before = egui::scroll_area::State::load(ui.ctx(), scroll_id);
+                let scroll = egui::ScrollArea::vertical()
                     .id_salt("filter-scroll")
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .auto_shrink([false, false])
@@ -1661,6 +1663,10 @@ impl Bayonet {
                         ui.add_space(ui.spacing().item_spacing.x);
                         self.left_panel(ui);
                     });
+                if date_spool::take_wheel_claim(&ctx) {
+                    scroll_before.unwrap_or_default().store(&ctx, scroll.id);
+                    ctx.request_repaint();
+                }
             });
         let prior = self.tag_menu.post_id();
         self.tag_menu_rect = None;

@@ -1,5 +1,6 @@
 use crate::{chrome, date::CreatedDay};
 
+const WHEEL_CLAIM: &str = "date-spool-wheel-claim";
 const YEAR_MIN: i32 = 2005;
 const STEP: f32 = 19.0;
 const H: f32 = 76.0;
@@ -38,6 +39,13 @@ struct Motion {
     frame: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct DragTape {
+    reel: Option<Reel>,
+    y: f32,
+    carry: f32,
+}
+
 pub(super) fn date_bound(
     ui: &mut egui::Ui,
     id: &'static str,
@@ -53,6 +61,8 @@ pub(super) fn date_bound(
         let turn = chronometer(ui, id, &mut next, width);
         if turn.changed {
             changed = true;
+        }
+        if turn.impulse {
             pulse = Some(turn.rect);
         }
         let icon = if next.is_some() { "×" } else { "+" };
@@ -78,7 +88,15 @@ pub(super) fn date_bound(
 #[derive(Clone, Copy, Debug)]
 struct Turn {
     changed: bool,
+    impulse: bool,
     rect: egui::Rect,
+}
+
+pub(super) fn take_wheel_claim(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|data| {
+        data.remove_temp::<bool>(egui::Id::new(WHEEL_CLAIM))
+            .unwrap_or(false)
+    })
 }
 
 fn chronometer(
@@ -89,9 +107,8 @@ fn chronometer(
 ) -> Turn {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(width.min(ui.available_width()), H),
-        egui::Sense::click(),
+        egui::Sense::click_and_drag(),
     );
-    chrome::shallow_tension(ui, &response);
     let active = value.is_some();
     let mut parts = value.map_or_else(today_parts, |day| day.ymd().into());
     let mut changed = false;
@@ -100,6 +117,7 @@ fn chronometer(
         .ctx()
         .pointer_latest_pos()
         .and_then(|pos| reel_at(pos, reels));
+    let mut impulse = false;
     if active
         && response.hovered()
         && let Some(reel) = hovered_reel
@@ -113,10 +131,26 @@ fn chronometer(
         }
         *value = Some(parts.day());
         changed = before != *value;
+        impulse = true;
+        jolt(ui, id, reel, spin.dir, over);
+        swallow_wheel(ui);
+    } else if active && let Some((reel, spin)) = drag_spin(ui, id, &response, hovered_reel) {
+        let before = *value;
+        let mut over = false;
+        for _ in 0..spin.steps {
+            over |= !parts.spin(reel, spin.dir, year_max());
+        }
+        *value = Some(parts.day());
+        changed = before != *value;
+        impulse = true;
         jolt(ui, id, reel, spin.dir, over);
     }
     paint(ui, id, rect, reels, active || changed, parts);
-    Turn { changed, rect }
+    Turn {
+        changed,
+        impulse,
+        rect,
+    }
 }
 
 fn paint(
@@ -218,21 +252,18 @@ fn roller(ui: &egui::Ui, rect: egui::Rect, top: bool) {
 fn pointer(ui: &egui::Ui, rect: egui::Rect, color: egui::Color32) {
     let painter = ui.painter();
     let cy = rect.center().y;
-    let left = vec![
-        egui::pos2(rect.left() - 2.0, cy - 7.0),
-        egui::pos2(rect.left() + 7.0, cy - 3.5),
-        egui::pos2(rect.left() + 7.0, cy + 3.5),
-        egui::pos2(rect.left() - 2.0, cy + 7.0),
+    let half_base = 4.9;
+    let half_tip = half_base * 0.075;
+    let base = rect.right() + 1.0;
+    let tip = rect.right() - 8.0;
+    let needle = vec![
+        egui::pos2(base, cy - half_base),
+        egui::pos2(base, cy + half_base),
+        egui::pos2(tip, cy + half_tip),
+        egui::pos2(tip, cy - half_tip),
     ];
-    let right = vec![
-        egui::pos2(rect.right() + 2.0, cy - 7.0),
-        egui::pos2(rect.right() - 7.0, cy - 3.5),
-        egui::pos2(rect.right() - 7.0, cy + 3.5),
-        egui::pos2(rect.right() + 2.0, cy + 7.0),
-    ];
-    let _left = painter.add(egui::Shape::convex_polygon(left, color, egui::Stroke::NONE));
-    let _right = painter.add(egui::Shape::convex_polygon(
-        right,
+    let _needle = painter.add(egui::Shape::convex_polygon(
+        needle,
         color,
         egui::Stroke::NONE,
     ));
@@ -298,9 +329,55 @@ fn delta_steps(delta: f32) -> Spin {
     }
 }
 
+fn drag_spin(
+    ui: &egui::Ui,
+    id: &'static str,
+    response: &egui::Response,
+    hovered_reel: Option<Reel>,
+) -> Option<(Reel, Spin)> {
+    const QUANTUM: f32 = 11.0;
+    let key = egui::Id::new((id, "drag-tape"));
+    ui.ctx().data_mut(|data| {
+        if response.drag_stopped() {
+            let _old = data.remove_temp::<DragTape>(key);
+            return None;
+        }
+        if !response.dragged() {
+            return None;
+        }
+        let y = response.drag_delta().y;
+        let mut drag = data.get_temp::<DragTape>(key).unwrap_or(DragTape {
+            reel: hovered_reel,
+            y,
+            carry: 0.0,
+        });
+        if drag.reel.is_none() {
+            drag.reel = hovered_reel;
+        }
+        let reel = drag.reel?;
+        drag.carry += y - drag.y;
+        drag.y = y;
+        let steps = (drag.carry.abs() / QUANTUM).floor() as u32;
+        if steps == 0 {
+            let _old = data.insert_temp(key, drag);
+            return None;
+        }
+        let slip = drag.carry.signum() * steps as f32 * QUANTUM;
+        drag.carry -= slip;
+        let _old = data.insert_temp(key, drag);
+        Some((
+            reel,
+            Spin {
+                dir: if slip < 0.0 { 1 } else { -1 },
+                steps: steps.min(16),
+            },
+        ))
+    })
+}
+
 fn wheel_delta(ui: &egui::Ui) -> Option<f32> {
-    let delta = ui.input(|input| {
-        input
+    let (raw, smooth) = ui.input(|input| {
+        let raw = input
             .events
             .iter()
             .filter_map(|event| match event {
@@ -316,17 +393,41 @@ fn wheel_delta(ui: &egui::Ui) -> Option<f32> {
                 }),
                 _ => None,
             })
-            .sum::<f32>()
+            .sum::<f32>();
+        (raw, input.smooth_scroll_delta.y)
     });
+    let delta = if raw.abs() > f32::EPSILON {
+        raw
+    } else {
+        smooth
+    };
     if delta == 0.0 {
         return None;
     }
     Some(delta)
 }
 
+fn swallow_wheel(ui: &egui::Ui) {
+    ui.ctx().input_mut(|input| {
+        input.events.retain(|event| {
+            !matches!(
+                event,
+                egui::Event::MouseWheel {
+                    modifiers,
+                    ..
+                } if !modifiers.ctrl && !modifiers.command && !modifiers.alt
+            )
+        });
+        input.smooth_scroll_delta.y = 0.0;
+    });
+    ui.ctx().data_mut(|data| {
+        let _old = data.insert_temp(egui::Id::new(WHEEL_CLAIM), true);
+    });
+}
+
 fn settle(ui: &egui::Ui, id: egui::Id) -> Motion {
     let frame = ui.ctx().cumulative_frame_nr();
-    ui.ctx().data_mut(|data| {
+    let motion = ui.ctx().data_mut(|data| {
         let mut motion = data.get_temp::<Motion>(id).unwrap_or(Motion {
             frame,
             ..Motion::default()
@@ -337,12 +438,13 @@ fn settle(ui: &egui::Ui, id: egui::Id) -> Motion {
             motion.strain *= 0.78_f32.powf(dt);
             motion.frame = frame;
         }
-        if motion.kick.abs() > 0.01 || motion.strain.abs() > 0.01 {
-            ui.ctx().request_repaint();
-        }
         let _old = data.insert_temp(id, motion);
         motion
-    })
+    });
+    if motion.kick.abs() > 0.01 || motion.strain.abs() > 0.01 {
+        ui.ctx().request_repaint();
+    }
+    motion
 }
 
 fn jolt(ui: &egui::Ui, id: &'static str, reel: Reel, dir: i32, over: bool) {
@@ -474,5 +576,34 @@ mod tests {
         };
         assert!(!parts.spin(Reel::Year, -1, 2026));
         assert_eq!(parts.year, YEAR_MIN);
+    }
+
+    #[test]
+    fn settling_motion_does_not_reenter_context_lock() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("armed-spool-motion");
+        ctx.data_mut(|data| {
+            let _old = data.insert_temp(
+                id,
+                Motion {
+                    kick: 1.0,
+                    strain: 0.0,
+                    frame: 0,
+                },
+            );
+        });
+        let _output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(320.0, 180.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let motion = settle(ui, id);
+                assert!(motion.kick > 0.01);
+            },
+        );
     }
 }
