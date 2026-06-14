@@ -7,6 +7,11 @@ const H: f32 = 76.0;
 const LIP: f32 = 9.0;
 const PAD: f32 = 12.0;
 const REEL_GAP: f32 = 12.0;
+const TAPE_GAP: f32 = 3.0;
+const TAPE_EDGE: egui::Color32 = egui::Color32::from_rgb(91, 73, 47);
+const TAPE_FACE: egui::Color32 = egui::Color32::from_rgb(39, 32, 22);
+const TAPE_FACE_DIM: egui::Color32 = egui::Color32::from_rgb(26, 22, 17);
+const WELL: egui::Color32 = egui::Color32::from_rgb(8, 7, 6);
 const MONTHS: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
 ];
@@ -15,10 +20,16 @@ const MONTHS: [&str; 12] = [
 pub(super) struct DateEdit {
     pub value: Option<CreatedDay>,
     pub changed: bool,
-    pub pulse: Option<egui::Rect>,
+    pub pulse: Option<DatePulse>,
 }
 
 #[derive(Clone, Copy, Debug)]
+pub(super) enum DatePulse {
+    Tape(egui::Rect),
+    Button(egui::Rect),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Reel {
     Year,
     Month,
@@ -46,6 +57,11 @@ struct DragTape {
     carry: f32,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct WheelTape {
+    carry: f32,
+}
+
 pub(super) fn date_bound(
     ui: &mut egui::Ui,
     id: &'static str,
@@ -63,7 +79,7 @@ pub(super) fn date_bound(
             changed = true;
         }
         if turn.impulse {
-            pulse = Some(turn.rect);
+            pulse = Some(DatePulse::Tape(turn.rect));
         }
         let icon = if next.is_some() { "×" } else { "+" };
         let hint = if next.is_some() {
@@ -75,7 +91,7 @@ pub(super) fn date_bound(
         if action.clicked() {
             next = next.is_none().then(CreatedDay::today_utc);
             changed = true;
-            pulse = Some(action.rect);
+            pulse = Some(DatePulse::Button(action.rect));
         }
     });
     DateEdit {
@@ -118,13 +134,13 @@ fn chronometer(
         .pointer_latest_pos()
         .and_then(|pos| reel_at(pos, reels));
     let mut impulse = false;
+    let mut impulse_rect = rect;
     if active
         && response.hovered()
         && let Some(reel) = hovered_reel
-        && let Some(delta) = wheel_delta(ui)
+        && let Some(spin) = wheel_spin(ui, id, reel)
     {
         let before = *value;
-        let spin = delta_steps(delta);
         let mut over = false;
         for _ in 0..spin.steps {
             over |= !parts.spin(reel, spin.dir, year_max());
@@ -132,6 +148,7 @@ fn chronometer(
         *value = Some(parts.day());
         changed = before != *value;
         impulse = true;
+        impulse_rect = reel_rect(reels, reel);
         jolt(ui, id, reel, spin.dir, over);
         swallow_wheel(ui);
     } else if active && let Some((reel, spin)) = drag_spin(ui, id, &response, hovered_reel) {
@@ -143,13 +160,14 @@ fn chronometer(
         *value = Some(parts.day());
         changed = before != *value;
         impulse = true;
+        impulse_rect = reel_rect(reels, reel);
         jolt(ui, id, reel, spin.dir, over);
     }
     paint(ui, id, rect, reels, active || changed, parts);
     Turn {
         changed,
         impulse,
-        rect,
+        rect: impulse_rect,
     }
 }
 
@@ -191,14 +209,33 @@ fn draw_reel(
         egui::Stroke::new(1.0, chrome::EDGE)
     };
     let _socket = painter.rect_filled(rect, 1.0, chrome::SURFACE);
-    let _stroke = painter.rect_stroke(rect, 1.0, stroke, egui::StrokeKind::Inside);
+    let well = well_rect(rect);
+    let strip = tape_rect(rect);
+    let face = if active { TAPE_FACE } else { TAPE_FACE_DIM };
+    let _well = painter.rect_filled(well, 1.0, WELL);
+    let _tape = painter.rect_filled(strip, 1.0, face);
+    let _left_edge = painter.line_segment(
+        [
+            egui::pos2(strip.left(), strip.top() + 1.0),
+            egui::pos2(strip.left(), strip.bottom() - 1.0),
+        ],
+        egui::Stroke::new(1.0, TAPE_EDGE),
+    );
+    let _right_edge = painter.line_segment(
+        [
+            egui::pos2(strip.right(), strip.top() + 1.0),
+            egui::pos2(strip.right(), strip.bottom() - 1.0),
+        ],
+        egui::Stroke::new(1.0, TAPE_EDGE),
+    );
     if matches!(reel, Reel::Year) {
-        hatch(painter, rect, motion.strain);
+        let hatched = painter.with_clip_rect(strip);
+        hatch(&hatched, strip, motion.strain);
     }
-    let clip = rect.shrink2(egui::vec2(1.0, LIP));
-    let tape = painter.with_clip_rect(clip);
-    for lane in -3..=3 {
-        let y = rect.center().y + lane as f32 * STEP + motion.kick * STEP + motion.strain * 5.0;
+    for lane in -4..=4 {
+        let Some(view) = LaneView::project(strip, lane, motion) else {
+            continue;
+        };
         let text = if active {
             label(reel, parts, lane)
         } else if lane == 0 {
@@ -206,29 +243,119 @@ fn draw_reel(
         } else {
             String::new()
         };
-        let color = if lane == 0 {
+        let ink = if lane == 0 {
             hot
         } else {
             chrome::MUTED.gamma_multiply(0.65)
         };
-        let _glyph = tape.text(
-            egui::pos2(rect.center().x, y),
-            egui::Align2::CENTER_CENTER,
-            text,
+        cylindrical_text(
+            ui,
+            strip,
+            egui::pos2(strip.center().x, view.y),
             egui::FontId::new(
                 if matches!(reel, Reel::Year) {
                     12.0
                 } else {
                     13.0
-                },
+                } * view.scale,
                 egui::FontFamily::Monospace,
             ),
-            color,
+            &text,
+            ink,
         );
     }
-    roller(ui, rect, true);
-    roller(ui, rect, false);
+    roller(ui, well, true);
+    roller(ui, well, false);
+    let _stroke = painter.rect_stroke(rect, 1.0, stroke, egui::StrokeKind::Inside);
     pointer(ui, rect, hot);
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LaneView {
+    y: f32,
+    scale: f32,
+}
+
+impl LaneView {
+    fn project(rect: egui::Rect, lane: i32, motion: Motion) -> Option<Self> {
+        let r = (rect.height() - 2.0 * LIP) * 0.58;
+        let theta = (lane as f32 * STEP + motion.kick * STEP + motion.strain * 5.0) / r;
+        if theta.abs() > 1.48 {
+            return None;
+        }
+        let face = theta.cos().max(0.0);
+        Some(Self {
+            y: rect.center().y + theta.sin() * r,
+            scale: 0.62 + 0.38 * face,
+        })
+    }
+}
+
+fn cylindrical_text(
+    ui: &egui::Ui,
+    strip: egui::Rect,
+    center: egui::Pos2,
+    font: egui::FontId,
+    text: &str,
+    color: egui::Color32,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let painter = ui.painter().with_clip_rect(strip);
+    let Some(mut shape) = painter.fonts_mut(|fonts| {
+        match egui::Shape::text(
+            fonts,
+            center,
+            egui::Align2::CENTER_CENTER,
+            text,
+            font,
+            color,
+        ) {
+            egui::Shape::Text(text) => Some(text),
+            _ => None,
+        }
+    }) else {
+        return;
+    };
+    bend_text(strip, &mut shape);
+    let _glyphs = painter.add(shape);
+}
+
+fn bend_text(strip: egui::Rect, shape: &mut egui::epaint::TextShape) {
+    let center = strip.center().y;
+    let r = strip.height() * 0.62;
+    let galley = std::sync::Arc::make_mut(&mut shape.galley);
+    galley.mesh_bounds = egui::Rect::NOTHING;
+    galley.rect = egui::Rect::NOTHING;
+    for row in &mut galley.rows {
+        let row_pos = row.pos;
+        let row = std::sync::Arc::make_mut(&mut row.row);
+        let mut bounds = egui::Rect::NOTHING;
+        for vertex in &mut row.visuals.mesh.vertices {
+            let local = row_pos + vertex.pos.to_vec2();
+            let world = shape.pos + local.to_vec2();
+            let theta = ((world.y - center) / r).clamp(-1.43, 1.43);
+            let face = theta.cos().max(0.08);
+            let bowed = egui::pos2(
+                strip.center().x + (world.x - strip.center().x) * (0.72 + 0.28 * face),
+                center + theta.sin() * r,
+            );
+            vertex.pos = (bowed - shape.pos - row_pos.to_vec2()).to_pos2();
+            bounds.extend_with(vertex.pos);
+        }
+        if !bounds.is_positive() {
+            continue;
+        }
+        row.visuals.mesh_bounds = bounds;
+        galley
+            .mesh_bounds
+            .extend_with(row_pos + bounds.min.to_vec2());
+        galley
+            .mesh_bounds
+            .extend_with(row_pos + bounds.max.to_vec2());
+    }
+    galley.rect = galley.mesh_bounds;
 }
 
 fn roller(ui: &egui::Ui, rect: egui::Rect, top: bool) {
@@ -310,10 +437,29 @@ fn reel_rects(rect: egui::Rect) -> [(Reel, egui::Rect); 3] {
     [(Reel::Year, year), (Reel::Month, month), (Reel::Day, day)]
 }
 
+fn well_rect(rect: egui::Rect) -> egui::Rect {
+    rect.shrink2(egui::vec2(3.0, 4.0))
+}
+
+fn aperture_rect(rect: egui::Rect) -> egui::Rect {
+    well_rect(rect).shrink2(egui::vec2(1.0, LIP))
+}
+
+fn tape_rect(rect: egui::Rect) -> egui::Rect {
+    aperture_rect(rect).shrink2(egui::vec2(TAPE_GAP, TAPE_GAP))
+}
+
 fn reel_at(pos: egui::Pos2, reels: [(Reel, egui::Rect); 3]) -> Option<Reel> {
     reels
         .into_iter()
         .find_map(|(reel, rect)| rect.expand(3.0).contains(pos).then_some(reel))
+}
+
+fn reel_rect(reels: [(Reel, egui::Rect); 3], needle: Reel) -> egui::Rect {
+    reels
+        .into_iter()
+        .find_map(|(reel, rect)| (reel == needle).then_some(tape_rect(rect)))
+        .unwrap_or(egui::Rect::NOTHING)
 }
 
 #[derive(Clone, Copy)]
@@ -322,11 +468,24 @@ struct Spin {
     steps: u32,
 }
 
-fn delta_steps(delta: f32) -> Spin {
-    Spin {
-        dir: if delta < 0.0 { 1 } else { -1 },
-        steps: ((delta.abs() / 72.0).round() as u32).clamp(1, 16),
-    }
+fn wheel_spin(ui: &egui::Ui, id: &'static str, reel: Reel) -> Option<Spin> {
+    let delta = wheel_delta(ui)?;
+    let key = egui::Id::new((id, reel as u8, "wheel-tape"));
+    ui.ctx().data_mut(|data| {
+        let mut wheel = data.get_temp::<WheelTape>(key).unwrap_or_default();
+        if wheel.carry.signum() != delta.signum() {
+            wheel.carry = 0.0;
+        }
+        wheel.carry += delta.clamp(-1.0, 1.0);
+        if wheel.carry.abs() < 1.0 {
+            let _old = data.insert_temp(key, wheel);
+            return None;
+        }
+        let dir = if wheel.carry < 0.0 { 1 } else { -1 };
+        wheel.carry = 0.0;
+        let _old = data.insert_temp(key, wheel);
+        Some(Spin { dir, steps: 1 })
+    })
 }
 
 fn drag_spin(
@@ -376,8 +535,8 @@ fn drag_spin(
 }
 
 fn wheel_delta(ui: &egui::Ui) -> Option<f32> {
-    let (raw, smooth) = ui.input(|input| {
-        let raw = input
+    let delta = ui.input(|input| {
+        input
             .events
             .iter()
             .filter_map(|event| match event {
@@ -387,24 +546,15 @@ fn wheel_delta(ui: &egui::Ui) -> Option<f32> {
                     modifiers,
                     ..
                 } if !modifiers.ctrl && !modifiers.command && !modifiers.alt => Some(match unit {
-                    egui::MouseWheelUnit::Point => delta.y,
-                    egui::MouseWheelUnit::Line => delta.y * 72.0,
-                    egui::MouseWheelUnit::Page => delta.y * 240.0,
+                    egui::MouseWheelUnit::Point => delta.y / 80.0,
+                    egui::MouseWheelUnit::Line => delta.y / 3.0,
+                    egui::MouseWheelUnit::Page => delta.y.signum(),
                 }),
                 _ => None,
             })
-            .sum::<f32>();
-        (raw, input.smooth_scroll_delta.y)
+            .sum::<f32>()
     });
-    let delta = if raw.abs() > f32::EPSILON {
-        raw
-    } else {
-        smooth
-    };
-    if delta == 0.0 {
-        return None;
-    }
-    Some(delta)
+    (delta.abs() > f32::EPSILON).then_some(delta)
 }
 
 fn swallow_wheel(ui: &egui::Ui) {

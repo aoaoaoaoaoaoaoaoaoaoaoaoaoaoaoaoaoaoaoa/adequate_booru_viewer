@@ -3,6 +3,7 @@ use super::*;
 const PLUNGE_SOURCE_LIFE: f32 = 0.24;
 const TOOLTIP_GRIP: f32 = 0.72;
 const HOVER_BUMP_AMP: f32 = 0.18;
+const TAPE_WAKE_AMP: f32 = 0.055;
 const GROUP_SELECT_AMP: f32 = 0.45;
 const FOLD_OPEN_AMP: f32 = -0.72;
 const FOLD_CLOSE_AMP: f32 = 0.92;
@@ -158,6 +159,10 @@ impl Bayonet {
 
     pub(super) fn bump_plunge(&mut self, rect: egui::Rect) {
         self.plunge(rect, HOVER_BUMP_AMP);
+    }
+
+    pub(super) fn tape_plunge(&mut self, rect: egui::Rect) {
+        self.plunge(rect, TAPE_WAKE_AMP);
     }
 
     pub(super) fn group_plunge(&mut self, rect: egui::Rect) {

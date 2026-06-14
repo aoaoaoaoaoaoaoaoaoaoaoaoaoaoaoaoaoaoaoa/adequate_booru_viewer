@@ -280,18 +280,25 @@ impl Bayonet {
         if from.changed {
             next.first = from.value;
         }
-        if let Some(rect) = from.pulse {
-            self.bump_plunge(rect);
+        if let Some(pulse) = from.pulse {
+            self.date_plunge(pulse);
         }
         let to = date_spool::date_bound(ui, "date-to", "UNTIL", next.last);
         if to.changed {
             next.last = to.value;
         }
-        if let Some(rect) = to.pulse {
-            self.bump_plunge(rect);
+        if let Some(pulse) = to.pulse {
+            self.date_plunge(pulse);
         }
         if clean_dates(next) != self.date_range {
             self.install_dates(next);
+        }
+    }
+
+    fn date_plunge(&mut self, pulse: date_spool::DatePulse) {
+        match pulse {
+            date_spool::DatePulse::Tape(rect) => self.tape_plunge(rect),
+            date_spool::DatePulse::Button(rect) => self.bump_plunge(rect),
         }
     }
 
