@@ -1,0 +1,96 @@
+# 05 viewer — open the umbrella girl (#7062514) by post-id anchor, tap a few
+# water rings, Tab the tag menu, require `animal_on_shoulder`, drop `1girl`,
+# escape. Entry: seg-04 seam. Seam out: viewer closed, query mutated, scroll top.
+#
+# The tile is resolved by post-id regardless of grid position; the tag rows are
+# named anchors. If #7062514 is absent (a partial index), the tile resolve fails
+# loudly — that is the determinism contract, not a silent miss.
+
+[[steps]]
+action = "wait"
+ms = 500
+
+# open the umbrella girl
+[[steps]]
+action = "tap"
+target = "tile:7062514"
+ms = 320
+
+[[steps]]
+action = "wait"
+ms = 900
+
+# a few water rings on the open image
+[[steps]]
+action = "tap"
+target = "viewer:image"
+ms = 240
+
+[[steps]]
+action = "wait"
+ms = 500
+
+[[steps]]
+action = "move"
+x = 820
+y = 540
+ms = 260
+
+[[steps]]
+action = "click"
+
+[[steps]]
+action = "wait"
+ms = 600
+
+# open the viewer tag menu
+[[steps]]
+action = "key"
+value = "Tab"
+
+[[steps]]
+action = "wait"
+ms = 800
+
+# hover and read `animal_on_shoulder`, dwell, then require it
+[[steps]]
+action = "point"
+target = "tagrow:animal_on_shoulder:require"
+ms = 320
+
+[[steps]]
+action = "wait"
+ms = 800
+
+[[steps]]
+action = "click"
+
+[[steps]]
+action = "wait"
+ms = 1250
+
+# hover and read `1girl`, dwell, then drop it
+[[steps]]
+action = "point"
+target = "tagrow:1girl:remove"
+ms = 300
+
+[[steps]]
+action = "wait"
+ms = 800
+
+[[steps]]
+action = "click"
+
+[[steps]]
+action = "wait"
+ms = 1300
+
+# close the viewer
+[[steps]]
+action = "key"
+value = "Escape"
+
+[[steps]]
+action = "wait"
+ms = 800

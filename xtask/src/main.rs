@@ -39,6 +39,7 @@ struct WetDemo {
     build: BuildMode,
     run: RunMode,
     camp: CampPolicy,
+    mode: Mode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,6 +66,21 @@ enum CampPolicy {
     Keep,
 }
 
+/// Which slice of the choreography this invocation drives.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Mode {
+    /// The final take: every segment back-to-back from segment 1's entry
+    /// state, one continuous recording (so the waves never reset).
+    Continuous,
+    /// One segment in isolation from its own entry state — the fast iteration
+    /// loop for tuning a single beat's mouse work.
+    Segment(String),
+    /// Replay every segment in order and, at each seam, snapshot the app's live
+    /// slate+config into the next segment's entry state. Regenerates entry
+    /// states from the app's own writer; this is the state-faithfulness test.
+    Scaffold,
+}
+
 impl WetDemo {
     fn parse() -> Result<Self> {
         let mut args = env::args().skip(2);
@@ -78,9 +94,12 @@ impl WetDemo {
         let mut build = BuildMode::Fresh;
         let mut run = RunMode::Record;
         let mut camp = CampPolicy::Clean;
+        let mut mode = Mode::Continuous;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--out" => out = Some(PathBuf::from(take(&mut args, "--out")?)),
+                "--segment" => mode = Mode::Segment(take(&mut args, "--segment")?),
+                "--scaffold" => mode = Mode::Scaffold,
                 "--display" => display = Some(take(&mut args, "--display")?),
                 "--width" => {
                     width = take(&mut args, "--width")?
@@ -99,7 +118,7 @@ impl WetDemo {
                 "--keep-temp" => camp = CampPolicy::Keep,
                 "--help" | "-h" => {
                     println!(
-                        "cargo xtask wet-demo [--out PATH] [--display :97] [--live-display] [--skip-build] [--dry-run]"
+                        "cargo xtask wet-demo [--out PATH] [--segment NAME | --scaffold] [--display :97] [--live-display] [--skip-build] [--dry-run]"
                     );
                     std::process::exit(0);
                 }
@@ -117,6 +136,7 @@ impl WetDemo {
             build,
             run,
             camp,
+            mode,
         })
     }
 
@@ -125,36 +145,38 @@ impl WetDemo {
         if self.stage == Stage::Xvfb {
             tools(["Xvfb", "xdpyinfo"])?;
         }
-        let timeline = Timeline::load(&self.root.join(DEMO).join("timeline.toml"))?;
+        let demo = self.root.join(DEMO);
+        let manifest = Manifest::load(&demo.join("segments.toml"))?;
+        let plan = self.plan(&manifest, &demo)?;
         if self.run == RunMode::Dry {
-            println!(
-                "wet-demo: {} scripted steps, {} ms choreography",
-                timeline.steps.len(),
-                timeline.duration().as_millis()
-            );
+            self.report_plan(&plan);
             return Ok(());
         }
         if self.build == BuildMode::Fresh {
+            // The demo drives named anchor targets, which the app only emits
+            // under `devtools`. Shipped builds never carry this.
             run(
                 "cargo",
-                ["build", "--release", "--bin", "abv"],
+                [
+                    "build",
+                    "--release",
+                    "--bin",
+                    "abv",
+                    "--features",
+                    "devtools",
+                ],
                 &[],
                 &self.root,
             )?;
         }
         let meta = CargoMeta::read(&self.root)?;
         let binary = bin_path(&meta.target_directory);
-        let out = self
-            .out
-            .unwrap_or_else(|| meta.target_directory.join("demo").join("abv-wet-demo.mp4"));
-        if let Some(parent) = out.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        }
-        let camp = Camp::raise(&self.root, self.camp)?;
+        let entry = Self::entry_paths(&demo, &manifest, plan[0].index);
+        let camp = Camp::raise(self.camp, &entry)?;
         let display = if self.stage == Stage::LiveDisplay {
             env::var("DISPLAY").context("DISPLAY is required with --live-display")?
         } else {
-            self.display.unwrap_or_else(|| ":97".to_owned())
+            self.display.clone().unwrap_or_else(|| ":97".to_owned())
         };
         let mut xvfb = if self.stage == Stage::LiveDisplay {
             None
@@ -177,15 +199,186 @@ impl WetDemo {
             ],
         )?;
         xdotool(&display, ["windowfocus", "--sync", &window])?;
-        let runtime = timeline.duration() + Duration::from_secs(2);
-        let mut ffmpeg =
-            Recorder::raise(&display, self.width, self.height, self.fps, runtime, &out)?;
-        timeline.play(&display, &window)?;
-        ffmpeg.finish(Duration::from_secs(5))?;
+        let probe = Probe::new(camp.probe_path());
+        match &self.mode {
+            Mode::Scaffold => {
+                Self::scaffold(&plan, &manifest, &demo, &camp, &display, &window, &probe)?;
+            }
+            Mode::Continuous | Mode::Segment(_) => {
+                self.record(&plan, &meta.target_directory, &display, &window, &probe)?;
+            }
+        }
         app.terminate()?;
+        Ok(())
+    }
+
+    /// Resolve the segments this invocation will drive: one for `--segment`,
+    /// the whole manifest for continuous/scaffold.
+    fn plan(&self, manifest: &Manifest, demo: &Path) -> Result<Vec<Segment>> {
+        let load = |index: usize, name: &str| -> Result<Segment> {
+            let timeline = Timeline::load(&fragment_path(demo, name))?;
+            Ok(Segment {
+                name: name.to_owned(),
+                index,
+                timeline,
+            })
+        };
+        match &self.mode {
+            Mode::Segment(name) => {
+                let index = manifest
+                    .order
+                    .iter()
+                    .position(|other| other == name)
+                    .with_context(|| format!("no segment `{name}` in manifest"))?;
+                Ok(vec![load(index, name)?])
+            }
+            Mode::Continuous | Mode::Scaffold => manifest
+                .order
+                .iter()
+                .enumerate()
+                .map(|(index, name)| load(index, name))
+                .collect(),
+        }
+    }
+
+    /// Segment 0's entry is the hand-authored base (`demo/wet/{config,slate}`);
+    /// every later segment's entry is regenerated under `segments/` by scaffold.
+    fn entry_paths(demo: &Path, manifest: &Manifest, index: usize) -> EntryState {
+        if index == 0 {
+            EntryState {
+                config: demo.join("config.toml"),
+                slate: demo.join("slate.toml"),
+            }
+        } else {
+            let name = &manifest.order[index];
+            EntryState {
+                config: demo.join(SEGMENTS).join(format!("{name}.config.toml")),
+                slate: demo.join(SEGMENTS).join(format!("{name}.slate.toml")),
+            }
+        }
+    }
+
+    fn report_plan(&self, plan: &[Segment]) {
+        let mut total = Duration::ZERO;
+        for segment in plan {
+            let span = segment.timeline.duration();
+            total += span;
+            println!(
+                "  {:>2} {:<18} {:>3} steps  {:>6} ms",
+                segment.index,
+                segment.name,
+                segment.timeline.steps.len(),
+                span.as_millis()
+            );
+        }
+        println!(
+            "wet-demo {:?}: {} segment(s), {} ms choreography",
+            self.mode,
+            plan.len(),
+            total.as_millis()
+        );
+    }
+
+    /// Play the planned segments back-to-back into one recording. Continuous
+    /// mode plays the whole manifest from segment 0's entry; `--segment` plays
+    /// the single planned fragment from its own entry.
+    fn record(
+        &self,
+        plan: &[Segment],
+        target: &Path,
+        display: &str,
+        window: &str,
+        probe: &Probe,
+    ) -> Result<()> {
+        let out = self.out.clone().unwrap_or_else(|| {
+            let stem = match &self.mode {
+                Mode::Segment(name) => format!("abv-wet-segment-{name}.mp4"),
+                _ => "abv-wet-demo.mp4".to_owned(),
+            };
+            target.join("demo").join(stem)
+        });
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+        let span: Duration = plan.iter().map(|segment| segment.timeline.duration()).sum();
+        let runtime = span + Duration::from_secs(2);
+        let mut ffmpeg =
+            Recorder::raise(display, self.width, self.height, self.fps, runtime, &out)?;
+        for segment in plan {
+            segment.timeline.play(display, window, probe)?;
+        }
+        ffmpeg.finish(Duration::from_secs(5))?;
         println!("wet demo: {}", out.display());
         Ok(())
     }
+
+    /// Play every segment continuously and, at each seam, snapshot the app's
+    /// live slate+config into the next segment's entry state. The app is the
+    /// sole author of those files, so a divergence between a `--segment` replay
+    /// and this continuous run is a hole in our serialization.
+    fn scaffold(
+        plan: &[Segment],
+        manifest: &Manifest,
+        demo: &Path,
+        camp: &Camp,
+        display: &str,
+        window: &str,
+        probe: &Probe,
+    ) -> Result<()> {
+        let seam = demo.join(SEGMENTS);
+        fs::create_dir_all(&seam).with_context(|| format!("create {}", seam.display()))?;
+        for (slot, segment) in plan.iter().enumerate() {
+            segment.timeline.play(display, window, probe)?;
+            let Some(next) = manifest.order.get(slot + 1) else {
+                continue;
+            };
+            // Outwait the app's debounced config flush before reading it.
+            thread::sleep(Duration::from_millis(800));
+            let _bytes = fs::copy(camp.live_config(), seam.join(format!("{next}.config.toml")))
+                .with_context(|| format!("snapshot config for {next}"))?;
+            let _bytes = fs::copy(camp.live_slate(), seam.join(format!("{next}.slate.toml")))
+                .with_context(|| format!("snapshot slate for {next}"))?;
+            println!("scaffolded entry state for `{next}`");
+        }
+        Ok(())
+    }
+}
+
+const SEGMENTS: &str = "segments";
+
+/// One choreography fragment plus where it sits in the manifest.
+struct Segment {
+    name: String,
+    index: usize,
+    timeline: Timeline,
+}
+
+/// A segment's entry state: the config+slate pair the app boots from.
+struct EntryState {
+    config: PathBuf,
+    slate: PathBuf,
+}
+
+/// The ordered roster of segments under `demo/wet/segments.toml`.
+#[derive(Debug, Deserialize)]
+struct Manifest {
+    order: Vec<String>,
+}
+
+impl Manifest {
+    fn load(path: &Path) -> Result<Self> {
+        let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let manifest: Self =
+            toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+        if manifest.order.is_empty() {
+            bail!("segment manifest {} is empty", path.display());
+        }
+        Ok(manifest)
+    }
+}
+
+fn fragment_path(demo: &Path, name: &str) -> PathBuf {
+    demo.join(SEGMENTS).join(format!("{name}.toml"))
 }
 
 fn take(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
@@ -238,7 +431,7 @@ struct Camp {
 }
 
 impl Camp {
-    fn raise(root: &Path, policy: CampPolicy) -> Result<Self> {
+    fn raise(policy: CampPolicy, entry: &EntryState) -> Result<Self> {
         let root_dir = env::temp_dir().join(format!("abv-wet-demo-{}", std::process::id()));
         let _stale = fs::remove_dir_all(&root_dir);
         let camp = Self {
@@ -247,17 +440,20 @@ impl Camp {
         };
         fs::create_dir_all(camp.config_app()).context("create demo config dir")?;
         fs::create_dir_all(camp.state_app()).context("create demo state dir")?;
-        let _bytes = fs::copy(
-            root.join(DEMO).join("config.toml"),
-            camp.config_app().join("config.toml"),
-        )
-        .context("copy demo config")?;
-        let _bytes = fs::copy(
-            root.join(DEMO).join("slate.toml"),
-            camp.state_app().join("slate.toml"),
-        )
-        .context("copy demo slate")?;
+        let _bytes = fs::copy(&entry.config, camp.live_config())
+            .with_context(|| format!("copy entry config {}", entry.config.display()))?;
+        let _bytes = fs::copy(&entry.slate, camp.live_slate())
+            .with_context(|| format!("copy entry slate {}", entry.slate.display()))?;
         Ok(camp)
+    }
+
+    /// The slate the running app writes back; scaffold snapshots it at seams.
+    fn live_slate(&self) -> PathBuf {
+        self.state_app().join("slate.toml")
+    }
+
+    fn live_config(&self) -> PathBuf {
+        self.config_app().join("config.toml")
     }
 
     fn config_home(&self) -> PathBuf {
@@ -274,6 +470,11 @@ impl Camp {
 
     fn state_app(&self) -> PathBuf {
         self.state_home().join(APP)
+    }
+
+    /// Where the running app drops its anchor-probe JSON (devtools build).
+    fn probe_path(&self) -> PathBuf {
+        self.root.join("anchors.json")
     }
 
     fn env(&self) -> [(OsString, OsString); 2] {
@@ -352,6 +553,7 @@ impl App {
             .env("DISPLAY", display)
             .env("WINIT_UNIX_BACKEND", "x11")
             .env("ADEQUATE_BOORU_VIEWER_STARTUP_PROBE", &probe)
+            .env("ABV_ANCHOR_PROBE", camp.probe_path())
             .envs(camp.env())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
@@ -574,10 +776,10 @@ impl Timeline {
             .fold(Duration::ZERO, |a, b| a + b)
     }
 
-    fn play(&self, display: &str, window: &str) -> Result<()> {
+    fn play(&self, display: &str, window: &str, probe: &Probe) -> Result<()> {
         let mut cursor = Cursor::default();
         for step in &self.steps {
-            step.play(display, window, &mut cursor)?;
+            step.play(display, window, &mut cursor, probe)?;
         }
         Ok(())
     }
@@ -618,10 +820,42 @@ enum Step {
         direction: Scroll,
         #[serde(default = "scroll_delay")]
         delay_ms: u64,
+        /// A modifier held down for the whole burst, e.g. `ctrl` for the
+        /// grid-density zoom. Absent ⇒ a plain wheel scroll.
+        #[serde(default)]
+        hold: Option<String>,
     },
     Drag {
         from: [i32; 2],
         to: [i32; 2],
+        #[serde(default = "drag_ms")]
+        ms: u64,
+    },
+    /// Glide the pointer to a named anchor's center, resolved live from the
+    /// probe — no baked coordinates.
+    Point {
+        target: String,
+        #[serde(default)]
+        ms: u64,
+    },
+    /// Glide to a named anchor and click it.
+    Tap {
+        target: String,
+        #[serde(default = "primary")]
+        button: u8,
+        #[serde(default)]
+        ms: u64,
+    },
+    /// Closed loop: defocus the tag field if it holds focus, then Tab until the
+    /// reference-query active group equals `path`.
+    Nav {
+        path: Vec<usize>,
+    },
+    /// Drag from one named anchor onto another — both resolved live. Used to
+    /// rearrange query atoms between groups.
+    DragTo {
+        from: String,
+        to: String,
         #[serde(default = "drag_ms")]
         ms: u64,
     },
@@ -639,11 +873,15 @@ impl Step {
             Self::Scroll {
                 clicks, delay_ms, ..
             } => Duration::from_millis(u64::from(*clicks) * *delay_ms),
+            Self::Point { ms, .. } => Duration::from_millis(*ms),
+            Self::Tap { ms, .. } => Duration::from_millis(*ms + 80),
+            Self::DragTo { ms, .. } => Duration::from_millis(*ms),
+            Self::Nav { .. } => Duration::from_millis(1500),
             Self::Click { .. } | Self::Key { .. } => Duration::from_millis(80),
         }
     }
 
-    fn play(&self, display: &str, window: &str, cursor: &mut Cursor) -> Result<()> {
+    fn play(&self, display: &str, window: &str, cursor: &mut Cursor, probe: &Probe) -> Result<()> {
         match self {
             Self::Wait { ms } => thread::sleep(Duration::from_millis(*ms)),
             Self::Move { x, y, ms } => glide(display, window, cursor, *x, *y, *ms)?,
@@ -659,11 +897,18 @@ impl Step {
                 clicks,
                 direction,
                 delay_ms,
+                hold,
             } => {
                 let button = direction.button();
+                if let Some(modifier) = hold {
+                    xdotool(display, ["keydown", modifier])?;
+                }
                 for _ in 0..*clicks {
                     xdotool(display, ["click", button])?;
                     thread::sleep(Duration::from_millis(*delay_ms));
+                }
+                if let Some(modifier) = hold {
+                    xdotool(display, ["keyup", modifier])?;
                 }
             }
             Self::Drag { from, to, ms } => {
@@ -672,8 +917,132 @@ impl Step {
                 glide(display, window, cursor, to[0], to[1], *ms)?;
                 xdotool(display, ["mouseup", "1"])?;
             }
+            Self::Point { target, ms } => {
+                let (x, y) = probe.resolve(target)?;
+                glide(display, window, cursor, x, y, *ms)?;
+            }
+            Self::Tap { target, button, ms } => {
+                let (x, y) = probe.resolve(target)?;
+                glide(display, window, cursor, x, y, *ms)?;
+                xdotool(display, ["click", &button.to_string()])?;
+                probe.wait_fresh();
+            }
+            Self::Nav { path } => probe.nav_group(display, path)?,
+            Self::DragTo { from, to, ms } => {
+                let (fx, fy) = probe.resolve(from)?;
+                glide(display, window, cursor, fx, fy, 0)?;
+                xdotool(display, ["mousedown", "1"])?;
+                // Resolve the drop target only after the grab, so a layout that
+                // shifts under the held atom is read at release time.
+                let (tx, ty) = probe.resolve(to)?;
+                glide(display, window, cursor, tx, ty, *ms)?;
+                xdotool(display, ["mouseup", "1"])?;
+                probe.wait_fresh();
+            }
         }
         Ok(())
+    }
+}
+
+/// Reader for the app's `devtools` anchor-probe file: named anchor → center,
+/// plus the live state closed-loop steps watch.
+struct Probe {
+    path: PathBuf,
+    last: std::cell::Cell<u64>,
+}
+
+#[derive(Deserialize)]
+struct ProbeFrame {
+    frame: u64,
+    anchors: Vec<ProbeAnchor>,
+    state: ProbeState,
+}
+
+#[derive(Deserialize)]
+struct ProbeAnchor {
+    name: String,
+    rect: [f32; 4],
+}
+
+#[derive(Deserialize)]
+struct ProbeState {
+    active_group: Vec<usize>,
+    text_edit_focused: bool,
+}
+
+impl Probe {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            last: std::cell::Cell::new(0),
+        }
+    }
+
+    fn read(&self) -> Option<ProbeFrame> {
+        serde_json::from_slice(&fs::read(&self.path).ok()?).ok()
+    }
+
+    fn center(&self, target: &str) -> Option<(i32, i32)> {
+        let frame = self.read()?;
+        let anchor = frame.anchors.iter().find(|anchor| anchor.name == target)?;
+        let [x0, y0, x1, y1] = anchor.rect;
+        Some((
+            f32::midpoint(x0, x1).round() as i32,
+            f32::midpoint(y0, y1).round() as i32,
+        ))
+    }
+
+    /// Resolve a target's center, retrying while the app paints it in — a tile
+    /// that wants a scroll, or a panel that just opened.
+    fn resolve(&self, target: &str) -> Result<(i32, i32)> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(center) = self.center(target) {
+                return Ok(center);
+            }
+            if Instant::now() >= deadline {
+                bail!("probe anchor `{target}` never appeared");
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Block until a strictly newer frame lands, so a read reflects the last
+    /// input. Best-effort, bounded.
+    fn wait_fresh(&self) {
+        let prev = self.last.get();
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < deadline {
+            if let Some(frame) = self.read()
+                && frame.frame > prev
+            {
+                self.last.set(frame.frame);
+                return;
+            }
+            thread::sleep(Duration::from_millis(8));
+        }
+        if let Some(frame) = self.read() {
+            self.last.set(frame.frame);
+        }
+    }
+
+    fn nav_group(&self, display: &str, path: &[usize]) -> Result<()> {
+        if self
+            .read()
+            .is_some_and(|frame| frame.state.text_edit_focused)
+        {
+            xdotool(display, ["key", "Escape"])?;
+            self.wait_fresh();
+        }
+        for _ in 0..16 {
+            let here = self.read().map(|frame| frame.state.active_group);
+            if here.as_deref() == Some(path) {
+                return Ok(());
+            }
+            xdotool(display, ["key", "Tab"])?;
+            self.wait_fresh();
+        }
+        bail!("could not navigate to active group {path:?}")
     }
 }
 

@@ -1,0 +1,87 @@
+# 02 filter-library — close UI, open FILTER LIBRARY, open the `work` folder,
+# trail to `harmless screenshot`, clone it; then ctrl-scroll the grid in to 4/row
+# and back to 7. Entry: seg-01 seam (UI recess open). Seam out: FILTER LIBRARY
+# open, UI closed, density 7, the clone saved, scroll top.
+
+[[steps]]
+action = "wait"
+ms = 500
+
+# close the UI recess
+[[steps]]
+action = "tap"
+target = "recess:ui"
+ms = 260
+
+[[steps]]
+action = "wait"
+ms = 320
+
+# open FILTER LIBRARY
+[[steps]]
+action = "tap"
+target = "recess:filter library"
+ms = 260
+
+[[steps]]
+action = "wait"
+ms = 420
+
+# open the `work` folder
+[[steps]]
+action = "tap"
+target = "shelf:work"
+ms = 240
+
+[[steps]]
+action = "wait"
+ms = 360
+
+# trail to `harmless screenshot`
+[[steps]]
+action = "point"
+target = "filter:harmless screenshot"
+ms = 300
+
+[[steps]]
+action = "wait"
+ms = 360
+
+# clone it (the copy)
+[[steps]]
+action = "tap"
+target = "copy:harmless screenshot"
+ms = 200
+
+[[steps]]
+action = "wait"
+ms = 750
+
+# density: ctrl + wheel up to 4/row, pause, back out to 7/row
+[[steps]]
+action = "move"
+x = 820
+y = 430
+ms = 300
+
+[[steps]]
+action = "scroll"
+direction = "up"
+clicks = 3
+delay_ms = 220
+hold = "ctrl"
+
+[[steps]]
+action = "wait"
+ms = 650
+
+[[steps]]
+action = "scroll"
+direction = "down"
+clicks = 3
+delay_ms = 200
+hold = "ctrl"
+
+[[steps]]
+action = "wait"
+ms = 600

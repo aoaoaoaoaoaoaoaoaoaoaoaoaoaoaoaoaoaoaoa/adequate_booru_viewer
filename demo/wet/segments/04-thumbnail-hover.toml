@@ -1,0 +1,52 @@
+# 04 thumbnail-hover — surface a tile's +/−/× palette on hover, scroll the grid
+# down a touch and back to the top, never mutating. Entry: seg-03 seam.
+# Seam out: identical (scroll returns to top). Generic grid coordinates — the
+# beat is "hover any tile", not a specific one.
+
+[[steps]]
+action = "wait"
+ms = 500
+
+# settle onto a tile; the +/−/× palette surfaces
+[[steps]]
+action = "move"
+x = 620
+y = 240
+ms = 320
+
+[[steps]]
+action = "wait"
+ms = 900
+
+# drift across a couple more, palette tracking the hover
+[[steps]]
+action = "move"
+x = 900
+y = 300
+ms = 320
+
+[[steps]]
+action = "wait"
+ms = 700
+
+# scroll down to show the palette riding the moving grid...
+[[steps]]
+action = "scroll"
+direction = "down"
+clicks = 4
+delay_ms = 110
+
+[[steps]]
+action = "wait"
+ms = 900
+
+# ...and back to the top for a clean, replayable seam
+[[steps]]
+action = "scroll"
+direction = "up"
+clicks = 4
+delay_ms = 110
+
+[[steps]]
+action = "wait"
+ms = 700

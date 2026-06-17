@@ -1,21 +1,119 @@
 prefetch_on_hover = true
 
+# Pinned demo library. Two folders so the filmed "open work → harmless
+# screenshot → copy" beat is literal and reproducible: `work` holds the only
+# filter the take ever touches; `play` is an innocuous decoy the cursor avoids,
+# present purely to show folder structure.
+#
+# `harmless screenshot` is copied verbatim from the operator's live library so
+# the umbrella payoff (#7062514) reproduces: an OR of two AND subgroups
+# (g1.1 = blue_eyes+red_hair, g1.2 = blue_hair+red_eyes) that segment 03 fills
+# with `hat` and `umbrella`, gated by 1girl / looking_at_viewer / rating:general
+# and minus comic/greyscale. active_group = [0,1] starts the take on g1.2.
 [filters]
-shelves = []
+saved = []
 
-[[filters.saved]]
+[[filters.shelves]]
+name = "work"
+
+[[filters.shelves.filters]]
 name = "harmless screenshot"
-active_group = []
+active_group = [0, 1]
 
-[filters.saved.tree.root]
+[filters.shelves.filters.tree.root]
 kind = "group"
-
-[filters.saved.tree.root.group]
+[filters.shelves.filters.tree.root.group]
 op = "and"
 
-[[filters.saved.tree.root.group.children]]
-kind = "atom"
+# [0] g1 — OR of two appearance subgroups
+[[filters.shelves.filters.tree.root.group.children]]
+kind = "group"
+[filters.shelves.filters.tree.root.group.children.group]
+op = "or"
 
-[filters.saved.tree.root.group.children.atom]
+# [0][0] g1.1 — blue_eyes AND red_hair
+[[filters.shelves.filters.tree.root.group.children.group.children]]
+kind = "group"
+[filters.shelves.filters.tree.root.group.children.group.children.group]
+op = "and"
+[[filters.shelves.filters.tree.root.group.children.group.children.group.children]]
+kind = "atom"
+[filters.shelves.filters.tree.root.group.children.group.children.group.children.atom]
+kind = "tag"
+value = "blue_eyes"
+[[filters.shelves.filters.tree.root.group.children.group.children.group.children]]
+kind = "atom"
+[filters.shelves.filters.tree.root.group.children.group.children.group.children.atom]
+kind = "tag"
+value = "red_hair"
+
+# [0][1] g1.2 — blue_hair AND red_eyes
+[[filters.shelves.filters.tree.root.group.children.group.children]]
+kind = "group"
+[filters.shelves.filters.tree.root.group.children.group.children.group]
+op = "and"
+[[filters.shelves.filters.tree.root.group.children.group.children.group.children]]
+kind = "atom"
+[filters.shelves.filters.tree.root.group.children.group.children.group.children.atom]
+kind = "tag"
+value = "blue_hair"
+[[filters.shelves.filters.tree.root.group.children.group.children.group.children]]
+kind = "atom"
+[filters.shelves.filters.tree.root.group.children.group.children.group.children.atom]
+kind = "tag"
+value = "red_eyes"
+
+# [1] 1girl
+[[filters.shelves.filters.tree.root.group.children]]
+kind = "atom"
+[filters.shelves.filters.tree.root.group.children.atom]
+kind = "tag"
+value = "1girl"
+
+# [2] NOT comic
+[[filters.shelves.filters.tree.root.group.children]]
+kind = "not"
+[filters.shelves.filters.tree.root.group.children.child]
+kind = "atom"
+[filters.shelves.filters.tree.root.group.children.child.atom]
+kind = "tag"
+value = "comic"
+
+# [3] NOT greyscale
+[[filters.shelves.filters.tree.root.group.children]]
+kind = "not"
+[filters.shelves.filters.tree.root.group.children.child]
+kind = "atom"
+[filters.shelves.filters.tree.root.group.children.child.atom]
+kind = "tag"
+value = "greyscale"
+
+# [4] looking_at_viewer
+[[filters.shelves.filters.tree.root.group.children]]
+kind = "atom"
+[filters.shelves.filters.tree.root.group.children.atom]
+kind = "tag"
+value = "looking_at_viewer"
+
+# [5] rating:general
+[[filters.shelves.filters.tree.root.group.children]]
+kind = "atom"
+[filters.shelves.filters.tree.root.group.children.atom]
+kind = "rating"
+value = "general"
+
+[[filters.shelves]]
+name = "play"
+
+[[filters.shelves.filters]]
+name = "scratch"
+active_group = []
+[filters.shelves.filters.tree.root]
+kind = "group"
+[filters.shelves.filters.tree.root.group]
+op = "and"
+[[filters.shelves.filters.tree.root.group.children]]
+kind = "atom"
+[filters.shelves.filters.tree.root.group.children.atom]
 kind = "rating"
 value = "general"

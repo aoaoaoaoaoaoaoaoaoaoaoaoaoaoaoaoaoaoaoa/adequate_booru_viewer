@@ -1,0 +1,47 @@
+this script must be followed *exactly*, these are precise directions not general suggestions
+
+pre-recording:
+
+- load harmless screenshot query, make sure all menus on the left are folded, make sure the mode is DRY
+- make sure it's 7 images per row
+- make sure all folders are collapses
+- tags in detail view should be off
+
+for all actions keep a natural human pace and human-ish mouse movements
+
+
+make sure that we start with my existing folders and filters, but a hard constraint is to never to:
+a) click on anything but harmless screenshot or the copy we will make
+b) never open the "play" folder
+
+
+begin recording
+
+- open the UI tab, mouse-over DRY, then SELECT VERY WET for a beat (so the big water actually surges — a hover shows nothing), then go back to selecting WET
+
+- mouse over to the image pane casually, over a few images (do not linger, just to make some waves. make sure to mouseover at least one image in the third row slowly enough to see standing waves -- should be 500 ms))
+
+- close the UI tab, open the FILTER LIBRARY tab, open the "work" dropdown, mouse over the names down to
+"harmless screenshot" (it should already be selected), then move the mouse to the copy button and click it
+
+- ctrl-scroll until it's 4 images per row, then ctrl-scoll-out till back at 5
+
+- open the reference query panel
+
+- tab-cycle to g1.1, start typing `hat`, tab through the options to `hat_ribbon`, enter to accept it
+
+- hover over the "OR", click it, then go back to "AND" and click it again. this should last long enough for the images to load but not much longer
+
+- tab-cycle to g1.2, start typing `umbrella`, enter to accept it
+
+- there should be a picture of a girl with an umbrella in the top row now (pause if there isn't) (it's image 7062514)
+
+- click on it, make a few click-water-rings on the image, then tab to open the tag menu
+
+- scroll it down then back up quickly, then select "animal on shoulder" and deselect "1girl"
+
+- escape to close image viewer
+
+- scroll down quickly through the image grid in a single rev, then let it peter out for ~5 seconds
+
+

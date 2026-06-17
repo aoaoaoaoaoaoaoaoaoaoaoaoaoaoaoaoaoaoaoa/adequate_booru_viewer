@@ -1,0 +1,118 @@
+# 06 finale — open GALLERY, flick SORT (reorder thwack + shimmer), arm a date
+# spool and spin a wheel (rollers rise, lever basin), then a single grand grid
+# scroll to peter out as the water settles. Entry: seg-05 seam. Last segment, so
+# the mid-scroll seam-out need not be replayable.
+
+[[steps]]
+action = "wait"
+ms = 500
+
+# open the GALLERY recess (sort + date live here)
+[[steps]]
+action = "tap"
+target = "recess:gallery"
+ms = 280
+
+[[steps]]
+action = "wait"
+ms = 520
+
+# flick SORT score → newest (reorder thwack + shimmer)...
+[[steps]]
+action = "tap"
+target = "sort:newest"
+ms = 240
+
+[[steps]]
+action = "wait"
+ms = 1300
+
+# ...and back to score
+[[steps]]
+action = "tap"
+target = "sort:score"
+ms = 220
+
+[[steps]]
+action = "wait"
+ms = 1300
+
+# the date spools sit low in the rail — scroll the control panel up (cursor over
+# the panel, clear of any wheel) so the full FROM spool rises into view.
+[[steps]]
+action = "move"
+x = 140
+y = 300
+ms = 300
+
+[[steps]]
+action = "scroll"
+direction = "down"
+clicks = 4
+delay_ms = 80
+
+[[steps]]
+action = "wait"
+ms = 750
+
+# arm the `from` bound (lever basin), then spin its year wheel
+[[steps]]
+action = "tap"
+target = "date:from:lever"
+ms = 240
+
+[[steps]]
+action = "wait"
+ms = 700
+
+[[steps]]
+action = "point"
+target = "date:from:year"
+ms = 240
+
+[[steps]]
+action = "scroll"
+direction = "up"
+clicks = 4
+delay_ms = 140
+
+[[steps]]
+action = "wait"
+ms = 1100
+
+[[steps]]
+action = "scroll"
+direction = "down"
+clicks = 4
+delay_ms = 140
+
+[[steps]]
+action = "wait"
+ms = 700
+
+# clear the bound again (lever basin the other way)
+[[steps]]
+action = "tap"
+target = "date:from:lever"
+ms = 220
+
+[[steps]]
+action = "wait"
+ms = 900
+
+# grand scroll, then let it all settle
+[[steps]]
+action = "move"
+x = 940
+y = 520
+ms = 320
+
+[[steps]]
+action = "scroll"
+direction = "down"
+clicks = 14
+delay_ms = 6
+
+[[steps]]
+action = "wait"
+ms = 5200

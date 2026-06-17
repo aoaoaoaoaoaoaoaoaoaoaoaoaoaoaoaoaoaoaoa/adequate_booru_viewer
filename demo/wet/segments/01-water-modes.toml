@@ -1,0 +1,84 @@
+# 01 water-modes — open the UI recess, hover DRY, then briefly SELECT REALLY WET
+# so the big water actually surges (the tease — a hover alone shows nothing),
+# then pull back and settle on WET; trail over the grid lingering on a third-row
+# tile. Entry: base slate. Seam out: UI recess open, WET, scroll top.
+#
+# Left-rail controls use named anchors (resolved live from the devtools probe);
+# generic grid hovers keep coordinates — the content region is stable.
+
+[[steps]]
+action = "wait"
+ms = 900
+
+# open the UI recess
+[[steps]]
+action = "tap"
+target = "recess:ui"
+ms = 320
+
+[[steps]]
+action = "wait"
+ms = 520
+
+# tempted: hover DRY...
+[[steps]]
+action = "point"
+target = "water:dry"
+ms = 260
+
+[[steps]]
+action = "wait"
+ms = 420
+
+# ...plunge into REALLY WET for a beat — let the big water surge and read
+[[steps]]
+action = "tap"
+target = "water:really"
+ms = 240
+
+[[steps]]
+action = "wait"
+ms = 1250
+
+# ...then pull back and settle on WET
+[[steps]]
+action = "tap"
+target = "water:wet"
+ms = 260
+
+[[steps]]
+action = "wait"
+ms = 1000
+
+# drift over the grid, lingering on a third-row tile (standing waves)
+[[steps]]
+action = "move"
+x = 470
+y = 240
+ms = 300
+
+[[steps]]
+action = "move"
+x = 820
+y = 330
+ms = 360
+
+[[steps]]
+action = "move"
+x = 690
+y = 430
+ms = 280
+
+[[steps]]
+action = "wait"
+ms = 500
+
+[[steps]]
+action = "move"
+x = 1040
+y = 250
+ms = 320
+
+[[steps]]
+action = "wait"
+ms = 700

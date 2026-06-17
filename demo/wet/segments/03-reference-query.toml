@@ -1,0 +1,142 @@
+# 03 reference-query — drop `hat_ribbon` into g1.1 (typed as the stem `hat`,
+# accepted off autocomplete — `hat_ribbon` is the intended tag), toggle the g1
+# OR group to show the reflow, drop `umbrella` into g1.2. Entry: seg-02 seam
+# (g1.2 armed, active_group [0,1]).
+#
+# Group structure: root AND[ g1:OR[ g1.1=AND(blue_eyes,red_hair),
+#   g1.2=AND(blue_hair,red_eyes) ], 1girl, NOT comic, NOT greyscale,
+#   looking_at_viewer, rating:general ]. `nav` is closed-loop (Tab until the
+# probed active_group matches); the OR/AND op buttons are named anchors.
+
+[[steps]]
+action = "wait"
+ms = 500
+
+# open REFERENCE QUERY
+[[steps]]
+action = "tap"
+target = "recess:reference query"
+ms = 260
+
+[[steps]]
+action = "wait"
+ms = 520
+
+# select g1.1 by clicking its label (deterministic — no Tab race), focus, type
+[[steps]]
+action = "tap"
+target = "group:0.0"
+ms = 260
+
+[[steps]]
+action = "wait"
+ms = 360
+
+[[steps]]
+action = "key"
+value = "slash"
+
+[[steps]]
+action = "wait"
+ms = 240
+
+[[steps]]
+action = "type"
+text = "hat"
+delay_ms = 120
+
+[[steps]]
+action = "wait"
+ms = 900
+
+# tab-cycle the completions; this sequence nets onto `hat_ribbon`
+[[steps]]
+action = "key"
+value = "Tab"
+
+[[steps]]
+action = "wait"
+ms = 340
+
+[[steps]]
+action = "key"
+value = "Tab"
+
+[[steps]]
+action = "wait"
+ms = 340
+
+[[steps]]
+action = "key"
+value = "shift+Tab"
+
+[[steps]]
+action = "wait"
+ms = 300
+
+# accept — hat_ribbon lands in g1.1
+[[steps]]
+action = "key"
+value = "Return"
+
+[[steps]]
+action = "wait"
+ms = 800
+
+# toggle the g1 operator OR(∨) → AND(∧), let it reflow, back to OR
+[[steps]]
+action = "tap"
+target = "group-op:0:∧"
+ms = 240
+
+[[steps]]
+action = "wait"
+ms = 1200
+
+[[steps]]
+action = "tap"
+target = "group-op:0:∨"
+ms = 220
+
+[[steps]]
+action = "wait"
+ms = 900
+
+# select g1.2 by clicking its label, focus, type `umbrella`, accept
+[[steps]]
+action = "tap"
+target = "group:0.1"
+ms = 240
+
+[[steps]]
+action = "wait"
+ms = 360
+
+[[steps]]
+action = "key"
+value = "slash"
+
+[[steps]]
+action = "wait"
+ms = 220
+
+[[steps]]
+action = "type"
+text = "umbrella"
+delay_ms = 110
+
+[[steps]]
+action = "wait"
+ms = 600
+
+[[steps]]
+action = "key"
+value = "Return"
+
+[[steps]]
+action = "wait"
+ms = 1400
+
+# (atom drag-rearrange demo pulled for now: dropping into a nested subgroup is
+# ambiguous — lands in the wrong sibling. The `atom:` anchor + `drag_to` step are
+# kept; revisit with a precise group-body drop anchor.)
