@@ -7,6 +7,8 @@ rust-version.workspace = true
 version.workspace = true
 autobins = false
 description = "a somewhat-adequate booru reference viewer: fast local boolean-tag search, GPU water UI"
+repository = "https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/adequate_booru_viewer"
+homepage = "https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/adequate_booru_viewer"
 keywords = ["booru", "danbooru", "egui", "wgpu", "viewer"]
 categories = ["gui", "multimedia::images"]
 
