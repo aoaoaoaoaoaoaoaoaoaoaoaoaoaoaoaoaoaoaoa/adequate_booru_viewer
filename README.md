@@ -15,7 +15,20 @@ maybe it has easter eggs if I wasn't too lazy.
 
 and no, it's not an organizer.
 
+### install
+
+linux & macos (needs recent stable rust):
+
+```sh
+cargo install adequate_booru_viewer   # gives you the `abv` binary
+```
+
+linux also wants a vulkan driver + X11/Wayland libs (your distro's mesa-vulkan /
+vulkan-icd and libxkbcommon). macos uses metal, nothing extra.
+
 anyway, check out how wet it is:
+
+<!-- VIDEO -->
 
 ### halp it's missing feature XYZ
 

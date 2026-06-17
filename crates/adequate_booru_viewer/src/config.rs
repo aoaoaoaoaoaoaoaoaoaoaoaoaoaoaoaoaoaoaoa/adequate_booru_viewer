@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     date::DateRange,
-    model::{Query, Sort},
+    model::{Query, QueryAtom, RatingClass, Sort, TagPolarity},
 };
 
 /// User-authored intent only: everything here is something a person could
@@ -35,14 +35,46 @@ impl Config {
             Ok(text) => toml::from_str::<Self>(&text)
                 .map(Arc::new)
                 .with_context(|| format!("parse {}", path.display())),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Arc::new(Self::default())),
+            // A *missing* config means the very first launch — seed the safe
+            // default filter. First-run-ever is keyed on the file's absence, not
+            // on an empty library, so deleting the seed never resurrects it (the
+            // app writes the config on first run, and the file persists after).
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Ok(Arc::new(Self::first_run()))
+            }
             Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
         }
+    }
+
+    /// The shipped first-launch library: one deletable `helpful and harmless`
+    /// filter (rating:general), so a new user is not dropped straight into the
+    /// full firehose. See [`Self::load`].
+    fn first_run() -> Self {
+        let mut config = Self::default();
+        if let Some(filter) = safe_default_filter() {
+            config.filters.saved.push(filter);
+        }
+        config
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
         save_toml(self, path, "serialize config")
     }
+}
+
+/// The canonical name of the seeded first-run filter; the app activates it on a
+/// first launch (see `Bayonet::open`).
+pub const SAFE_DEFAULT_FILTER: &str = "helpful and harmless";
+
+fn safe_default_filter() -> Option<SavedFilter> {
+    let name = FilterName::forge(SAFE_DEFAULT_FILTER)?;
+    let mut tree = Query::default();
+    let _added = tree.push_atom(
+        &[],
+        QueryAtom::Rating(RatingClass::General),
+        TagPolarity::Positive,
+    );
+    Some(SavedFilter::new(name, tree, Vec::new()))
 }
 
 fn save_toml(value: &impl Serialize, path: &Path, what: &'static str) -> Result<()> {
@@ -299,6 +331,19 @@ mod tests {
         assert_eq!(slate.shutters.get("reference-query"), Some(&false));
         assert!(slate.closed_folders.contains("work"));
         assert!(slate.closed_folders.contains("play"));
+        Ok(())
+    }
+
+    #[test]
+    fn first_run_seeds_safe_filter_only_when_config_absent() -> Result<()> {
+        // Absent config ⇒ first launch ⇒ seed the deletable safe default.
+        let seeded = Config::load(Path::new("/nonexistent-abv-first-run/config.toml"))?;
+        assert_eq!(seeded.filters.saved.len(), 1);
+        assert_eq!(seeded.filters.saved[0].name.as_str(), SAFE_DEFAULT_FILTER);
+        assert!(toml::to_string(&seeded.filters.saved[0])?.contains("general"));
+        // A present-but-empty config must NOT re-seed — deleting the filter sticks.
+        let empty: Config = toml::from_str("prefetch_on_hover = true\n")?;
+        assert!(empty.filters.saved.is_empty());
         Ok(())
     }
 

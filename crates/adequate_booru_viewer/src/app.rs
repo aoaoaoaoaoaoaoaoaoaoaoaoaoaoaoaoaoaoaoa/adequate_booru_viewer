@@ -262,6 +262,10 @@ impl Bayonet {
         startup("app.open.enter");
         let lair = Lair::claim()?;
         startup("app.lair.claimed");
+        // First-run-ever is the absence of the config file (not an empty
+        // library): the seed below is written on first launch, so the file then
+        // persists and deleting the seed never brings it back.
+        let first_run = !lair.config_path().exists();
         let config = Config::load(&lair.config_path())?;
         startup("app.config.loaded");
         let index = Index::open(&lair.index_path())?;
@@ -275,7 +279,11 @@ impl Bayonet {
         for shelf in &mut filters.shelves {
             shelf.open = !slate.closed_folders.contains(&shelf.name);
         }
-        let active_filter = filters.active(slate.active_filter.clone());
+        let active_filter = filters.active(slate.active_filter.clone().or_else(|| {
+            first_run
+                .then(|| FilterName::forge(crate::config::SAFE_DEFAULT_FILTER))
+                .flatten()
+        }));
         let mut query = active_filter
             .as_ref()
             .and_then(|active| filters.get(active))
@@ -378,6 +386,11 @@ impl Bayonet {
         startup("app.state.built");
         #[cfg(feature = "devtools")]
         crate::probe::arm();
+        // Persist the first-run seed synchronously so the config file exists
+        // from now on — that file's presence is the first-run-ever marker.
+        if first_run {
+            app.write_config();
+        }
         if scrubbed_dates {
             app.save_config();
         }
