@@ -106,10 +106,14 @@ fn render_group(
         ui.set_min_width(ui.available_width());
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
         let _header = ui.horizontal_wrapped(|ui| {
-            if chrome::glyph(ui, group_label(path, active_here), active_here)
-                .on_hover_text("click to select this group for new tags")
-                .clicked()
-            {
+            let group_btn = chrome::glyph(ui, group_label(path, active_here), active_here)
+                .on_hover_text("click to select this group for new tags");
+            crate::probe_anchor!(
+                ui,
+                format!("group:{}", probe_path(path)),
+                group_btn.interact_rect
+            );
+            if group_btn.clicked() {
                 select = true;
             }
             // The remove button rides directly after the title: when the
@@ -136,10 +140,14 @@ fn render_group(
                 actions.push(QueryAction::ToggleNot { path: path.clone() });
             }
             for op in BoolOp::ALL {
-                if chrome::glyph(ui, op.label(), group.op == op)
-                    .on_hover_text(op_blurb(op))
-                    .clicked()
-                {
+                let op_btn =
+                    chrome::glyph(ui, op.label(), group.op == op).on_hover_text(op_blurb(op));
+                crate::probe_anchor!(
+                    ui,
+                    format!("group-op:{}:{}", probe_path(path), op.label()),
+                    op_btn.interact_rect
+                );
+                if op_btn.clicked() {
                     actions.push(QueryAction::SetOp {
                         path: path.clone(),
                         op,
@@ -233,9 +241,10 @@ fn render_atom(
         if remove_atom_button(ui, parent.clone(), child, actions) {
             return;
         }
-        let _drag = ui.dnd_drag_source(id, drag, |ui| {
+        let _dragged = ui.dnd_drag_source(id, drag, |ui| {
             atom_label(ui, atom, negated, tag_kind);
         });
+        crate::probe_anchor!(ui, format!("atom:{}", atom.term()), _dragged.response.rect);
     });
 }
 
@@ -329,4 +338,13 @@ fn group_stroke(depth: usize, active: bool) -> egui::Stroke {
     }
     let (r, g, b) = group_hue(depth);
     egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(r, g, b, 96))
+}
+
+/// Dotted group path for probe anchor names (`[0,1]` -> `"0.1"`).
+#[cfg(feature = "devtools")]
+fn probe_path(path: &[usize]) -> String {
+    path.iter()
+        .map(|step| step.to_string())
+        .collect::<Vec<_>>()
+        .join(".")
 }

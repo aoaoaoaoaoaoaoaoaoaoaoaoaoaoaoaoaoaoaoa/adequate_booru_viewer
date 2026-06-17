@@ -15,6 +15,12 @@ path = "src/main.rs"
 name = "retrieval_bench"
 path = "examples/retrieval_bench.rs"
 
+[features]
+# Debug-only instrumentation umbrella. First tenant: the egui anchor probe
+# (src/probe.rs) the demo xtask drives. Never in the default set, so shipped
+# builds pay nothing.
+devtools = ["dep:serde_json"]
+
 [dependencies]
 anyhow = "1.0.102"
 arboard = "3.6.1"
@@ -29,6 +35,7 @@ redb = "4.1.0"
 rfd = "0.17.2"
 roaring = "0.11.4"
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.150", optional = true }
 toml = "1.1.2"
 ureq = { version = "3.3.0", features = ["json"] }
 zune-core = "0.5"

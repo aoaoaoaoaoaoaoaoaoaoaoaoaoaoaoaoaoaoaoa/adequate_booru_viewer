@@ -156,6 +156,7 @@ pub fn section(
             header.response
         });
     let rect = _frame.response.rect;
+    crate::probe_anchor!(ui, format!("recess:{title}"), _frame.inner.rect);
     if flux.is_some() {
         ui.ctx().request_repaint();
     }

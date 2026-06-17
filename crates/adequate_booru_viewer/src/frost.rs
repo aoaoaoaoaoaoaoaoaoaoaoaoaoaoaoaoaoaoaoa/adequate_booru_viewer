@@ -139,6 +139,9 @@ pub struct Splash {
     pub age: f32,
     pub amp: f32,
     pub shape: SplashShape,
+    /// Signed screen-y a dragged surface (a spun tape) travels, 0 for a plain
+    /// splash. Non-zero turns the source into a directional velocity dipole.
+    pub drag: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -146,6 +149,10 @@ pub enum SplashShape {
     #[default]
     Ring,
     Basin,
+    /// A broadband velocity-noise impulse over the whole rect — the sheet
+    /// "thwacked" from beneath. The solver's KO term shreds the high-k content
+    /// into a quick shimmer; the sparse low-k residue rides out.
+    Jitter,
 }
 
 impl SplashShape {
@@ -811,7 +818,7 @@ fn mask_bytes(surge: &Surge<'_>) -> [u8; MASK_BYTES as usize] {
             splash.age,
             splash.amp,
             splash.shape.code(),
-            0.0,
+            splash.drag,
         ]);
     }
     // viewer rect @ byte 1312 (lane 328), touches @ byte 1328 (lane 332).

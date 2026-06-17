@@ -114,6 +114,11 @@ fn shelf_open_default() -> bool {
 #[serde(default, deny_unknown_fields)]
 pub struct Slate {
     pub closed_folders: std::collections::BTreeSet<String>,
+    /// Per-section fold state, keyed by panel id; presence overrides the
+    /// section's compiled-in default. Absent ⇒ that default. Mirrors
+    /// `closed_folders` but for the left-rail recesses, which carry mixed
+    /// defaults so a bare set cannot say which way a section was thrown.
+    pub shutters: std::collections::BTreeMap<String, bool>,
     pub active_filter: Option<FilterName>,
     pub query: QueryConfig,
     pub sort: Sort,
@@ -127,6 +132,7 @@ impl Default for Slate {
     fn default() -> Self {
         Self {
             closed_folders: std::collections::BTreeSet::new(),
+            shutters: std::collections::BTreeMap::new(),
             active_filter: None,
             query: QueryConfig::default(),
             sort: Sort::Score,
@@ -264,12 +270,45 @@ mod tests {
         Ok(())
     }
 
+    /// The pinned demo fixture must deserialize through the real loaders and
+    /// keep the nested `harmless screenshot` shape the take's choreography
+    /// depends on. Guards the fixture against silent drift.
+    #[test]
+    fn demo_fixture_is_loadable() -> Result<()> {
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../demo/wet");
+        // Config must fail loud, so its loader is the strict path.
+        let config = Config::load(&demo.join("config.toml"))?;
+        let names = config
+            .filters
+            .shelves
+            .iter()
+            .map(|shelf| shelf.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["work", "play"]);
+        let screenshot = &config.filters.shelves[0].filters[0];
+        assert_eq!(screenshot.name.as_str(), "harmless screenshot");
+        assert_eq!(screenshot.active_group, vec![0_usize, 1]);
+        // Slate decays to defaults on error, which would mask a typo; parse strict.
+        let slate: Slate = toml::from_str(&std::fs::read_to_string(demo.join("slate.toml"))?)?;
+        assert_eq!(
+            slate.active_filter.as_ref().map(FilterName::as_str),
+            Some("harmless screenshot")
+        );
+        assert_eq!(slate.water, WaterMode::Dry);
+        assert_eq!(slate.images_per_row, 7);
+        assert_eq!(slate.shutters.get("reference-query"), Some(&false));
+        assert!(slate.closed_folders.contains("work"));
+        assert!(slate.closed_folders.contains("play"));
+        Ok(())
+    }
+
     #[test]
     fn slate_roundtrips_workbench_state() -> Result<()> {
         let mut query = Query::default();
         assert!(query.push_atom(&[], tag("solo")?, TagPolarity::Positive));
         let slate = Slate {
             closed_folders: std::collections::BTreeSet::from(["trips".to_owned()]),
+            shutters: std::collections::BTreeMap::from([("gallery-controls".to_owned(), true)]),
             active_filter: FilterName::forge("beach"),
             query: QueryConfig {
                 tree: query.clone(),
@@ -288,6 +327,7 @@ mod tests {
         let roundtrip = toml::from_str::<Slate>(&text)?;
         assert_eq!(roundtrip.query.tree, query);
         assert!(roundtrip.closed_folders.contains("trips"));
+        assert_eq!(roundtrip.shutters.get("gallery-controls"), Some(&true));
         assert_eq!(roundtrip.images_per_row, 7);
         assert_eq!(roundtrip.dates, slate.dates);
         assert_eq!(roundtrip.water, WaterMode::ReallyWet);

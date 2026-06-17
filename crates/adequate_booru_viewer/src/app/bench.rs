@@ -55,6 +55,7 @@ impl super::Bayonet {
                     knob(ui, "hover impulse", &mut surf.enter_amp, 0.0..=12.0);
                     knob(ui, "release impulse", &mut surf.exit_amp, 0.0..=12.0);
                     knob(ui, "open impulse", &mut surf.click_amp, 0.0..=12.0);
+                    knob(ui, "swap thump", &mut surf.thwack_amp, 0.0..=2.0);
                 });
                 section(ui, "WATER FIELD", |ui| {
                     knob(ui, "wave speed px/s", &mut brine.wave_v, 40.0..=900.0);

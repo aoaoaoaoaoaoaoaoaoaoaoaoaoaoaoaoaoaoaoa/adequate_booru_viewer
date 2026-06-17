@@ -206,6 +206,7 @@ impl Bayonet {
                                     .sense(egui::Sense::click()),
                             );
                             self.viewer_pond = response.rect;
+                            crate::probe_anchor!(ui, "viewer:image", response.interact_rect);
                             if response.clicked_by(egui::PointerButton::Primary)
                                 && let Some(pos) = response.interact_pointer_pos()
                             {

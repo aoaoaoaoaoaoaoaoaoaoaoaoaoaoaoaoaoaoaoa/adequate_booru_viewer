@@ -151,6 +151,11 @@ fn palette_body(
                         if let Some(remove) =
                             tag_action(ui, active.is_some().then_some("×"), "remove from query")
                         {
+                            crate::probe_anchor!(
+                                ui,
+                                format!("tagrow:{}:remove", tag.as_str()),
+                                remove.interact_rect
+                            );
                             if chrome::hover_started(ui, &remove) {
                                 pulses.push(remove.rect);
                             }
@@ -160,6 +165,11 @@ fn palette_body(
                         }
                         let require = tag_action(ui, Some("+"), "require tag");
                         if require.as_ref().is_some_and(|response| {
+                            crate::probe_anchor!(
+                                ui,
+                                format!("tagrow:{}:require", tag.as_str()),
+                                response.interact_rect
+                            );
                             if chrome::hover_started(ui, response) {
                                 pulses.push(response.rect);
                             }
@@ -169,6 +179,11 @@ fn palette_body(
                         }
                         let exclude = tag_action(ui, Some("-"), "exclude tag");
                         if exclude.as_ref().is_some_and(|response| {
+                            crate::probe_anchor!(
+                                ui,
+                                format!("tagrow:{}:exclude", tag.as_str()),
+                                response.interact_rect
+                            );
                             if chrome::hover_started(ui, response) {
                                 pulses.push(response.rect);
                             }

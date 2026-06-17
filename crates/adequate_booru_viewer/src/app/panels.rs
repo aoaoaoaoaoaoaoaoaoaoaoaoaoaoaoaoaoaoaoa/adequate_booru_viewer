@@ -135,7 +135,14 @@ impl Bayonet {
         default_open: bool,
         add: impl FnOnce(&mut Self, &mut egui::Ui),
     ) {
-        let wake = chrome::section(ui, id, title, default_open, |ui| add(self, ui));
+        let open = self.shutters.get(id).copied().unwrap_or(default_open);
+        let wake = chrome::section(ui, id, title, open, |ui| add(self, ui));
+        if let Some(wake) = wake.as_ref() {
+            let _prior = self
+                .shutters
+                .insert(id.to_owned(), matches!(wake.flux, chrome::FoldFlux::Open));
+            self.save_config();
+        }
         self.fold_plunge(wake);
     }
 
@@ -175,6 +182,7 @@ impl Bayonet {
             text.show(ui)
         });
         let entry = output.inner.response.clone();
+        crate::probe_anchor!(ui, "field:tag-entry", entry.interact_rect);
         if seeded_entry {
             let tail = egui::text::CCursor::new(self.tag_entry.chars().count());
             output
@@ -239,11 +247,15 @@ impl Bayonet {
         let _sort = ui.horizontal_wrapped(|ui| {
             let _label = ui.label(chrome::eyebrow("SORT"));
             for sort in Sort::ALL {
-                if chrome::glyph(ui, sort.label(), self.sort == sort).clicked() && self.sort != sort
-                {
+                let button = chrome::glyph(ui, sort.label(), self.sort == sort);
+                crate::probe_anchor!(ui, format!("sort:{}", sort.label()), button.interact_rect);
+                if button.clicked() && self.sort != sort {
                     self.sort = sort;
                     self.save_config();
-                    self.clear_hit();
+                    // Keep the current tiles up; the strike reorders them in
+                    // place when its result lands (and thwacks by how much the
+                    // reorder shifts), rather than blanking first.
+                    self.thwack_pending = true;
                     self.strike(true, AUTO_WARM_PAGES);
                 }
             }
@@ -280,14 +292,14 @@ impl Bayonet {
         if from.changed {
             next.first = from.value;
         }
-        if let Some(pulse) = from.pulse {
+        for pulse in from.pulse.into_iter().chain(from.couple) {
             self.date_plunge(pulse);
         }
         let to = date_spool::date_bound(ui, "date-to", "UNTIL", next.last);
         if to.changed {
             next.last = to.value;
         }
-        if let Some(pulse) = to.pulse {
+        for pulse in to.pulse.into_iter().chain(to.couple) {
             self.date_plunge(pulse);
         }
         if clean_dates(next) != self.date_range {
@@ -297,8 +309,8 @@ impl Bayonet {
 
     fn date_plunge(&mut self, pulse: date_spool::DatePulse) {
         match pulse {
-            date_spool::DatePulse::Tape(rect) => self.tape_plunge(rect),
-            date_spool::DatePulse::Button(rect) => self.bump_plunge(rect),
+            date_spool::DatePulse::Tape(rect, dir) => self.tape_plunge(rect, dir),
+            date_spool::DatePulse::Lever(rect, sign) => self.lever_plunge(rect, sign),
         }
     }
 
@@ -334,27 +346,24 @@ impl Bayonet {
         let wet = self.water_mode == WaterMode::Wet;
         let really = self.water_mode == WaterMode::ReallyWet;
         let _wet = ui.horizontal_wrapped(|ui| {
-            if chrome::glyph(ui, "DRY", dry)
-                .on_hover_text("disable the water shader entirely")
-                .clicked()
-                && !dry
-            {
+            let dry_btn =
+                chrome::glyph(ui, "DRY", dry).on_hover_text("disable the water shader entirely");
+            crate::probe_anchor!(ui, "water:dry", dry_btn.interact_rect);
+            if dry_btn.clicked() && !dry {
                 self.water_mode = WaterMode::Dry;
                 changed = true;
             }
-            if chrome::glyph(ui, "WET", wet)
-                .on_hover_text("enable water, refraction, and veil shaders")
-                .clicked()
-                && !wet
-            {
+            let wet_btn = chrome::glyph(ui, "WET", wet)
+                .on_hover_text("enable water, refraction, and veil shaders");
+            crate::probe_anchor!(ui, "water:wet", wet_btn.interact_rect);
+            if wet_btn.clicked() && !wet {
                 self.water_mode = WaterMode::Wet;
                 changed = true;
             }
-            if chrome::glyph(ui, "REALLY WET", really)
-                .on_hover_text("stronger, slower, wetter water")
-                .clicked()
-                && !really
-            {
+            let really_btn = chrome::glyph(ui, "REALLY WET", really)
+                .on_hover_text("stronger, slower, wetter water");
+            crate::probe_anchor!(ui, "water:really", really_btn.interact_rect);
+            if really_btn.clicked() && !really {
                 self.water_mode = WaterMode::ReallyWet;
                 changed = true;
             }

@@ -79,6 +79,9 @@ struct Surf {
     enter_amp: f32,
     exit_amp: f32,
     click_amp: f32,
+    /// A tileset swap thwacks the whole pool from beneath; scaled by the
+    /// fraction of tiles actually replaced.
+    thwack_amp: f32,
     /// The viewer pond still uses analytic point ripples; this is their fade.
     text_amp: f32,
     viewer_amp: f32,
@@ -148,6 +151,7 @@ impl Default for Surf {
             enter_amp: 0.9,
             exit_amp: 0.42,
             click_amp: 2.5,
+            thwack_amp: 0.24,
             text_amp: 1.02,
             viewer_amp: 1.6,
             viewer_life: 8.0,
@@ -161,6 +165,10 @@ impl Default for Surf {
     }
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent app-state flags (UI toggles + a one-shot pending), not a state machine"
+)]
 pub struct Bayonet {
     lair: Lair,
     index: Index,
@@ -184,6 +192,9 @@ pub struct Bayonet {
     hit: SearchHit,
     hit_cache: HitCache,
     parked_hit: Option<SearchHit>,
+    /// A user filter/sort change is in flight; the next `commit_hit` thwacks the
+    /// pool with energy set by how many tiles the new result actually replaces.
+    thwack_pending: bool,
     thumbs: HashMap<ThumbKey, TextureHandle>,
     thumb_inflight: HashSet<ThumbKey>,
     thumb_faults: HashSet<ThumbKey>,
@@ -204,6 +215,10 @@ pub struct Bayonet {
     viewer_tags_open: bool,
     viewer_tag_groups: Option<(PostId, TagGroups)>,
     images_per_row: u16,
+    /// Left-rail recess fold state, the running truth written back to the
+    /// slate; keyed by section id, `true` ⇒ open. Seeded from the slate and
+    /// updated whenever a recess is thrown.
+    shutters: BTreeMap<String, bool>,
     tag_menu: TagMenu,
     tag_menu_rect: Option<egui::Rect>,
     menu_cuts: Option<(egui::Rect, egui::Rect)>,
@@ -301,6 +316,7 @@ impl Bayonet {
             hit: SearchHit::default(),
             hit_cache: HitCache::default(),
             parked_hit: None,
+            thwack_pending: false,
             thumbs: HashMap::new(),
             thumb_inflight: HashSet::new(),
             thumb_faults: HashSet::new(),
@@ -323,6 +339,7 @@ impl Bayonet {
             images_per_row: slate
                 .images_per_row
                 .clamp(MIN_IMAGES_PER_ROW, MAX_IMAGES_PER_ROW),
+            shutters: slate.shutters,
             tag_menu: TagMenu::Closed,
             tag_menu_rect: None,
             menu_cuts: None,
@@ -359,12 +376,38 @@ impl Bayonet {
             startup_probe: StartupProbe::from_env(),
         };
         startup("app.state.built");
+        #[cfg(feature = "devtools")]
+        crate::probe::arm();
         if scrubbed_dates {
             app.save_config();
         }
         app.strike(true, AUTO_WARM_PAGES);
         startup("app.initial.reap.done");
         Ok(app)
+    }
+
+    /// Snapshot the frame's anchors + live state for the `devtools` probe. Built
+    /// only with the feature and skipped entirely unless `ABV_ANCHOR_PROBE` armed
+    /// it, so no state is cloned in the common case.
+    #[cfg(feature = "devtools")]
+    pub fn probe_dump(&self, ctx: &egui::Context, pixels_per_point: f32) {
+        if !crate::probe::probing() {
+            return;
+        }
+        crate::probe::dump(
+            ctx,
+            pixels_per_point,
+            crate::probe::State {
+                active_group: self.active_group.clone(),
+                text_edit_focused: ctx.text_edit_focused(),
+                water: self.water_mode,
+                sort: self.sort,
+                dates: self.date_range,
+                images_per_row: self.images_per_row,
+                zoom_post: self.zoom.as_ref().map(|post| post.id.0),
+                tag_menu_post: self.tag_menu.post_id().map(|id| id.0),
+            },
+        );
     }
 
     pub fn draw_startup_probe_frame(&mut self, ctx: &egui::Context) {
@@ -387,6 +430,7 @@ impl Bayonet {
 
     /// One full application frame: drain workers, settle gates, paint.
     pub fn pulse(&mut self, ui: &mut egui::Ui) {
+        crate::probe_reset!(ui.ctx());
         let ctx = ui.ctx().clone();
         self.zoom_tiles(&ctx);
         self.drain(&ctx);
@@ -522,9 +566,14 @@ impl Bayonet {
         }
         self.remember_hit();
         self.date_range = dates;
-        if !self.restore_hit() {
-            self.clear_hit();
-        }
+        // A `strike` is about to replace the tiles, so never blank to a loading
+        // card in the meantime: restore a cached hit if we have one, else leave
+        // the current tiles up and let the async result swap in. `commit_hit`
+        // retains unchanged thumbnails by id, so the grid updates without a flash,
+        // and thwacks the pool by how much actually changed (set before the
+        // restore, so a cache-hit commit reads it too).
+        self.thwack_pending = true;
+        let _ = self.restore_hit();
         self.save_config();
         if dates.active() {
             self.warm_state = WarmState::Idle;
@@ -539,9 +588,11 @@ impl Bayonet {
         self.remember_hit();
         self.active_group = query.clamp_group_path(&active_group);
         self.query = query;
-        if !self.restore_hit() {
-            self.clear_hit();
-        }
+        // Keep the current tiles up until the async `strike` swaps in the new
+        // ones (or restore a cached hit) — no loading-card flash on a re-query;
+        // `commit_hit` thwacks by how much actually changed.
+        self.thwack_pending = true;
+        let _ = self.restore_hit();
         let query = self.query.clone();
         self.align_warm(&query);
         self.save_config();
@@ -556,18 +607,15 @@ impl Bayonet {
     }
 
     fn restore_hit(&mut self) -> bool {
+        // The key just changed, so any result deferred behind an open tag menu
+        // was for the old key — drop it lest it commit stale when the menu closes.
+        self.parked_hit = None;
         let key = HitKey::new(&self.query, self.sort, self.date_range);
         let Some(hit) = self.hit_cache.get(&key) else {
             return false;
         };
-        self.parked_hit = None;
         self.commit_hit(hit);
         true
-    }
-
-    fn clear_hit(&mut self) {
-        self.parked_hit = None;
-        self.commit_hit(SearchHit::default());
     }
 
     fn install_hit(&mut self, hit: SearchHit) {
@@ -579,6 +627,15 @@ impl Bayonet {
     }
 
     fn commit_hit(&mut self, hit: SearchHit) {
+        // A user filter/sort change thwacks the pool by how much it actually
+        // replaced — zero for the appends/tail-trims a date scroll makes, full
+        // for a reorder or re-query. Read before `self.hit` is overwritten.
+        if std::mem::take(&mut self.thwack_pending) {
+            let energy = swap_fraction(&self.hit.posts, &hit.posts);
+            if energy > 0.0 {
+                self.pool_thwack(self.water_rect, energy);
+            }
+        }
         if posts_changed(&self.hit.posts, &hit.posts) {
             self.advance_thumb_epoch();
         }
@@ -1064,6 +1121,7 @@ impl Bayonet {
     fn tile(&mut self, ui: &mut egui::Ui, post: &PostRecord, tile: f32) -> bool {
         let mut menu_opened = false;
         let (rect, response) = ui.allocate_exact_size(egui::vec2(tile, tile), egui::Sense::click());
+        crate::probe_anchor!(ui, format!("tile:{}", post.id.0), rect);
         paint_plate(ui, rect, response.hovered());
         let well = rect.shrink(PLATE_PAD);
         match self.thumb(post, tile) {
@@ -1340,6 +1398,7 @@ impl Bayonet {
                 .filter(|shelf| !shelf.open)
                 .map(|shelf| shelf.name.clone())
                 .collect(),
+            shutters: self.shutters.clone(),
             active_filter: self.active_filter.clone(),
             query: QueryConfig {
                 tree: self.query.clone(),
@@ -1565,6 +1624,23 @@ fn posts_changed(old: &[PostRecord], new: &[PostRecord]) -> bool {
             .iter()
             .zip(new)
             .any(|(old, new)| old.id != new.id || old.thumb_url(360.0) != new.thumb_url(360.0))
+}
+
+/// Fraction of the shared grid positions whose post actually changed — the
+/// pool-thwack energy. Compared over the common prefix only, so growing or
+/// trimming the tail (every date scroll, Newest-sorted) reads as zero, while a
+/// reorder or re-query that *replaces* tiles reads near one.
+fn swap_fraction(old: &[PostRecord], new: &[PostRecord]) -> f32 {
+    let common = old.len().min(new.len());
+    if common == 0 {
+        return 0.0;
+    }
+    let changed = old
+        .iter()
+        .zip(new)
+        .filter(|(old, new)| old.id != new.id)
+        .count();
+    changed as f32 / common as f32
 }
 
 fn blade_texture(ctx: &egui::Context, blade: &RgbaBlade, kind: BladeKind) -> TextureHandle {

@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "adequate_booru_viewer"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -44,6 +44,7 @@ dependencies = [
  "rfd",
  "roaring",
  "serde",
+ "serde_json",
  "toml",
  "ureq",
  "zune-core",
@@ -3776,7 +3777,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "serde",

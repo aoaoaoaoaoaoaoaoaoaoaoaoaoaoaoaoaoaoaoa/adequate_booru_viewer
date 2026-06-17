@@ -157,7 +157,13 @@ fn filter_row(
         {
             actions.push(Action::Delete(filter.name.clone()));
         }
-        if chrome::icon(ui, "⧉").on_hover_text("clone").clicked() {
+        let clone = chrome::icon(ui, "⧉").on_hover_text("clone");
+        crate::probe_anchor!(
+            ui,
+            format!("copy:{}", filter.name.as_str()),
+            clone.interact_rect
+        );
+        if clone.clicked() {
             actions.push(Action::Clone(filter.name.clone()));
         }
         let selected = active == Some(&filter.name);
@@ -181,6 +187,11 @@ fn filter_row(
         } else {
             response
         };
+        crate::probe_anchor!(
+            ui,
+            format!("filter:{}", filter.name.as_str()),
+            response.interact_rect
+        );
         if chrome::hover_started(ui, &response) {
             actions.push(Action::Pulse(response.rect));
         }
@@ -226,7 +237,9 @@ fn shelf_rows(
     let header = ui.horizontal(|ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
         let glyph = if shelf.open { "▾" } else { "▸" };
-        if chrome::glyph(ui, glyph, false).clicked() {
+        let toggle = chrome::glyph(ui, glyph, false);
+        crate::probe_anchor!(ui, format!("shelf:{}", shelf.name), toggle.interact_rect);
+        if toggle.clicked() {
             actions.push(Action::ToggleShelf(slot));
         }
         if chrome::icon(ui, "✎")

@@ -512,6 +512,7 @@ impl Script {
                 age: (i as f32 % 11.0) * 0.023,
                 amp: 10.0 + i as f32 % 7.0,
                 shape: SplashShape::Ring,
+                drag: 0.0,
             });
         }
         let raft = frame.is_multiple_of(3).then(|| {
@@ -547,6 +548,8 @@ impl Script {
                 age: ((i + frame) % 8) as f32 * 0.006,
                 amp: 1.8,
                 shape: SplashShape::Ring,
+                // exercise the directional dipole path under load too
+                drag: [0.0, 1.0, -1.0][i % 3],
             });
         }
         Self {

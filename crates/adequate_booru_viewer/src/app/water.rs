@@ -3,7 +3,8 @@ use super::*;
 const PLUNGE_SOURCE_LIFE: f32 = 0.24;
 const TOOLTIP_GRIP: f32 = 0.72;
 const HOVER_BUMP_AMP: f32 = 0.18;
-const TAPE_WAKE_AMP: f32 = 0.055;
+const TAPE_WAKE_AMP: f32 = 0.16;
+const LEVER_WAKE_AMP: f32 = 0.5;
 const GROUP_SELECT_AMP: f32 = 0.45;
 const FOLD_OPEN_AMP: f32 = -0.72;
 const FOLD_CLOSE_AMP: f32 = 0.92;
@@ -132,10 +133,16 @@ impl Bayonet {
     }
 
     fn plunge_as(&mut self, rect: egui::Rect, amp: f32, shape: crate::frost::SplashShape) {
-        self.plunge_scaled(rect, amp * self.water_amp(), shape);
+        self.plunge_scaled(rect, amp * self.water_amp(), shape, 0.0);
     }
 
-    fn plunge_scaled(&mut self, rect: egui::Rect, amp: f32, shape: crate::frost::SplashShape) {
+    fn plunge_scaled(
+        &mut self,
+        rect: egui::Rect,
+        amp: f32,
+        shape: crate::frost::SplashShape,
+        drag: f32,
+    ) {
         if amp.abs() <= f32::EPSILON {
             return;
         }
@@ -153,6 +160,7 @@ impl Bayonet {
             born: Instant::now(),
             amp,
             shape,
+            drag,
         });
         self.arm_water();
     }
@@ -161,12 +169,43 @@ impl Bayonet {
         self.plunge(rect, HOVER_BUMP_AMP);
     }
 
-    pub(super) fn tape_plunge(&mut self, rect: egui::Rect) {
-        self.plunge(rect, TAPE_WAKE_AMP);
+    /// Arming a date bound raises its rollers and shoulders water out (a source,
+    /// `sign > 0`); clearing it drops them into the void and draws water in (a
+    /// sink). A piston the size of the reel — a basin either way.
+    pub(super) fn lever_plunge(&mut self, rect: egui::Rect, sign: f32) {
+        self.plunge_as(
+            rect,
+            sign * LEVER_WAKE_AMP,
+            crate::frost::SplashShape::Basin,
+        );
+    }
+
+    /// A spun date reel drags the water in contact with it: a directional
+    /// velocity dipole, shoving the bulk off the edge the tape head travels
+    /// toward (`dir` is the signed screen-y of that travel).
+    pub(super) fn tape_plunge(&mut self, rect: egui::Rect, dir: f32) {
+        self.plunge_scaled(
+            rect,
+            TAPE_WAKE_AMP * self.water_amp(),
+            crate::frost::SplashShape::Ring,
+            dir,
+        );
     }
 
     pub(super) fn group_plunge(&mut self, rect: egui::Rect) {
         self.plunge(rect, GROUP_SELECT_AMP);
+    }
+
+    /// A tileset swap thwacks the whole pool from beneath — a broadband
+    /// velocity-noise impulse the solver's KO dissipation shreds into a quick
+    /// high-k shimmer. `energy` (0..1, the fraction of tiles actually replaced)
+    /// scales it, so an unchanged result makes no wave.
+    pub(super) fn pool_thwack(&mut self, rect: egui::Rect, energy: f32) {
+        self.plunge_as(
+            rect,
+            self.surf.thwack_amp * energy,
+            crate::frost::SplashShape::Jitter,
+        );
     }
 
     pub(super) fn fold_plunge(&mut self, wake: Option<chrome::FoldWake>) {
@@ -191,6 +230,7 @@ impl Bayonet {
                 wake.rect,
                 raw * self.glyph_amp(),
                 crate::frost::SplashShape::Ring,
+                0.0,
             );
         }
     }
@@ -250,6 +290,7 @@ impl Bayonet {
                     age,
                     amp: plunge.amp,
                     shape: plunge.shape,
+                    drag: plunge.drag,
                 }
             })
             .collect();
@@ -334,12 +375,14 @@ pub(super) struct LiftPlate {
     pub grip: f32,
 }
 
-/// A plate dropped into the water: the source of one expanding splash ring.
+/// A plate dropped into the water: the source of one expanding splash ring,
+/// or — when `drag` is non-zero — a directional shove off a moving surface.
 pub(super) struct Plunge {
     pub rect: egui::Rect,
     pub born: Instant,
     pub amp: f32,
     pub shape: crate::frost::SplashShape,
+    pub drag: f32,
 }
 
 /// Fingertip ripple inside the full-image viewer pond.

@@ -3,6 +3,34 @@
     reason = "the GUI binary is module-owned; the sibling retrieval library exists for benchmark tooling"
 )]
 
+/// Register a widget's hit-test rect under a semantic name for the `devtools`
+/// anchor probe. Expands to nothing without the feature; even the name
+/// expression is left unevaluated, so the call site is free in shipped builds.
+#[macro_export]
+macro_rules! probe_anchor {
+    ($ui:expr, $name:expr, $rect:expr) => {{
+        #[cfg(feature = "devtools")]
+        if $crate::probe::probing() {
+            $crate::probe::record($ui, $name, $rect);
+        }
+    }};
+}
+
+/// Clear the anchor accumulator at the start of an egui pass (the final pass of
+/// the frame wins). No-op without `devtools`.
+#[macro_export]
+macro_rules! probe_reset {
+    ($ctx:expr) => {{
+        #[cfg(feature = "devtools")]
+        if $crate::probe::probing() {
+            $crate::probe::reset($ctx);
+        }
+    }};
+}
+
+#[cfg(feature = "devtools")]
+mod probe;
+
 mod app;
 mod boiler;
 mod booru;

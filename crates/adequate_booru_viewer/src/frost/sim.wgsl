@@ -63,6 +63,7 @@ const PLATE_FEATHER: f32 = 6.0;
 const SOURCE_LIFE: f32 = 0.22;
 const BASIN_TAPER: f32 = 28.0;
 const BASIN_GAIN: f32 = 0.5;
+const JITTER_GAIN: f32 = 2.0; // broadband thwack strength (noise is ±0.5)
 const SOURCE_CEIL: f32 = 72.0;
 const SOURCE_KICK_CEIL: f32 = 96.0;
 const H_CEIL: f32 = 48.0;
@@ -151,11 +152,56 @@ fn source_basin(px: vec2f, rect: vec4f, age: f32, amp: f32) -> f32 {
     return amp * prism * birth * BASIN_GAIN;
 }
 
+// A spun tape strip dragging the water in contact with it (`drag` is the signed
+// screen-y the tape head travels). Friction piles the bulk off the leading edge
+// — a bulge shoved outward there — with a weaker suction trailing behind, the
+// bow-wave/wake of a moving surface. Skewed positive, so it reads as a push.
+fn source_drag(px: vec2f, rect: vec4f, age: f32, amp: f32, drag: f32) -> f32 {
+    if (amp == 0.0 || age > SOURCE_LIFE) {
+        return 0.0;
+    }
+    let cx = (rect.x + rect.z) * 0.5;
+    let half_w = max((rect.z - rect.x) * 0.5, 4.0);
+    let reach = max(mask.wave_sigma * 1.2, 8.0);
+    let across = exp(-0.5 * (px.x - cx) * (px.x - cx) / (half_w * half_w));
+    // Leading bulge: a crest centred just past the edge the tape drives toward.
+    let lead_y = select(rect.y, rect.w, drag > 0.0) + drag * reach;
+    let bulge = exp(-0.5 * (px.y - lead_y) * (px.y - lead_y) / (reach * reach));
+    // Trailing suction off the opposite edge, shallower.
+    let trail_y = select(rect.w, rect.y, drag > 0.0) - drag * reach * 0.5;
+    let suck = exp(-0.5 * (px.y - trail_y) * (px.y - trail_y) / (reach * reach * 1.6));
+    let birth = 1.0 - smoothstep(0.0, SOURCE_LIFE, age);
+    return amp * birth * across * (bulge - 0.5 * suck);
+}
+
+fn hash12(p: vec2f) -> f32 {
+    return fract(sin(dot(p, vec2f(127.1, 311.7))) * 43758.5453);
+}
+
+// The whole sheet thwacked from beneath: zero-mean broadband velocity noise, one
+// value per cell (Nyquist content). The KO term shreds the high-k within a few
+// steps — a quick shimmer — while the uniform friction carries the sparse low-k
+// residue out. Flat noise is broadband, so the solver does the spectral shaping.
+fn source_jitter(px: vec2f, rect: vec4f, age: f32, amp: f32) -> f32 {
+    if (amp == 0.0 || age > SOURCE_LIFE) {
+        return 0.0;
+    }
+    let inside = clamp(-sd_cut(px, rect.xy, rect.zw, 0.0) / PLATE_FEATHER, 0.0, 1.0);
+    let birth = 1.0 - smoothstep(0.0, SOURCE_LIFE, age);
+    // Re-seed the field each frame off the tide, so it boils rather than
+    // freezing into one fixed pattern when thwacks pile up on a fast scroll.
+    // (Velocity noise integrates into height, so the surface still reads smooth.)
+    let seed = px + fract(mask.tide) * vec2f(53.0, 97.0);
+    return amp * inside * birth * JITTER_GAIN * (hash12(seed) - 0.5);
+}
+
 fn source(px: vec2f) -> f32 {
     var drive = 0.0;
     for (var i = 0u; i < 32u; i = i + 1u) {
         let splash = mask.splashes[i];
-        if (splash.vitals.z > 0.5) { drive = drive + source_basin(px, splash.rect, splash.vitals.x, splash.vitals.y); }
+        if (abs(splash.vitals.w) > 0.5) { drive = drive + source_drag(px, splash.rect, splash.vitals.x, splash.vitals.y, splash.vitals.w); }
+        else if (splash.vitals.z > 1.5) { drive = drive + source_jitter(px, splash.rect, splash.vitals.x, splash.vitals.y); }
+        else if (splash.vitals.z > 0.5) { drive = drive + source_basin(px, splash.rect, splash.vitals.x, splash.vitals.y); }
         else { drive = drive + source_shell(px, splash.rect, splash.vitals.x, splash.vitals.y); }
     }
     for (var i = 0u; i < 4u; i = i + 1u) {

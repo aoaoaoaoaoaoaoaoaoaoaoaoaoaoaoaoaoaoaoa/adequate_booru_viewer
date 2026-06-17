@@ -183,6 +183,8 @@ impl Boiler {
         let raw_input = rig.input.take_egui_input(&rig.window);
         let app = &mut self.app;
         let output = self.ctx.run_ui(raw_input, |ui| app.pulse(ui));
+        #[cfg(feature = "devtools")]
+        self.app.probe_dump(&self.ctx, output.pixels_per_point);
         rig.input
             .handle_platform_output(&rig.window, output.platform_output);
         let primitives = self.ctx.tessellate(output.shapes, output.pixels_per_point);
