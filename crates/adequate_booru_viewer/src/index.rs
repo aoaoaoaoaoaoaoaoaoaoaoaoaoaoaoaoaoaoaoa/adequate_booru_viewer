@@ -15,7 +15,7 @@ use std::{
 use crate::date::{CreatedDay, DateRange};
 use crate::model::{
     BoolOp, PostId, PostRecord, Query, QueryAtom, QueryExpr, RatingClass, SearchHit, Sort, Tag,
-    TagKind, decode_record, encode_record, narrow_post_id,
+    TagKind, decode_record, encode_record, narrow_post_id, record_day,
 };
 use crate::posting::{self, Batch as FactBatch, Lane as PostingLane};
 use crate::trace::startup;
@@ -27,8 +27,6 @@ const RATING_CHUNKS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("ra
 const POSTING_FACTS: TableDefinition<'_, u64, &[u8]> = TableDefinition::new("posting_facts.v1");
 const SCORE_POSTS: TableDefinition<'_, u64, u32> = TableDefinition::new("score_posts");
 const FAV_POSTS: TableDefinition<'_, u64, u32> = TableDefinition::new("fav_posts");
-const DAY_BY_ID: TableDefinition<'_, u64, u32> = TableDefinition::new("day_by_id.v1");
-const DAY_BOUNDS: TableDefinition<'_, u32, u64> = TableDefinition::new("day_bounds.v1");
 const META: TableDefinition<'_, &str, u64> = TableDefinition::new("meta");
 
 const SMALL_SORT: u64 = 50_000;
@@ -348,8 +346,6 @@ impl Index {
             let mut post_table = tx.open_table(POSTS).context("open posts")?;
             let mut score_table = tx.open_table(SCORE_POSTS).context("open score_posts")?;
             let mut fav_table = tx.open_table(FAV_POSTS).context("open fav_posts")?;
-            let mut day_by_id = tx.open_table(DAY_BY_ID).context("open day_by_id")?;
-            let mut day_bounds = tx.open_table(DAY_BOUNDS).context("open day_bounds")?;
             let mut tag_kinds = tx.open_table(TAG_KINDS).context("open tag kind table")?;
             let mut facts = FactBatch::default();
 
@@ -364,7 +360,6 @@ impl Index {
                 };
                 if let Some(old) = old.as_ref() {
                     stage_record_delta(&mut facts, Some(old), indexable.then_some(post));
-                    remove_chronology(&mut day_by_id, &mut day_bounds, old)?;
                     remove_record_core(&mut post_table, &mut score_table, &mut fav_table, old)?;
                 }
 
@@ -387,7 +382,6 @@ impl Index {
                 let _old_fav = fav_table
                     .insert(sort_key_u32(post.favs, post.id), post.id.0)
                     .context("upsert favorite lane")?;
-                insert_chronology(&mut day_by_id, &mut day_bounds, post)?;
             }
             if !facts.is_empty() {
                 append_facts(tx, &facts)?;
@@ -565,7 +559,7 @@ impl Index {
         let tx = self.db.begin_read().context("begin index read")?;
         startup("index.search.tx");
         let posts = tx.open_table(POSTS).context("open posts")?;
-        let window = date_window(&tx, dates)?;
+        let window = date_window(&posts, dates)?;
         if window.is_some_and(DateWindow::empty) {
             return Ok(SearchHit::default());
         }
@@ -760,8 +754,6 @@ impl Index {
                 .context("prime posting facts")?;
             let _score = tx.open_table(SCORE_POSTS).context("prime score_posts")?;
             let _favs = tx.open_table(FAV_POSTS).context("prime fav_posts")?;
-            let _day_by_id = tx.open_table(DAY_BY_ID).context("prime day by id")?;
-            let _day_bounds = tx.open_table(DAY_BOUNDS).context("prime day bounds")?;
             let _meta = tx.open_table(META).context("prime meta")?;
         }
         tx.commit().context("commit schema prime")
@@ -785,8 +777,6 @@ impl Index {
         open!(POSTING_FACTS);
         open!(SCORE_POSTS);
         open!(FAV_POSTS);
-        open!(DAY_BY_ID);
-        open!(DAY_BOUNDS);
         open!(META);
         Ok(true)
     }
@@ -931,37 +921,104 @@ impl DateWindow {
     }
 }
 
-fn date_window(tx: &redb::ReadTransaction, dates: DateRange) -> Result<Option<DateWindow>> {
+/// Which end of the date run a binary search is hunting for.
+#[derive(Clone, Copy)]
+enum Edge {
+    Lower, // the smallest id whose day is ≥ the target
+    Upper, // the largest id whose day is ≤ the target
+}
+
+/// Resolve a date range to the contiguous id window covering it. Danbooru ids
+/// climb monotonically with `created_at`, so the posts whose day falls in
+/// [first, last] form one unbroken id run; we bracket its ends by binary
+/// searching the POSTS keyspace, peeking each probe's day. No chronology side
+/// table — the ordering of POSTS itself *is* the chronology. (A backdated post
+/// can land a hair off; the candidate intersection still filters the rest.)
+fn date_window(
+    posts: &impl redb::ReadableTable<u64, &'static [u8]>,
+    dates: DateRange,
+) -> Result<Option<DateWindow>> {
     let dates = dates.normalized();
     if !dates.active() {
         return Ok(None);
     }
-    let bounds = tx.open_table(DAY_BOUNDS).context("open day bounds")?;
-    let first_key = dates.first.map_or(0, CreatedDay::get);
-    let last_key = dates.last.map_or(u32::MAX, CreatedDay::get);
-    if first_key > last_key {
-        return Ok(Some(DateWindow { lo: 1, hi: 0 }));
+    let empty = DateWindow { lo: 1, hi: 0 };
+    let Some(max_id) = posts
+        .last()
+        .context("read last post")?
+        .map(|(id, _)| id.value())
+    else {
+        return Ok(Some(empty)); // no posts at all
+    };
+    let first_day = dates.first.map_or(0, CreatedDay::get);
+    let last_day = dates.last.map_or(u32::MAX, CreatedDay::get);
+    if first_day > last_day {
+        return Ok(Some(empty));
     }
-    let lo = bounds
-        .range(first_key..=u32::MAX)
-        .context("range first date bound")?
-        .next()
-        .transpose()
-        .context("read first date bound")?
-        .filter(|(day, _)| day.value() <= last_key)
-        .map(|(_, packed)| unpack_bounds(packed.value()).0);
-    let hi = bounds
-        .range(0_u32..=last_key)
-        .context("range last date bound")?
-        .next_back()
-        .transpose()
-        .context("read last date bound")?
-        .filter(|(day, _)| day.value() >= first_key)
-        .map(|(_, packed)| unpack_bounds(packed.value()).1);
+    let lo = day_bound(posts, max_id, first_day, Edge::Lower)?;
+    let hi = day_bound(posts, max_id, last_day, Edge::Upper)?;
     Ok(Some(match (lo, hi) {
-        (Some(lo), Some(hi)) => DateWindow { lo, hi },
-        _ => DateWindow { lo: 1, hi: 0 },
+        (Some(lo), Some(hi)) if lo <= hi => DateWindow { lo, hi },
+        _ => empty,
     }))
+}
+
+/// Binary search the POSTS keyspace for the `edge` of the run of posts on day
+/// `target`, peeking each probe's day. Probe ranges are clamped to the live
+/// `[lo, hi]` value window so the search always makes progress on a sparse,
+/// gap-riddled keyspace.
+fn day_bound(
+    posts: &impl redb::ReadableTable<u64, &'static [u8]>,
+    max_id: u64,
+    target: u32,
+    edge: Edge,
+) -> Result<Option<u32>> {
+    let (mut lo, mut hi) = (0_u64, max_id);
+    let mut answer = None;
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        let probe = match edge {
+            Edge::Lower => posts.range(mid..=hi).context("probe up")?.next(),
+            Edge::Upper => posts.range(lo..=mid).context("probe down")?.next_back(),
+        }
+        .transpose()
+        .context("read probe post")?;
+        let Some((id, blob)) = probe else {
+            // No live post on this side of the midpoint; collapse toward it.
+            match edge {
+                Edge::Lower => match mid.checked_sub(1) {
+                    Some(next) => hi = next,
+                    None => break,
+                },
+                Edge::Upper => lo = mid + 1,
+            }
+            continue;
+        };
+        let pid = id.value();
+        let day = record_day(blob.value()).map(CreatedDay::get);
+        let hit = match edge {
+            Edge::Lower => day.is_some_and(|day| day >= target),
+            Edge::Upper => day.is_some_and(|day| day <= target),
+        };
+        match (edge, hit) {
+            (Edge::Lower, true) | (Edge::Upper, false) => {
+                if hit {
+                    answer = Some(pid);
+                }
+                match pid.checked_sub(1) {
+                    Some(next) => hi = next,
+                    None => break,
+                }
+            }
+            (Edge::Lower, false) | (Edge::Upper, true) => {
+                if hit {
+                    answer = Some(pid);
+                }
+                lo = pid + 1;
+            }
+        }
+    }
+    Ok(answer.and_then(|id| u32::try_from(id).ok()))
 }
 
 struct BitmapEval<'a, P, B>
@@ -1120,97 +1177,6 @@ fn remove_record_core(
         .remove(sort_key_u32(post.favs, post.id))
         .context("remove favorite lane")?;
     Ok(())
-}
-
-fn insert_chronology(
-    day_by_id: &mut redb::Table<'_, u64, u32>,
-    day_bounds: &mut redb::Table<'_, u32, u64>,
-    post: &PostRecord,
-) -> Result<()> {
-    let Some(day) = post_day(post) else {
-        return Ok(());
-    };
-    let id = post.id.0;
-    let _old_day = day_by_id
-        .insert(u64::from(id), day.get())
-        .context("upsert post day")?;
-    let (lo, hi) = day_bounds
-        .get(day.get())
-        .context("read day bounds")?
-        .map(|guard| unpack_bounds(guard.value()))
-        .unwrap_or((id, id));
-    let _old = day_bounds
-        .insert(day.get(), pack_bounds(lo.min(id), hi.max(id)))
-        .context("upsert day bounds")?;
-    Ok(())
-}
-
-fn remove_chronology(
-    day_by_id: &mut redb::Table<'_, u64, u32>,
-    day_bounds: &mut redb::Table<'_, u32, u64>,
-    post: &PostRecord,
-) -> Result<()> {
-    let Some(day) = post_day(post) else {
-        return Ok(());
-    };
-    let id = post.id.0;
-    let bounds = day_bounds
-        .get(day.get())
-        .context("read old day bounds")?
-        .map(|guard| unpack_bounds(guard.value()));
-    let old_day = day_by_id.remove(u64::from(id)).context("remove post day")?;
-    drop(old_day);
-    if bounds.is_some_and(|(lo, hi)| lo == id || hi == id) {
-        recompute_day_bounds(day_by_id, day_bounds, day)?;
-    }
-    Ok(())
-}
-
-fn recompute_day_bounds(
-    day_by_id: &redb::Table<'_, u64, u32>,
-    day_bounds: &mut redb::Table<'_, u32, u64>,
-    day: CreatedDay,
-) -> Result<()> {
-    let mut bounds = None::<(u32, u32)>;
-    for row in day_by_id
-        .range(0_u64..=u64::MAX)
-        .context("range post days")?
-    {
-        let (id, found) = row.context("read post day")?;
-        if found.value() != day.get() {
-            continue;
-        }
-        let id = u32::try_from(id.value()).context("post id exceeds u32")?;
-        bounds = Some(match bounds {
-            Some((lo, hi)) => (lo.min(id), hi.max(id)),
-            None => (id, id),
-        });
-    }
-    match bounds {
-        Some((lo, hi)) => {
-            let _old = day_bounds
-                .insert(day.get(), pack_bounds(lo, hi))
-                .context("rewrite day bounds")?;
-        }
-        None => {
-            let _old = day_bounds
-                .remove(day.get())
-                .context("remove empty day bounds")?;
-        }
-    }
-    Ok(())
-}
-
-fn post_day(post: &PostRecord) -> Option<CreatedDay> {
-    CreatedDay::parse_iso(&post.created_at)
-}
-
-fn pack_bounds(lo: u32, hi: u32) -> u64 {
-    (u64::from(lo) << 32) | u64::from(hi)
-}
-
-fn unpack_bounds(raw: u64) -> (u32, u32) {
-    ((raw >> 32) as u32, raw as u32)
 }
 
 fn stage_record_delta(facts: &mut FactBatch, old: Option<&PostRecord>, new: Option<&PostRecord>) {

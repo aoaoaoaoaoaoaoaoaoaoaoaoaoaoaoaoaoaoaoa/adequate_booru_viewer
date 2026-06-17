@@ -992,6 +992,22 @@ pub fn decode_record(bytes: &[u8]) -> Result<PostRecord> {
     Ok(post)
 }
 
+/// Peek just a stored record's created-at day, stopping before the tag list —
+/// the date-window binary search probes many records per query and only needs
+/// this, so it skips the expensive tag decode. `None` if the blob is malformed
+/// or the date does not parse.
+pub fn record_day(bytes: &[u8]) -> Option<crate::date::CreatedDay> {
+    let mut blade = wire::Blade::new(bytes, POST_MAGIC).ok()?;
+    let _id = blade.u32().ok()?;
+    let _rating = decode_rating(&mut blade).ok()?;
+    let _score = blade.i32().ok()?;
+    let _favs = blade.u32().ok()?;
+    let _width = blade.u32().ok()?;
+    let _height = blade.u32().ok()?;
+    let created_at = blade.string().ok()?;
+    crate::date::CreatedDay::parse_iso(&created_at)
+}
+
 fn encode_tag_hints(sink: &mut wire::Sink, hints: &[TagHint]) {
     let mut canonical = BTreeMap::new();
     for hint in hints {
