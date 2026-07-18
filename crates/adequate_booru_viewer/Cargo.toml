@@ -31,7 +31,7 @@ anyhow = "1.0.102"
 arboard = "3.6.1"
 crossbeam-channel = "0.5.15"
 directories = "6.0.0"
-dwemer_poolrooms = { path = "../../../dwemer_poolrooms" }
+dwemer_poolrooms = "0.1.0"
 egui = "0.34.3"
 egui-wgpu = "0.34.3"
 egui-winit = "0.34.3"
