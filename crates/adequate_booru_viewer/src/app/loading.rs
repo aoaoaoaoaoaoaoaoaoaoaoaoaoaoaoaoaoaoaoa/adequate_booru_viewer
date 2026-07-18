@@ -35,8 +35,8 @@ impl Bayonet {
         let empty_since = *self.empty_since.get_or_insert(now);
         let age = now.saturating_duration_since(empty_since);
         if age < DWELL {
-            self.loading_raft.hide();
-            self.floor_rect = egui::Rect::ZERO;
+            self.water.hide_loading();
+            self.water.set_floor(None);
             ui.ctx().request_repaint_after(DWELL.saturating_sub(age));
             return;
         }
@@ -59,19 +59,16 @@ impl Bayonet {
             CARD_H.min((arena.height() - 24.0).max(96.0)),
         );
         let rect = egui::Rect::from_center_size(arena.center(), size);
-        self.floor_rect = arena;
+        self.water.set_floor(Some(arena));
         if state.raised() && self.water_mode.wet() {
-            self.loading_raft.show(ui.ctx(), rect);
-            self.arm_water();
+            self.water.show_loading(ui.ctx(), rect);
         } else {
-            self.loading_raft.hide();
+            self.water.hide_loading();
         }
         if state.draining() && self.water_mode.wet() {
-            for drain in self.empty_drain.show(ui.ctx(), rect) {
-                self.drain_plunge(drain.rect, drain.amp);
-            }
+            self.water.show_drain(ui.ctx(), rect);
         } else {
-            self.empty_drain.hide();
+            self.water.hide_drain();
         }
 
         let painter = ui.painter();
@@ -79,7 +76,7 @@ impl Bayonet {
         let _stroke = painter.rect_stroke(
             rect,
             2.0,
-            egui::Stroke::new(1.0, chrome::EDGE_STRONG),
+            egui::Stroke::new(1.0_f32, chrome::EDGE_STRONG),
             egui::StrokeKind::Inside,
         );
         let font = egui::FontId::new(36.0, egui::FontFamily::Proportional);

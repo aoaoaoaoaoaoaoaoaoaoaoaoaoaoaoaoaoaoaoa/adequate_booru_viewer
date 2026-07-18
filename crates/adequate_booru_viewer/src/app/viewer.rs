@@ -26,7 +26,7 @@ pub(super) fn viewer_title_bar(
     let mut actions = Vec::new();
     let _bar = egui::Frame::new()
         .fill(chrome::RAISED)
-        .stroke(egui::Stroke::new(1.0, chrome::EDGE))
+        .stroke(egui::Stroke::new(1.0_f32, chrome::EDGE))
         .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
@@ -86,8 +86,7 @@ impl Bayonet {
         self.zoom = Some(post.clone());
         self.zoom_gate = ZoomGate::Fresh;
         self.viewer_tag_groups = None;
-        self.viewer_touches.clear();
-        self.viewer_pond = egui::Rect::ZERO;
+        self.water.close_pond();
         let _old_fault = self.full_faults.remove(&post.id);
         self.request_full(post);
     }
@@ -148,6 +147,7 @@ impl Bayonet {
     }
 
     pub(super) fn full_frame(&mut self, ctx: &egui::Context) {
+        self.water.begin_pond(self.zoom.is_some());
         if self.zoom.is_some() && tab_pressed(ctx) {
             self.toggle_viewer_tags();
         }
@@ -165,7 +165,6 @@ impl Bayonet {
         };
         self.request_full(&post);
         let mut close = false;
-        self.viewer_pond = egui::Rect::ZERO;
         let screen = ctx.content_rect();
         let tags = self.viewer_tags_open;
         let gutter = if tags { GUTTER } else { 0.0 };
@@ -205,7 +204,7 @@ impl Bayonet {
                                     ))
                                     .sense(egui::Sense::click()),
                             );
-                            self.viewer_pond = response.rect;
+                            self.water.pond_surface(response.rect);
                             crate::probe_anchor!(ui, "viewer:image", response.interact_rect);
                             if response.clicked_by(egui::PointerButton::Primary)
                                 && let Some(pos) = response.interact_pointer_pos()
@@ -245,8 +244,7 @@ impl Bayonet {
             self.full_wait.clear();
             self.full_faults.clear();
             self.viewer_tag_groups = None;
-            self.viewer_touches.clear();
-            self.viewer_pond = egui::Rect::ZERO;
+            self.water.close_pond();
         } else {
             self.zoom_gate = ZoomGate::Armed;
         }

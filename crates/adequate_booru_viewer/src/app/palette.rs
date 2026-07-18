@@ -57,7 +57,7 @@ impl Bayonet {
                 ui.set_min_size(egui::vec2(TAG_MENU_WIDTH, height));
                 let _frame = egui::Frame::new()
                     .fill(chrome::SURFACE)
-                    .stroke(egui::Stroke::new(1.0, chrome::EDGE))
+                    .stroke(egui::Stroke::new(1.0_f32, chrome::EDGE))
                     .inner_margin(egui::Margin::symmetric(7, 6))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());

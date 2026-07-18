@@ -24,13 +24,14 @@ path = "examples/retrieval_bench.rs"
 # Debug-only instrumentation umbrella. First tenant: the egui anchor probe
 # (src/probe.rs) the demo xtask drives. Never in the default set, so shipped
 # builds pay nothing.
-devtools = ["dep:serde_json"]
+devtools = ["dep:serde_json", "dwemer_poolrooms/instrumentation"]
 
 [dependencies]
 anyhow = "1.0.102"
 arboard = "3.6.1"
 crossbeam-channel = "0.5.15"
 directories = "6.0.0"
+dwemer_poolrooms = { path = "../../../dwemer_poolrooms" }
 egui = "0.34.3"
 egui-wgpu = "0.34.3"
 egui-winit = "0.34.3"

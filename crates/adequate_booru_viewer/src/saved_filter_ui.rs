@@ -210,7 +210,7 @@ fn filter_row(
         let y = if after { rect.bottom() } else { rect.top() };
         let _line = ui
             .painter()
-            .hline(rect.x_range(), y, egui::Stroke::new(1.0, chrome::HOT));
+            .hline(rect.x_range(), y, egui::Stroke::new(1.0_f32, chrome::HOT));
     }
     if let Some(payload) = row.response.dnd_release_payload::<FilterName>()
         && *payload != filter.name
@@ -284,7 +284,7 @@ fn shelf_rows(
         let _glow = ui.painter().rect_stroke(
             rect,
             2.0,
-            egui::Stroke::new(1.0, chrome::HOT),
+            egui::Stroke::new(1.0_f32, chrome::HOT),
             egui::StrokeKind::Inside,
         );
     }
@@ -315,7 +315,7 @@ fn root_basin(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 14.0), egui::Sense::hover());
     let hot = response.dnd_hover_payload::<FilterName>().is_some();
-    let stroke = egui::Stroke::new(1.0, if hot { chrome::HOT } else { chrome::EDGE });
+    let stroke = egui::Stroke::new(1.0_f32, if hot { chrome::HOT } else { chrome::EDGE });
     let _line = ui.painter().hline(rect.x_range(), rect.center().y, stroke);
     if let Some(payload) = response.dnd_release_payload::<FilterName>() {
         actions.push(Action::Moor {

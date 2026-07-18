@@ -100,14 +100,21 @@ pub fn dump(ctx: &Context, ppp: f32, state: State) {
     let anchors = ctx
         .data_mut(|data| data.get_temp::<Anchors>(Id::new(STORE)))
         .unwrap_or_default();
+    let poolroom_anchors = dwemer_poolrooms::instrumentation::take(ctx);
     let frame = Frame {
         frame: ctx.cumulative_frame_nr(),
         ppp,
         anchors: anchors
             .0
             .iter()
+            .map(|(name, rect)| (name.clone(), *rect))
+            .chain(
+                poolroom_anchors
+                    .into_iter()
+                    .map(|anchor| (anchor.name, anchor.rect)),
+            )
             .map(|(name, rect)| Anchor {
-                name: name.clone(),
+                name,
                 rect: [
                     rect.min.x * ppp,
                     rect.min.y * ppp,

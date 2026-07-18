@@ -19,14 +19,12 @@ use egui_winit::winit::{
 use std::{
     path::Path,
     sync::{Arc, Mutex, MutexGuard},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use crate::{app::Bayonet, frost::Frost, trace::startup};
 
 const WINDOW_SIZE: LogicalSize<f64> = LogicalSize::new(1440.0, 920.0);
-const QUIVER_WAKE: Duration = Duration::from_secs(8);
-const QUIVER_EPSILON: f32 = 0.012;
 
 /// User event that wakes the loop; the alarm carries the actual deadline.
 #[derive(Clone, Copy, Debug)]
@@ -34,80 +32,6 @@ struct Spark;
 
 /// Earliest pending repaint deadline, shared with egui's repaint callback.
 type Alarm = Arc<Mutex<Option<Instant>>>;
-
-/// One small control-plate oscillator in logical pixels. Egui temp data drives it
-/// while hovered; once contact leaves, it rings down under its own damping so
-/// quiver waves never snap off.
-#[derive(Clone, Copy)]
-struct Quiver {
-    id: u64,
-    rect: egui::Rect,
-    pointer: egui::Pos2,
-    grip: f32,
-    omega: f32,
-}
-
-impl Quiver {
-    fn physical(self, scale: f32) -> crate::frost::Tension {
-        crate::frost::Tension {
-            id: self.id,
-            rect: egui::Rect::from_min_max(
-                (self.rect.min.to_vec2() * scale).to_pos2(),
-                (self.rect.max.to_vec2() * scale).to_pos2(),
-            ),
-            pointer: (self.pointer.to_vec2() * scale).to_pos2(),
-            grip: self.grip,
-            omega: self.omega,
-        }
-    }
-}
-
-/// Collects the frame's control-quiver seeds (left by `chrome::tension`) and
-/// evolves the persistent oscillator bank.
-fn take_tensions(
-    ctx: &egui::Context,
-    scale: f32,
-    bank: &mut Vec<Quiver>,
-    then: &mut Instant,
-    release: f32,
-) -> Vec<crate::frost::Tension> {
-    let now = Instant::now();
-    let dt = now.duration_since(*then).as_secs_f32().clamp(0.0, 0.12);
-    *then = now;
-    for quiver in bank.iter_mut() {
-        quiver.grip *= (-dt / release.max(0.03)).exp();
-    }
-    let seeds = ctx
-        .data_mut(|data| {
-            data.remove_temp::<Vec<crate::frost::Tension>>(egui::Id::new("tension-field"))
-        })
-        .unwrap_or_default();
-    for seed in seeds {
-        let incoming = Quiver {
-            id: seed.id,
-            rect: seed.rect,
-            pointer: seed.pointer,
-            grip: seed.grip,
-            omega: seed.omega,
-        };
-        match bank.iter_mut().find(|quiver| quiver.id == incoming.id) {
-            Some(quiver) => {
-                quiver.rect = incoming.rect;
-                quiver.pointer = incoming.pointer;
-                quiver.grip = quiver.grip.max(incoming.grip);
-                quiver.omega = incoming.omega;
-            }
-            None => bank.push(incoming),
-        }
-    }
-    bank.retain(|quiver| quiver.grip > QUIVER_EPSILON);
-    bank.sort_by(|a, b| b.grip.total_cmp(&a.grip));
-    bank.iter()
-        .take(crate::frost::QUIVER_SLOTS)
-        .copied()
-        .map(|quiver| quiver.physical(scale))
-        .collect()
-}
 
 pub fn run(ctx: egui::Context, app: Bayonet) -> Result<()> {
     let event_loop = EventLoop::<Spark>::with_user_event()
@@ -121,10 +45,6 @@ pub fn run(ctx: egui::Context, app: Bayonet) -> Result<()> {
         app,
         alarm,
         rig: None,
-        epoch: Instant::now(),
-        quivers: Vec::new(),
-        quiver_tick: Instant::now(),
-        quiver_until: None,
         modifiers: ModifiersState::empty(),
         dump_next: false,
     };
@@ -161,12 +81,6 @@ struct Boiler {
     app: Bayonet,
     alarm: Alarm,
     rig: Option<Rig>,
-    /// Tide origin: tremor wavetrains phase off seconds since boot, wrapped
-    /// well inside f32 precision.
-    epoch: Instant,
-    quivers: Vec<Quiver>,
-    quiver_tick: Instant,
-    quiver_until: Option<Instant>,
     modifiers: ModifiersState,
     dump_next: bool,
 }
@@ -188,55 +102,18 @@ impl Boiler {
         rig.input
             .handle_platform_output(&rig.window, output.platform_output);
         let primitives = self.ctx.tessellate(output.shapes, output.pixels_per_point);
-        let veil = self.app.frost_veil(&self.ctx, output.pixels_per_point);
         let tooltip_rects = tooltip_rects(&self.ctx);
-        let tensions = take_tensions(
-            &self.ctx,
-            output.pixels_per_point,
-            &mut self.quivers,
-            &mut self.quiver_tick,
-            self.app.quiver_release(),
-        );
-        if !tensions.is_empty() {
-            self.quiver_until = Some(Instant::now() + QUIVER_WAKE);
-            rig.window.request_redraw();
-        }
-        let lifts = self
+        let water = self
             .app
-            .frost_lift(&self.ctx, output.pixels_per_point, &tooltip_rects);
-        let (water, scroll_tilt, splashes, raft, floor) =
-            self.app.frost_splashes(&self.ctx, output.pixels_per_point);
-        let (viewer, touches) = self.app.frost_touches(&self.ctx, output.pixels_per_point);
-        let quiver_wake = self
-            .quiver_until
-            .is_some_and(|until| until > Instant::now());
-        if quiver_wake {
+            .frost_frame(&self.ctx, output.pixels_per_point, &tooltip_rects);
+        if water.wants_repaint() {
             rig.window.request_redraw();
-        } else {
-            self.quiver_until = None;
         }
-        let wake = self.app.frost_wake(&self.ctx) || quiver_wake;
         let dump = rig.render(
             &primitives,
             &output.textures_delta,
             output.pixels_per_point,
-            &crate::frost::Surge {
-                dry: !self.app.water_wet(),
-                veil,
-                tensions: &tensions,
-                lifts: &lifts,
-                water,
-                scroll_tilt,
-                splashes: &splashes,
-                raft,
-                floor,
-                viewer,
-                touches: &touches,
-                wake,
-                tide: self.epoch.elapsed().as_secs_f32() % 1000.0,
-                brine: self.app.brine(),
-                guard: self.app.water_guard(),
-            },
+            &water,
             dump_path.as_deref(),
         );
         if let (Some(path), Some(result)) = (dump_path.as_deref(), dump) {
@@ -452,7 +329,7 @@ impl Rig {
         primitives: &[egui::ClippedPrimitive],
         delta: &egui::TexturesDelta,
         pixels_per_point: f32,
-        surge: &crate::frost::Surge<'_>,
+        water: &crate::frost::Frame,
         dump_path: Option<&Path>,
     ) -> Option<Result<()>> {
         let screen = ScreenDescriptor {
@@ -500,10 +377,10 @@ impl Rig {
         let surface_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        if surge.dry {
+        if water.dry() {
             self.frost.clear_water(&self.gpu.queue);
         }
-        let frosted = surge.live() && self.frost.scene_view().is_some();
+        let frosted = water.live() && self.frost.scene_view().is_some();
         {
             let target = if frosted {
                 self.frost.scene_view().unwrap_or(&surface_view)
@@ -539,7 +416,7 @@ impl Rig {
                 &self.gpu.queue,
                 &mut encoder,
                 &surface_view,
-                surge,
+                water,
             );
         }
         let _submission = self
@@ -548,7 +425,7 @@ impl Rig {
             .submit(user_cmds.into_iter().chain([encoder.finish()]));
         if self
             .frost
-            .after_submit(&self.gpu.device, &self.gpu.queue, surge.guard)
+            .after_submit(&self.gpu.device, &self.gpu.queue, water)
         {
             self.window.request_redraw();
         }
@@ -557,7 +434,7 @@ impl Rig {
                 &self.gpu.device,
                 &self.gpu.queue,
                 path,
-                surge,
+                water,
                 screen.size_in_pixels,
                 pixels_per_point,
             )

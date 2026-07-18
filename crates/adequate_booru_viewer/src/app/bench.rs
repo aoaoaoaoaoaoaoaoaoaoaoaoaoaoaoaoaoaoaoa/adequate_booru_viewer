@@ -12,14 +12,14 @@ impl super::Bayonet {
             return;
         }
         let mut open = self.bench_open;
+        let mut reset = false;
         let _window = egui::Window::new("water physics bench")
             .open(&mut open)
             .default_width(360.0)
             .vscroll(true)
             .show(ctx, |ui| {
                 ui.spacing_mut().slider_width = 190.0;
-                let brine = &mut self.brine;
-                let surf = &mut self.surf;
+                let (brine, surf) = self.water.laboratory_mut();
                 let mut wavelength = TAU / brine.tremor_k;
                 let mut hertz = brine.tremor_omega / TAU;
 
@@ -50,12 +50,12 @@ impl super::Bayonet {
                         0.0..=crate::frost::BULGE_CEIL,
                     );
                     knob(ui, "surfaced light", &mut brine.lift_bright, 0.0..=0.4);
-                    knob(ui, "rise time s", &mut surf.tau_rise, 0.02..=1.5);
-                    knob(ui, "sink time s", &mut surf.tau_fall, 0.02..=1.5);
-                    knob(ui, "hover impulse", &mut surf.enter_amp, 0.0..=12.0);
-                    knob(ui, "release impulse", &mut surf.exit_amp, 0.0..=12.0);
-                    knob(ui, "open impulse", &mut surf.click_amp, 0.0..=12.0);
-                    knob(ui, "swap thump", &mut surf.thwack_amp, 0.0..=2.0);
+                    knob(ui, "rise time s", &mut surf.lift_rise, 0.02..=1.5);
+                    knob(ui, "sink time s", &mut surf.lift_fall, 0.02..=1.5);
+                    knob(ui, "hover impulse", &mut surf.enter_impulse, 0.0..=12.0);
+                    knob(ui, "release impulse", &mut surf.exit_impulse, 0.0..=12.0);
+                    knob(ui, "open impulse", &mut surf.click_impulse, 0.0..=12.0);
+                    knob(ui, "swap thump", &mut surf.thwack_impulse, 0.0..=2.0);
                 });
                 section(ui, "WATER FIELD", |ui| {
                     knob(ui, "wave speed px/s", &mut brine.wave_v, 40.0..=900.0);
@@ -77,7 +77,7 @@ impl super::Bayonet {
                         &mut surf.scroll_coupling,
                         0.0..=0.08,
                     );
-                    knob(ui, "tray memory s", &mut surf.scroll_tau, 0.02..=0.8);
+                    knob(ui, "tray memory s", &mut surf.scroll_memory, 0.02..=0.8);
                 });
                 section(ui, "FIELD GUARD", |ui| {
                     let _guard = ui.checkbox(&mut surf.poison_sweep, "poison sweep + reset");
@@ -93,9 +93,9 @@ impl super::Bayonet {
                     );
                 });
                 section(ui, "VIEWER + TEXT", |ui| {
-                    knob(ui, "typed glyph impulse", &mut surf.text_amp, 0.0..=4.0);
-                    knob(ui, "viewer tap impulse", &mut surf.viewer_amp, 0.0..=8.0);
-                    knob(ui, "viewer ring life s", &mut surf.viewer_life, 0.5..=10.0);
+                    knob(ui, "typed glyph impulse", &mut surf.text_impulse, 0.0..=4.0);
+                    knob(ui, "viewer tap impulse", &mut surf.pond_impulse, 0.0..=8.0);
+                    knob(ui, "viewer ring life s", &mut surf.pond_life, 0.5..=10.0);
                     knob(
                         ui,
                         "viewer spreading px",
@@ -109,10 +109,12 @@ impl super::Bayonet {
                 brine.tremor_omega = hertz * TAU;
                 ui.add_space(4.0);
                 if ui.button("BECALM: RESET PHYSICS").clicked() {
-                    self.brine = crate::frost::Brine::default();
-                    self.surf = super::Surf::default();
+                    reset = true;
                 }
             });
+        if reset {
+            self.water.reset_laboratory();
+        }
         self.bench_open = open;
     }
 }

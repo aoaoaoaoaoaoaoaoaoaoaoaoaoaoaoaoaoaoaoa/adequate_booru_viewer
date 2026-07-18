@@ -184,7 +184,7 @@ fn render_group(
         let _stroke = ui.painter().rect_stroke(
             frame.response.rect.expand(1.0),
             2.0,
-            egui::Stroke::new(1.5, chrome::HOT),
+            egui::Stroke::new(1.5_f32, chrome::HOT),
             egui::StrokeKind::Inside,
         );
     }
@@ -334,10 +334,10 @@ fn group_fill(depth: usize) -> egui::Color32 {
 
 fn group_stroke(depth: usize, active: bool) -> egui::Stroke {
     if active {
-        return egui::Stroke::new(2.0, chrome::HOT);
+        return egui::Stroke::new(2.0_f32, chrome::HOT);
     }
     let (r, g, b) = group_hue(depth);
-    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(r, g, b, 96))
+    egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(r, g, b, 96))
 }
 
 /// Dotted group path for probe anchor names (`[0,1]` -> `"0.1"`).

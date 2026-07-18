@@ -46,9 +46,8 @@ mod viewer;
 mod water;
 
 use refresh::{AsyncPulse, PulseGate};
-use scroll::{ThumbCruise, TrayTilt};
+use scroll::ThumbCruise;
 use viewer::{FullWait, ZoomGate};
-use water::{EmptyDrain, LiftPlate, LoadingRaft, Plunge, TouchPlunge};
 
 const RESULT_LIMIT: usize = 360;
 const HIT_CACHE_LIMIT: usize = 24;
@@ -70,100 +69,6 @@ const VEIL_RISE: f32 = 0.12;
 const VEIL_FALL: f32 = 0.06;
 const ZOOM_DIM: f32 = 0.78;
 const MENU_DIM: f32 = 0.62;
-/// The CPU-side water tunables, sibling to `frost::Brine` (the shader side);
-/// both adjustable live via the water bench (F12). Defaults are the shipped
-/// feel.
-struct Surf {
-    /// Splash amplitudes: surfacing throws a wave, sinking sheds a softer
-    /// ring, a click (plate leaving the water) makes the biggest splash.
-    enter_amp: f32,
-    exit_amp: f32,
-    click_amp: f32,
-    /// A tileset swap thwacks the whole pool from beneath; scaled by the
-    /// fraction of tiles actually replaced.
-    thwack_amp: f32,
-    /// The viewer pond still uses analytic point ripples; this is their fade.
-    text_amp: f32,
-    viewer_amp: f32,
-    viewer_life: f32,
-    /// Button plates ring down in the boiler after pointer contact leaves.
-    quiver_release: f32,
-    /// Scroll inertia: tray velocity maps to a bounded surface tilt; the
-    /// persistent solver performs the ensuing slosh.
-    scroll_coupling: f32,
-    scroll_tau: f32,
-    /// Debug guard: periodically read the water field and zero it if poisoned.
-    poison_sweep: bool,
-    /// First-order relaxation of the lift plates: rise a little faster than
-    /// sink, so the slosh settles slowly.
-    tau_rise: f32,
-    tau_fall: f32,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Drench {
-    wave: f32,
-    glyph: f32,
-    optics: f32,
-    decay: f32,
-}
-
-impl WaterMode {
-    fn drench(self) -> Drench {
-        match self {
-            Self::Dry => Drench {
-                wave: 0.0,
-                glyph: 0.0,
-                optics: 0.0,
-                decay: 1.0,
-            },
-            Self::Wet => Drench {
-                wave: 1.25,
-                glyph: 0.75,
-                optics: 1.0,
-                decay: 1.0,
-            },
-            Self::ReallyWet => Drench {
-                wave: 2.0,
-                glyph: 2.0,
-                optics: 2.0,
-                decay: 2.0,
-            },
-        }
-    }
-}
-
-impl Drench {
-    fn brine(self, mut brine: crate::frost::Brine) -> crate::frost::Brine {
-        brine.refract_px *= self.optics;
-        brine.ior_spread *= self.optics;
-        brine.meniscus_px *= self.wave;
-        brine.tremor_amp *= self.wave;
-        brine.wave_damp *= self.decay;
-        brine.height_retention = 1.0 - (1.0 - brine.height_retention) / self.decay;
-        brine
-    }
-}
-
-impl Default for Surf {
-    fn default() -> Self {
-        Self {
-            enter_amp: 0.9,
-            exit_amp: 0.42,
-            click_amp: 2.5,
-            thwack_amp: 0.24,
-            text_amp: 1.02,
-            viewer_amp: 1.6,
-            viewer_life: 8.0,
-            quiver_release: 0.48,
-            scroll_coupling: 0.02,
-            scroll_tau: 0.11,
-            poison_sweep: true,
-            tau_rise: 0.09,
-            tau_fall: 0.24,
-        }
-    }
-}
 
 #[expect(
     clippy::struct_excessive_bools,
@@ -222,23 +127,9 @@ pub struct Bayonet {
     tag_menu: TagMenu,
     tag_menu_rect: Option<egui::Rect>,
     menu_cuts: Option<(egui::Rect, egui::Rect)>,
-    hover_tile: Option<(PostId, egui::Rect)>,
-    lift_plates: Vec<LiftPlate>,
-    splash_memo: Option<(PostId, egui::Rect)>,
-    plunges: Vec<Plunge>,
-    viewer_touches: Vec<TouchPlunge>,
-    loading_raft: LoadingRaft,
-    empty_drain: EmptyDrain,
-    water_until: Option<Instant>,
-    viewer_pond: egui::Rect,
-    water_rect: egui::Rect,
-    floor_rect: egui::Rect,
+    water: crate::frost::WaterTable,
     water_mode: WaterMode,
-    scroll: TrayTilt,
     thumb_cruise: ThumbCruise,
-    scroll_tilt: f32,
-    brine: crate::frost::Brine,
-    surf: Surf,
     bench_open: bool,
     tag_kinds: HashMap<Tag, TagKind>,
     suggest_memo: Option<(String, Vec<TagSuggestion>)>,
@@ -351,23 +242,13 @@ impl Bayonet {
             tag_menu: TagMenu::Closed,
             tag_menu_rect: None,
             menu_cuts: None,
-            hover_tile: None,
-            lift_plates: Vec::new(),
-            splash_memo: None,
-            plunges: Vec::new(),
-            viewer_touches: Vec::new(),
-            loading_raft: LoadingRaft::new(),
-            empty_drain: EmptyDrain::new(),
-            water_until: None,
-            viewer_pond: egui::Rect::ZERO,
-            water_rect: egui::Rect::ZERO,
-            floor_rect: egui::Rect::ZERO,
+            water: crate::frost::WaterTable::new(match slate.water {
+                WaterMode::Dry => crate::frost::Wetness::Dry,
+                WaterMode::Wet => crate::frost::Wetness::Wet,
+                WaterMode::ReallyWet => crate::frost::Wetness::Deluge,
+            }),
             water_mode: slate.water,
-            scroll: TrayTilt::default(),
             thumb_cruise: ThumbCruise::default(),
-            scroll_tilt: 0.0,
-            brine: crate::frost::Brine::default(),
-            surf: Surf::default(),
             bench_open: false,
             tag_kinds: HashMap::new(),
             suggest_memo: None,
@@ -451,15 +332,6 @@ impl Bayonet {
         self.flush_config(&ctx);
         self.cycle_query_group(&ctx);
         self.paint(ui);
-        // Quivering buttons shed continuous wavetrains; while any seed lives
-        // the water moves, so keep painting.
-        let quivering = ctx.data(|data| {
-            data.get_temp::<Vec<crate::frost::Tension>>(egui::Id::new("tension-field"))
-                .is_some_and(|seeds| !seeds.is_empty())
-        });
-        if quivering {
-            ctx.request_repaint();
-        }
         self.bench(&ctx);
         self.report_startup_probe();
     }
@@ -492,48 +364,14 @@ impl Bayonet {
         active_prefix(&self.tag_entry).is_some()
     }
 
-    /// The water chemistry for the compose pass.
-    pub fn brine(&self) -> crate::frost::Brine {
-        self.water_mode.drench().brine(self.brine)
-    }
-
-    pub fn water_wet(&self) -> bool {
-        self.water_mode.wet()
-    }
-
-    fn water_amp(&self) -> f32 {
-        self.water_mode.drench().wave
-    }
-
-    fn glyph_amp(&self) -> f32 {
-        self.water_mode.drench().glyph
-    }
-
-    fn viewer_life(&self) -> f32 {
-        self.surf.viewer_life * self.water_mode.drench().decay
-    }
-
-    pub fn quiver_release(&self) -> f32 {
-        self.surf.quiver_release
-    }
-
-    pub fn water_guard(&self) -> bool {
-        self.surf.poison_sweep
-    }
-
-    /// Frost parameters for the boiler's blur pass, in physical pixels.
+    /// Frost parameters for the boiler's blur pass, in logical points. The
+    /// water table performs the sole logical-to-physical conversion.
     /// `None` while no veil is showing (the common case — zero GPU cost).
     ///
     /// While a veil is fading out its cutouts are dropped, so the blur turns
     /// uniform and recedes evenly instead of leaving sharp negative space.
-    pub fn frost_veil(&self, ctx: &egui::Context, pixels_per_point: f32) -> Option<Veil> {
-        let cut = |rect: egui::Rect, radius: f32| Cut {
-            rect: egui::Rect::from_min_max(
-                (rect.min.to_vec2() * pixels_per_point).to_pos2(),
-                (rect.max.to_vec2() * pixels_per_point).to_pos2(),
-            ),
-            radius: radius * pixels_per_point,
-        };
+    pub fn frost_veil(&self, ctx: &egui::Context) -> Option<Veil> {
+        let cut = |rect: egui::Rect, radius: f32| Cut { rect, radius };
         let zoom_open = self.zoom.is_some();
         let zoom_strength = veil_strength(ctx, "frost-zoom", zoom_open);
         if zoom_strength > 0.0 {
@@ -646,7 +484,7 @@ impl Bayonet {
         if std::mem::take(&mut self.thwack_pending) {
             let energy = swap_fraction(&self.hit.posts, &hit.posts);
             if energy > 0.0 {
-                self.pool_thwack(self.water_rect, energy);
+                self.pool_thwack(self.water.domain(), energy);
             }
         }
         if posts_changed(&self.hit.posts, &hit.posts) {
@@ -1091,9 +929,8 @@ impl Bayonet {
         let row_height = tile + GAP;
         let mut menu_opened = false;
         let mut visible_rows = 0..0;
-        self.hover_tile = None;
         let arena = ui.max_rect();
-        self.water_rect = arena;
+        self.water.begin_surface(arena);
         let scroll = egui::ScrollArea::vertical().show_rows(ui, row_height, rows, |ui, range| {
             visible_rows = range.clone();
             ui.spacing_mut().item_spacing.x = GAP;
@@ -1111,8 +948,9 @@ impl Bayonet {
             self.empty_gallery(ui, arena);
         } else {
             self.empty_since = None;
-            self.floor_rect = egui::Rect::ZERO;
-            self.loading_raft.hide();
+            self.water.set_floor(None);
+            self.water.hide_loading();
+            self.water.hide_drain();
         }
         self.prefetch_scroll_thumbs(
             ui.ctx(),
@@ -1126,7 +964,7 @@ impl Bayonet {
                 offset: scroll.state.offset.y,
             },
         );
-        self.heave(ui.ctx(), scroll.state.offset.y, ui.ctx().pixels_per_point());
+        self.heave(ui.ctx(), scroll.state.offset.y);
         self.hit.posts = posts;
         menu_opened
     }
@@ -1155,13 +993,13 @@ impl Bayonet {
             // The lift follows the cursor; the menu's own dim owns the grid
             // while it's open, so don't fight it.
             if !self.tag_menu.is_open() && self.zoom.is_none() {
-                self.hover_tile = Some((post.id, rect));
+                self.water.hover(post.id, rect);
             }
         }
         // With the tag menu up, a click anywhere only dismisses it; opening
         // the viewer underneath would make the menu feel clingy.
         if response.clicked() && !self.tag_menu.is_open() && self.zoom.is_none() {
-            self.plunge(rect, self.surf.click_amp);
+            self.water.click(rect);
             self.open_full(post);
         }
         if response.secondary_clicked() && self.zoom.is_none() {
@@ -1677,7 +1515,7 @@ fn paint_plate(ui: &egui::Ui, rect: egui::Rect, hovered: bool) {
     let _stroke = ui.painter().rect_stroke(
         rect,
         2.0,
-        egui::Stroke::new(1.0, edge),
+        egui::Stroke::new(1.0_f32, edge),
         egui::StrokeKind::Inside,
     );
 }
@@ -1772,23 +1610,5 @@ impl Bayonet {
         }
         self.retain_tag_menu(&ctx, menu_opened);
         self.full_frame(&ctx);
-    }
-}
-
-#[cfg(test)]
-mod wet_calibration {
-    use super::*;
-
-    #[test]
-    fn wet_retunes_glyphs_without_moving_really_wet() {
-        let wet = WaterMode::Wet.drench();
-        assert_eq!(wet.wave, 1.25);
-        assert_eq!(wet.glyph, 0.75);
-
-        let really = WaterMode::ReallyWet.drench();
-        assert_eq!(really.wave, 2.0);
-        assert_eq!(really.glyph, 2.0);
-        assert_eq!(really.optics, 2.0);
-        assert_eq!(really.decay, 2.0);
     }
 }

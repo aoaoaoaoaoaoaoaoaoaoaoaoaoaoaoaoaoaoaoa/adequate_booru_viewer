@@ -755,7 +755,7 @@ fn facia(painter: &egui::Painter, rect: egui::Rect) {
     let _frame = painter.rect_stroke(
         rect,
         3.0,
-        egui::Stroke::new(1.5, RECESS_EDGE),
+        egui::Stroke::new(1.5_f32, RECESS_EDGE),
         egui::StrokeKind::Inside,
     );
 }
@@ -850,7 +850,7 @@ fn draw_reel(
     let _border = painter.rect_stroke(
         window,
         1.0,
-        egui::Stroke::new(1.0, RECESS_EDGE),
+        egui::Stroke::new(1.0_f32, RECESS_EDGE),
         egui::StrokeKind::Inside,
     );
 }
@@ -862,11 +862,11 @@ fn socket(painter: &egui::Painter, window: egui::Rect) {
     let _gutter = painter.rect_filled(window.shrink2(egui::vec2(2.0, 0.0)), 0.0, GUTTER);
     let _shadow = painter.add(egui::Shape::line(
         vec![window.left_bottom(), window.left_top(), window.right_top()],
-        egui::Stroke::new(1.6, egui::Color32::from_rgb(2, 2, 3)),
+        egui::Stroke::new(1.6_f32, egui::Color32::from_rgb(2, 2, 3)),
     ));
     let _catch = painter.add(egui::Shape::line_segment(
         [window.left_bottom(), window.right_bottom()],
-        egui::Stroke::new(1.0, bronze(0.26)),
+        egui::Stroke::new(1.0_f32, bronze(0.26)),
     ));
 }
 
@@ -914,7 +914,7 @@ fn roller(
                 egui::pos2(wall_x, cap_cy),
                 egui::pos2(cap_x + side * CAP_W * 0.5, cap_cy),
             ],
-            egui::Stroke::new(1.2, bronze(0.4)),
+            egui::Stroke::new(1.2_f32, bronze(0.4)),
         ));
         // the edge-on cylinder cap, shaded top-bright to bottom-dark.
         let mut mesh = egui::Mesh::default();
@@ -944,7 +944,10 @@ fn roller(
                     egui::pos2(cap_x - CAP_W * 0.5, ny),
                     egui::pos2(cap_x + CAP_W * 0.5, ny),
                 ],
-                egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(3, 3, 4, fade)),
+                egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgba_unmultiplied(3, 3, 4, fade),
+                ),
             ));
         }
     }
@@ -985,14 +988,14 @@ fn index_arrow(painter: &egui::Painter, window: egui::Rect, active: bool) {
             egui::pos2(base_x, cy - base_h),
             egui::pos2(tip_x, cy - tip_h),
         ],
-        egui::Stroke::new(1.0, bronze(0.86 + lit)),
+        egui::Stroke::new(1.0_f32, bronze(0.86 + lit)),
     ));
     let _bevel_lo = painter.add(egui::Shape::line_segment(
         [
             egui::pos2(base_x, cy + base_h),
             egui::pos2(tip_x, cy + tip_h),
         ],
-        egui::Stroke::new(1.0, bronze(0.18)),
+        egui::Stroke::new(1.0_f32, bronze(0.18)),
     ));
 }
 
@@ -1035,7 +1038,7 @@ fn tape_edges(painter: &egui::Painter, spool: Spool, tape_w: f32, gain: f32) {
             (22.0 * gain) as u8,
             (34.0 * gain) as u8,
         );
-        let _edge = painter.add(egui::Shape::line(pts, egui::Stroke::new(1.0, edge)));
+        let _edge = painter.add(egui::Shape::line(pts, egui::Stroke::new(1.0_f32, edge)));
     }
 }
 
@@ -1165,7 +1168,7 @@ fn hazard(
                 egui::pos2(spool.cx + (c - a) * s.fold, s.y)
             })
             .collect();
-        let _stripe = painter.add(egui::Shape::line(pts, egui::Stroke::new(1.4, ink)));
+        let _stripe = painter.add(egui::Shape::line(pts, egui::Stroke::new(1.4_f32, ink)));
     }
 }
 
