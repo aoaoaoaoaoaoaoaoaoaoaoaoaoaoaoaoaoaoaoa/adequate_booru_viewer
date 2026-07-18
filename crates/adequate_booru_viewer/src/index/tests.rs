@@ -110,6 +110,46 @@ fn posting_facts_are_query_visible_before_and_after_chunk_merge() -> Result<()> 
 }
 
 #[test]
+fn newly_forbidden_media_retracts_old_postings() -> Result<()> {
+    let path = std::env::temp_dir().join(format!(
+        "adequate-booru-media-gate-{}.redb",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ));
+    let _stale = std::fs::remove_file(&path);
+    let index = Index::open(&path)?;
+    let mut record = post(7, 10, Rating::General, &["solo"])?;
+    index.absorb(&[record.clone()])?;
+    let solo = Query::parse("solo");
+    assert_eq!(
+        ids(index.search(&solo, Sort::Newest, DateRange::default(), 10)?),
+        [7]
+    );
+
+    record.file_url = Some("https://example.test/7.swf".to_owned());
+    index.absorb(&[record])?;
+    assert!(
+        index
+            .search(&solo, Sort::Newest, DateRange::default(), 10)?
+            .posts
+            .is_empty()
+    );
+    let _merged = index.merge_pending_facts(FactMergeBudget {
+        batches: 16,
+        bytes: usize::MAX,
+    })?;
+    assert!(
+        index
+            .search(&solo, Sort::Newest, DateRange::default(), 10)?
+            .posts
+            .is_empty()
+    );
+
+    drop(index);
+    let _removed = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
 fn tag_kind_hints_are_durable() -> Result<()> {
     let path = std::env::temp_dir().join(format!(
         "adequate-booru-tag-kind-{}.redb",

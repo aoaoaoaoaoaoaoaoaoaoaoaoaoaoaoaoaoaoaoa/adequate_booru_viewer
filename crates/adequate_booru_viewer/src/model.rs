@@ -9,6 +9,13 @@ use crate::wire;
 
 const POST_MAGIC: &[u8; 4] = b"BBP1";
 
+pub fn media_extension(url: &str) -> Option<&str> {
+    let path = url.split(['?', '#']).next()?;
+    let (_, extension) = path.rsplit('/').next()?.rsplit_once('.')?;
+    (!extension.is_empty() && extension.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        .then_some(extension)
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct PostId(pub u32);
 
@@ -866,7 +873,23 @@ impl PostRecord {
     /// Gold-walled and banned posts arrive with every media URL stripped;
     /// a reference workbench has no use for tombstones.
     pub fn indexable(&self) -> bool {
-        !self.tags.iter().any(Tag::blocks_index) && self.blade_url().is_some()
+        !self.tags.iter().any(Tag::blocks_index)
+            && !self
+                .media_urls()
+                .any(|url| media_extension(url).is_some_and(|ext| ext.eq_ignore_ascii_case("swf")))
+            && self.blade_url().is_some()
+    }
+
+    fn media_urls(&self) -> impl Iterator<Item = &str> {
+        [
+            self.preview_url.as_deref(),
+            self.thumb_360_url.as_deref(),
+            self.thumb_720_url.as_deref(),
+            self.large_url.as_deref(),
+            self.file_url.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
     }
 
     pub fn tag_kind(&self, tag: &Tag) -> TagKind {
@@ -1316,6 +1339,20 @@ mod tests {
         // Gold-walled / banned: the API strips every media URL.
         solo.preview_url = None;
         assert!(!solo.indexable());
+
+        solo.preview_url = Some("https://example.test/1.jpg".to_owned());
+        solo.file_url = Some("https://example.test/1.SWF?download=1#asset".to_owned());
+        assert!(!solo.indexable());
+    }
+
+    #[test]
+    fn media_extensions_ignore_url_suffixes() {
+        assert_eq!(
+            media_extension("https://example.test/work/image.JPEG?size=large#view"),
+            Some("JPEG")
+        );
+        assert_eq!(media_extension("https://example.test/no-extension"), None);
+        assert_eq!(media_extension("https://example.test/bad.ext%20"), None);
     }
 
     #[test]

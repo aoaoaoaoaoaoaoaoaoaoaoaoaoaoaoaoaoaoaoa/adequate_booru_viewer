@@ -8,7 +8,7 @@ use std::{
 };
 use ureq::Agent;
 
-use crate::model::PostId;
+use crate::model::{PostId, media_extension};
 
 /// Monotonic claim for temp-file names: concurrent fetchers of the same id
 /// must never share a temp path.
@@ -125,15 +125,7 @@ fn decode_jpeg_fast(id: PostId, bytes: &[u8]) -> Option<RgbaBlade> {
 }
 
 pub fn extension(url: &str) -> &str {
-    let path = url.split('?').next().unwrap_or(url);
-    let Some(ext) = Path::new(path).extension().and_then(|ext| ext.to_str()) else {
-        return "img";
-    };
-    if ext.chars().all(|c| c.is_ascii_alphanumeric()) {
-        ext
-    } else {
-        "img"
-    }
+    media_extension(url).unwrap_or("img")
 }
 
 fn fnv1a(text: &str) -> u64 {

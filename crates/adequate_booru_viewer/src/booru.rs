@@ -85,6 +85,8 @@ struct DanbooruPost {
     #[serde(default)]
     rating: String,
     #[serde(default)]
+    file_ext: String,
+    #[serde(default)]
     tag_string: String,
     #[serde(default)]
     tag_string_general: String,
@@ -125,6 +127,18 @@ impl TryFrom<DanbooruPost> for PostRecord {
     fn try_from(post: DanbooruPost) -> Result<Self> {
         let (tags, tag_hints) = tag_inventory(&post);
         let variants = Variants::from(post.media_asset.as_ref());
+        let flash = post.file_ext.eq_ignore_ascii_case("swf");
+        let (preview_url, thumb_360_url, thumb_720_url, large_url, file_url) = if flash {
+            (None, None, None, None, None)
+        } else {
+            (
+                post.preview_file_url.or(variants.thumb_180),
+                variants.thumb_360,
+                variants.thumb_720,
+                post.large_file_url,
+                post.file_url,
+            )
+        };
         Ok(Self {
             id: narrow_post_id(post.id)?,
             rating: Rating::parse(&post.rating),
@@ -135,11 +149,11 @@ impl TryFrom<DanbooruPost> for PostRecord {
             created_at: post.created_at,
             tags,
             tag_hints,
-            preview_url: post.preview_file_url.or(variants.thumb_180),
-            thumb_360_url: variants.thumb_360,
-            thumb_720_url: variants.thumb_720,
-            large_url: post.large_file_url,
-            file_url: post.file_url,
+            preview_url,
+            thumb_360_url,
+            thumb_720_url,
+            large_url,
+            file_url,
         })
     }
 }

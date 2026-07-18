@@ -622,7 +622,9 @@ impl Index {
         for id in ids {
             let id = PostId(id);
             if let Some(post) = lock(&self.records).get(id) {
-                hydrated.push(post);
+                if post.indexable() {
+                    hydrated.push(post);
+                }
                 continue;
             }
             if let Some(post) = posts
@@ -631,9 +633,9 @@ impl Index {
                 .map(|guard| decode_record(guard.value()))
                 .transpose()?
             {
-                // Media-less records predating the ingestion ban wash out here
-                // until a re-crawl purges them.
-                if post.blade_url().is_some() {
+                // Records predating an admission ban wash out immediately;
+                // their next crawl removes the stale posting facts.
+                if post.indexable() {
                     lock(&self.records).put(post.clone());
                     hydrated.push(post);
                 }
@@ -1184,7 +1186,9 @@ fn stage_record_delta(facts: &mut FactBatch, old: Option<&PostRecord>, new: Opti
         return;
     };
     let id = record.id;
-    let old_tags = indexed_tags(old);
+    // Presence in POSTS is proof that the old record was admitted under the
+    // then-current rules. Subtract it without reapplying today's predicate.
+    let old_tags = old.map_or_else(BTreeSet::new, record_tags);
     let new_tags = indexed_tags(new);
     for tag in old_tags.difference(&new_tags) {
         facts.del(PostingLane::Tag, tag, id);
@@ -1193,7 +1197,7 @@ fn stage_record_delta(facts: &mut FactBatch, old: Option<&PostRecord>, new: Opti
         facts.add(PostingLane::Tag, tag, id);
     }
 
-    let old_rating = indexed_rating(old);
+    let old_rating = old.and_then(|post| post.rating.class());
     let new_rating = indexed_rating(new);
     if old_rating != new_rating {
         if let Some(rating) = old_rating {
@@ -1205,10 +1209,13 @@ fn stage_record_delta(facts: &mut FactBatch, old: Option<&PostRecord>, new: Opti
     }
 }
 
+fn record_tags(post: &PostRecord) -> BTreeSet<String> {
+    post.tags.iter().map(ToString::to_string).collect()
+}
+
 fn indexed_tags(post: Option<&PostRecord>) -> BTreeSet<String> {
     post.filter(|post| post.indexable())
-        .map(|post| post.tags.iter().map(ToString::to_string).collect())
-        .unwrap_or_default()
+        .map_or_else(BTreeSet::new, record_tags)
 }
 
 fn indexed_rating(post: Option<&PostRecord>) -> Option<RatingClass> {
