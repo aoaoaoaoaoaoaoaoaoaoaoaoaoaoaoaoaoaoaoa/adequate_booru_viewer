@@ -1,7 +1,7 @@
 //! The boiler room: bespoke winit + wgpu + egui integration.
 //!
 //! We own the event loop and the render graph outright (no eframe) so the
-//! frame can route through arbitrary GPU passes — today the frost veil, later
+//! frame can route through arbitrary GPU passes — today the water veil, later
 //! whatever else. The common path stays bare-metal: with no veil up, egui
 //! rasterizes straight into the swapchain exactly as eframe would, and the
 //! loop sleeps until input, a worker klaxon, or an egui-scheduled deadline.
@@ -22,7 +22,7 @@ use std::{
     time::Instant,
 };
 
-use crate::{app::Bayonet, frost::Frost, trace::startup};
+use crate::{app::Bayonet, trace::startup, water::Engine};
 
 const WINDOW_SIZE: LogicalSize<f64> = LogicalSize::new(1440.0, 920.0);
 
@@ -105,7 +105,7 @@ impl Boiler {
         let tooltip_rects = tooltip_rects(&self.ctx);
         let water = self
             .app
-            .frost_frame(&self.ctx, output.pixels_per_point, &tooltip_rects);
+            .water_frame(&self.ctx, output.pixels_per_point, &tooltip_rects);
         if water.wants_repaint() {
             rig.window.request_redraw();
         }
@@ -254,7 +254,7 @@ struct Rig {
     surface: wgpu::Surface<'static>,
     gpu: RenderState,
     config: wgpu::SurfaceConfiguration,
-    frost: Frost,
+    water_engine: Engine,
 }
 
 impl Rig {
@@ -300,8 +300,8 @@ impl Rig {
         config.present_mode = wgpu::PresentMode::AutoVsync;
         config.view_formats = vec![gpu.target_format];
         surface.configure(&gpu.device, &config);
-        let mut frost = Frost::new(&gpu.device, gpu.target_format);
-        frost.resize(&gpu.device, &gpu.queue, config.width, config.height);
+        let mut water_engine = Engine::new(&gpu.device, gpu.target_format);
+        water_engine.resize(&gpu.device, config.width, config.height);
         startup("boiler.rig.raised");
         Ok(Self {
             window,
@@ -309,7 +309,7 @@ impl Rig {
             surface,
             gpu,
             config,
-            frost,
+            water_engine,
         })
     }
 
@@ -320,8 +320,8 @@ impl Rig {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.gpu.device, &self.config);
-        self.frost
-            .resize(&self.gpu.device, &self.gpu.queue, size.width, size.height);
+        self.water_engine
+            .resize(&self.gpu.device, size.width, size.height);
     }
 
     fn render(
@@ -329,7 +329,7 @@ impl Rig {
         primitives: &[egui::ClippedPrimitive],
         delta: &egui::TexturesDelta,
         pixels_per_point: f32,
-        water: &crate::frost::Frame,
+        water: &crate::water::Frame,
         dump_path: Option<&Path>,
     ) -> Option<Result<()>> {
         let screen = ScreenDescriptor {
@@ -378,12 +378,12 @@ impl Rig {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         if water.dry() {
-            self.frost.clear_water(&self.gpu.queue);
+            self.water_engine.becalm(&self.gpu.queue);
         }
-        let frosted = water.live() && self.frost.scene_view().is_some();
+        let wet_pass = water.live() && self.water_engine.scene_view().is_some();
         {
-            let target = if frosted {
-                self.frost.scene_view().unwrap_or(&surface_view)
+            let target = if wet_pass {
+                self.water_engine.scene_view().unwrap_or(&surface_view)
             } else {
                 &surface_view
             };
@@ -410,8 +410,8 @@ impl Rig {
                 .read()
                 .render(&mut pass, primitives, &screen);
         }
-        if frosted {
-            self.frost.compose(
+        if wet_pass {
+            self.water_engine.compose(
                 &self.gpu.device,
                 &self.gpu.queue,
                 &mut encoder,
@@ -424,13 +424,13 @@ impl Rig {
             .queue
             .submit(user_cmds.into_iter().chain([encoder.finish()]));
         if self
-            .frost
+            .water_engine
             .after_submit(&self.gpu.device, &self.gpu.queue, water)
         {
             self.window.request_redraw();
         }
         let dump = dump_path.map(|path| {
-            self.frost.dump(
+            self.water_engine.dump(
                 &self.gpu.device,
                 &self.gpu.queue,
                 path,

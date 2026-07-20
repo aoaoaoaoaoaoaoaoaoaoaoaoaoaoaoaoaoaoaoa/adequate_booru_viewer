@@ -28,7 +28,7 @@ vulkan-icd and libxkbcommon). macos uses metal, nothing extra.
 
 anyway, check out how wet it is:
 
-[![the wet demo](docs/abv-wet-teaser.webp)](https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/adequate_booru_viewer/releases/download/v0.9.0/abv-wet-demo.mp4)
+[![the wet demo](https://raw.githubusercontent.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/adequate_booru_viewer/v1.0.0/docs/abv-wet-teaser.webp)](https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/adequate_booru_viewer/releases/download/v1.0.0/abv-wet-demo.mp4)
 
 *(click through for the full 60-second take)*
 

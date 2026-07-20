@@ -5,6 +5,7 @@
 
 pub mod date;
 pub mod index;
+pub mod kin;
 pub mod model;
 pub mod posting;
 pub mod trace;

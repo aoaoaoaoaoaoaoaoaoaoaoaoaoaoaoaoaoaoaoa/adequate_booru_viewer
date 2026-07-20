@@ -869,6 +869,88 @@ pub struct PostRecord {
     pub file_url: Option<String>,
 }
 
+/// The gallery's projection over matching posts. `Grouped` collapses every
+/// known parent tree to its strongest matching representative in the selected
+/// sort order; it does not alter query membership.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GalleryTopology {
+    #[default]
+    Ungrouped,
+    Grouped,
+}
+
+impl GalleryTopology {
+    pub const ALL: [Self; 2] = [Self::Ungrouped, Self::Grouped];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Ungrouped => "ungrouped",
+            Self::Grouped => "grouped",
+        }
+    }
+}
+
+/// Provider metadata harvested even when its image record is inadmissible.
+/// An unavailable parent must still bind visible descendants into one family.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Kin {
+    pub id: PostId,
+    pub parent: Option<PostId>,
+    pub has_children: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct Harvest {
+    pub post: PostRecord,
+    pub kin: Kin,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FamilyBadge {
+    pub posts: u16,
+    pub incomplete: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct FamilyNode {
+    pub id: PostId,
+    pub parent: Option<PostId>,
+    pub children: Vec<PostId>,
+    pub post: Option<PostRecord>,
+    pub incomplete: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct FamilyTree {
+    pub root: PostId,
+    pub focus: PostId,
+    pub nodes: BTreeMap<PostId, FamilyNode>,
+}
+
+impl FamilyTree {
+    pub fn node(&self, id: PostId) -> Option<&FamilyNode> {
+        self.nodes.get(&id)
+    }
+
+    pub fn post(&self, id: PostId) -> Option<&PostRecord> {
+        self.node(id)?.post.as_ref()
+    }
+
+    pub fn badge(&self) -> Option<FamilyBadge> {
+        let posts = self
+            .nodes
+            .values()
+            .filter(|node| node.post.is_some())
+            .count();
+        let incomplete = self.nodes.values().any(|node| node.incomplete);
+        (posts > 1 || incomplete).then_some(FamilyBadge {
+            posts: u16::try_from(posts).unwrap_or(u16::MAX),
+            incomplete,
+        })
+    }
+}
+
 impl PostRecord {
     /// Gold-walled and banned posts arrive with every media URL stripped;
     /// a reference workbench has no use for tombstones.
@@ -940,6 +1022,7 @@ impl PostRecord {
 pub struct SearchHit {
     pub posts: Vec<PostRecord>,
     pub candidates: u64,
+    pub families: BTreeMap<PostId, FamilyBadge>,
 }
 
 pub fn encode_record(post: &PostRecord) -> Vec<u8> {

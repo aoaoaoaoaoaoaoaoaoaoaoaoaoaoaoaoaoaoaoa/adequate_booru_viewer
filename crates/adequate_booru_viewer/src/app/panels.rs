@@ -143,7 +143,7 @@ impl Bayonet {
                 .insert(id.to_owned(), matches!(wake.flux, chrome::FoldFlux::Open));
             self.save_config();
         }
-        self.fold_plunge(wake);
+        self.water.fold(wake);
     }
 
     fn active_filter_panel(&mut self, ui: &mut egui::Ui) {
@@ -193,7 +193,7 @@ impl Bayonet {
             output.inner.state.store(ui.ctx(), entry.id);
         }
         if let Some(wake) = chrome::text_wake(ui, &entry, &before, &self.tag_entry) {
-            self.text_plunge(wake);
+            self.water.text(wake);
         }
         let accepted_completion = self.autocomplete(ui, entry.has_focus());
         let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -244,6 +244,20 @@ impl Bayonet {
     }
 
     fn gallery_panel(&mut self, ui: &mut egui::Ui) {
+        let _view = ui.horizontal_wrapped(|ui| {
+            let _label = ui.label(chrome::eyebrow("VIEW"));
+            for topology in GalleryTopology::ALL {
+                let button = chrome::glyph(ui, topology.label(), self.gallery == topology);
+                if button.clicked() && self.gallery != topology {
+                    self.remember_hit();
+                    self.gallery = topology;
+                    self.thwack_pending = true;
+                    let _restored = self.restore_hit();
+                    self.save_config();
+                    self.strike(false, 0);
+                }
+            }
+        });
         let _sort = ui.horizontal_wrapped(|ui| {
             let _label = ui.label(chrome::eyebrow("SORT"));
             for sort in Sort::ALL {
@@ -279,7 +293,7 @@ impl Bayonet {
             .checkbox(&mut self.prefetch_on_hover, "prefetch on hover")
             .on_hover_text("warm the disk cache with the full image while hovering");
         if prefetch.changed() {
-            self.bump_plunge(prefetch.rect);
+            self.water.bump(prefetch.rect);
             self.save_config();
         }
     }
@@ -309,8 +323,8 @@ impl Bayonet {
 
     fn date_plunge(&mut self, pulse: date_spool::DatePulse) {
         match pulse {
-            date_spool::DatePulse::Tape(rect, dir) => self.tape_plunge(rect, dir),
-            date_spool::DatePulse::Lever(rect, sign) => self.lever_plunge(rect, sign),
+            date_spool::DatePulse::Tape(rect, dir) => self.water.drag(rect, dir),
+            date_spool::DatePulse::Lever(rect, sign) => self.water.lever(rect, sign),
         }
     }
 
@@ -332,6 +346,7 @@ impl Bayonet {
             format!("cache: {}", self.cache_status),
             format!("warm: {}", self.warm_status),
             format!("crawl: {}", self.crawl_status),
+            format!("families: {}", self.kin_status),
             format!("build: {}", env!("CARGO_PKG_VERSION")),
             format!("data: {}", self.lair.data.display()),
             format!("index: {}", self.lair.index_path().display()),
@@ -385,10 +400,16 @@ impl Bayonet {
             "right-click thumbnail: inspect tags",
             "thumbnail tag menu: + require, - exclude, × remove",
             "click thumbnail: open full viewer",
+            "gallery ungrouped / grouped: separate or collapse parent trees",
             "viewer tab / tags: toggle image tags",
-            "viewer ← / →: previous / next result",
+            "viewer arrows / drag: navigate parent, level, and first child",
+            "viewer shift-left / shift-right: navigate global results",
+            "viewer right-click / wheel-down: family tree",
+            "tree wheel: zoom",
+            "tree drag: pan camera; arrows: select relative",
+            "tree enter / click: open selected image",
             "viewer click image: touch water",
-            "viewer right-click / esc: close",
+            "viewer esc / click outside: close",
             "viewer copy / save: export full image",
             "ctrl-wheel gallery: images per row",
             "f10: dump water debug state",
@@ -421,8 +442,8 @@ impl Bayonet {
                     self.filters.toggle_shelf(shelf);
                     self.save_config();
                 }
-                SavedFilterAction::TypeWake(wake) => self.text_plunge(wake),
-                SavedFilterAction::Pulse(rect) => self.bump_plunge(rect),
+                SavedFilterAction::TypeWake(wake) => self.water.text(wake),
+                SavedFilterAction::Pulse(rect) => self.water.bump(rect),
                 SavedFilterAction::ScuttleShelf(shelf) => {
                     self.filters.scuttle_shelf(shelf);
                     self.shelf_edit = None;
@@ -476,7 +497,7 @@ impl Bayonet {
                 let path = self.query.clamp_group_path(&path);
                 if self.active_group != path {
                     self.active_group = path;
-                    self.group_plunge(rect);
+                    self.water.select(rect);
                     self.sync_active_filter();
                     self.save_config();
                 }
@@ -507,7 +528,7 @@ impl Bayonet {
             } => {
                 let mut query = self.query.clone();
                 if let Some(target) = query.move_atom(&parent, child, &target) {
-                    self.bump_plunge(rect);
+                    self.water.bump(rect);
                     self.install_query_at(query, target);
                 }
             }
@@ -521,7 +542,7 @@ impl Bayonet {
                     self.install_query_at(query, path);
                 }
             }
-            QueryAction::Pulse(rect) => self.bump_plunge(rect),
+            QueryAction::Pulse(rect) => self.water.bump(rect),
         }
     }
 }

@@ -68,6 +68,7 @@ impl Bayonet {
             query: self.query.clone(),
             sort: self.sort,
             dates: self.date_range.normalized(),
+            topology: self.gallery,
             limit: RESULT_LIMIT,
         });
         match send {
@@ -112,7 +113,7 @@ impl Bayonet {
         let posts = hit.posts.len();
         let candidates = hit.candidates;
         self.hit_cache.put(
-            HitKey::new(&self.query, self.sort, self.date_range),
+            HitKey::new(&self.query, self.sort, self.date_range, self.gallery),
             hit.clone(),
         );
         self.install_hit(hit);

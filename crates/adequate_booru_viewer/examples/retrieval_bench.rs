@@ -6,7 +6,7 @@
 use adequate_booru_viewer::{
     date::DateRange,
     index::Index,
-    model::{BoolOp, PostId, Query, QueryAtom, SearchHit, Sort, TagPolarity},
+    model::{BoolOp, GalleryTopology, PostId, Query, QueryAtom, SearchHit, Sort, TagPolarity},
     xdg::Lair,
 };
 use anyhow::{Context as _, Result, bail};
@@ -45,7 +45,13 @@ fn main() -> Result<()> {
 
     for case in &cases {
         for _ in 0..args.warmups {
-            let hit = index.search(&case.query, case.sort, DateRange::default(), args.limit)?;
+            let hit = index.search_topology(
+                &case.query,
+                case.sort,
+                DateRange::default(),
+                case.topology,
+                args.limit,
+            )?;
             if let Some(oracle) = &oracle {
                 oracle.check(case, &hit)?;
             }
@@ -65,7 +71,13 @@ fn main() -> Result<()> {
         for idx in permutation(cases.len(), round) {
             let case = &cases[idx];
             let start = Instant::now();
-            let hit = index.search(&case.query, case.sort, DateRange::default(), args.limit)?;
+            let hit = index.search_topology(
+                &case.query,
+                case.sort,
+                DateRange::default(),
+                case.topology,
+                args.limit,
+            )?;
             let elapsed = start.elapsed();
             if let Some(oracle) = &oracle {
                 oracle.check(case, &hit)?;
@@ -83,17 +95,24 @@ fn main() -> Result<()> {
         "rounds\t{}\nwarmups\t{}\nlimit\t{}",
         args.rounds, args.warmups, args.limit
     );
-    println!("case\tsort\tcandidates\tmedian_us\tp95_us\tmin_us\tmax_us\tids");
+    println!("case\tview\tsort\tcandidates\tmedian_us\tp95_us\tmin_us\tmax_us\tids");
     for case in &cases {
         let times = samples.get_mut(&case.name).context("case samples")?;
         times.sort_unstable();
         let median = percentile(times, 0.50);
         let p95 = percentile(times, 0.95);
         medians.push(median.as_secs_f64());
-        let hit = index.search(&case.query, case.sort, DateRange::default(), args.limit)?;
+        let hit = index.search_topology(
+            &case.query,
+            case.sort,
+            DateRange::default(),
+            case.topology,
+            args.limit,
+        )?;
         println!(
-            "{}\t{}\t{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{}",
+            "{}\t{}\t{}\t{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{}",
             case.name,
+            case.topology.label(),
             case.sort.label(),
             hit.candidates,
             us(median),
@@ -167,6 +186,7 @@ struct Case {
     name: String,
     query: Query,
     sort: Sort,
+    topology: GalleryTopology,
 }
 
 impl Case {
@@ -175,6 +195,7 @@ impl Case {
             name: name.to_owned(),
             query: flat(raw)?,
             sort,
+            topology: GalleryTopology::Ungrouped,
         })
     }
 }
@@ -192,16 +213,19 @@ fn suite(index: &Index, limit: usize) -> Result<Vec<Case>> {
             name: "nested_not_color_test".to_owned(),
             query: nested_not_color_test()?,
             sort: Sort::Score,
+            topology: GalleryTopology::Ungrouped,
         },
         Case {
             name: "or_bodywear_score".to_owned(),
             query: or_bodywear_score()?,
             sort: Sort::Score,
+            topology: GalleryTopology::Ungrouped,
         },
         Case {
             name: "xor_hair_score".to_owned(),
             query: xor_hair_score()?,
             sort: Sort::Score,
+            topology: GalleryTopology::Ungrouped,
         },
         Case::flat(
             "not_laundry_score",
@@ -210,6 +234,16 @@ fn suite(index: &Index, limit: usize) -> Result<Vec<Case>> {
         )?,
     ];
     cases.push(small_candidate(index, limit)?);
+    let family_cases = cases
+        .iter()
+        .cloned()
+        .map(|mut case| {
+            case.name = format!("families_{}", case.name);
+            case.topology = GalleryTopology::Grouped;
+            case
+        })
+        .collect::<Vec<_>>();
+    cases.extend(family_cases);
     Ok(cases)
 }
 
@@ -270,7 +304,13 @@ fn small_candidate(index: &Index, limit: usize) -> Result<Case> {
             Sort::Score,
         )?;
         if index
-            .search(&case.query, case.sort, DateRange::default(), limit)?
+            .search_topology(
+                &case.query,
+                case.sort,
+                DateRange::default(),
+                case.topology,
+                limit,
+            )?
             .candidates
             > 0
         {
@@ -335,7 +375,13 @@ impl Oracle {
         }
         let mut body = String::new();
         for case in cases {
-            let hit = index.search(&case.query, case.sort, DateRange::default(), limit)?;
+            let hit = index.search_topology(
+                &case.query,
+                case.sort,
+                DateRange::default(),
+                case.topology,
+                limit,
+            )?;
             writeln!(
                 body,
                 "{}\t{}\t{}",

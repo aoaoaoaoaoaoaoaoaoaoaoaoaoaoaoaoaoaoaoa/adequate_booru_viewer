@@ -1,7 +1,7 @@
 use anyhow::{Context as _, Result};
 use crossbeam_channel::{Receiver, SendTimeoutError, Sender, TryIter, bounded, unbounded};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex},
     thread,
@@ -12,8 +12,9 @@ use crate::{
     booru::{Booru as _, Danbooru},
     date::DateRange,
     index::{CacheStats, FactMergeBudget, Index, TagSuggestion},
+    kin::Backfill,
     media::{MediaCache, RgbaBlade, required_url},
-    model::{PostId, PostRecord, Query, SearchHit, Sort},
+    model::{FamilyTree, GalleryTopology, PostId, PostRecord, Query, SearchHit, Sort},
 };
 
 const DANBOORU_READ_GAP: Duration = Duration::from_millis(150);
@@ -25,6 +26,8 @@ const CRAWL_EMPTY_GAP: Duration = Duration::from_mins(1);
 const CRAWL_FAULT_GAP: Duration = Duration::from_secs(5);
 const MERGE_GAP: Duration = Duration::from_millis(250);
 const MERGE_IDLE_GAP: Duration = Duration::from_secs(2);
+const MAX_FAMILY_FETCHES: usize = 256;
+const FAMILY_POST_BATCH: usize = 100;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct BladeEpoch(u64);
@@ -50,6 +53,7 @@ pub enum Command {
         query: Query,
         sort: Sort,
         dates: DateRange,
+        topology: GalleryTopology,
         limit: usize,
     },
     Stats {
@@ -58,6 +62,10 @@ pub enum Command {
     Suggest {
         serial: u64,
         prefix: String,
+    },
+    Family {
+        serial: u64,
+        id: PostId,
     },
     Blade {
         epoch: BladeEpoch,
@@ -121,6 +129,19 @@ pub enum Event {
     Crawled {
         posts: usize,
         before: Option<PostId>,
+    },
+    KinCrawled {
+        posts: usize,
+        before: Option<PostId>,
+        complete: bool,
+    },
+    Family {
+        serial: u64,
+        tree: FamilyTree,
+    },
+    FamilyFault {
+        serial: u64,
+        fault: String,
     },
     Refetched {
         post: Option<Box<PostRecord>>,
@@ -189,6 +210,7 @@ impl Klaxon {
 pub struct Worker {
     refresh_tx: Sender<RefreshCommand>,
     warm_tx: Sender<WarmCommand>,
+    family_tx: Sender<FamilyCommand>,
     media_tx: Sender<MediaCommand>,
     crier: Klaxon,
     rx: Receiver<Event>,
@@ -198,6 +220,7 @@ impl Worker {
     pub fn spawn(index: Index, media: MediaCache, ctx: egui::Context) -> Self {
         let (refresh_tx, refresh_rx) = unbounded();
         let (warm_tx, warm_rx) = unbounded();
+        let (family_tx, family_rx) = unbounded();
         let (media_tx, media_rx) = unbounded();
         let (event_tx, event_rx) = unbounded();
         let event_tx = Klaxon { tx: event_tx, ctx };
@@ -215,6 +238,19 @@ impl Worker {
         let _warm = thread::spawn(move || {
             warm_loop(warm_booru, warm_index, warm_gate, warm_rx, warm_events);
         });
+        let family_booru = booru.clone();
+        let family_index = index.clone();
+        let family_gate = read_gate.clone();
+        let family_events = event_tx.clone();
+        let _family = thread::spawn(move || {
+            family_loop(
+                family_booru,
+                family_index,
+                family_gate,
+                family_rx,
+                family_events,
+            );
+        });
         // One dispatcher keeps epoch culling and full-blade priority coherent;
         // a small fetcher pool overlaps network latency so thumbnails land in
         // parallel instead of one per round trip.
@@ -230,6 +266,11 @@ impl Worker {
         let crawl_index = index.clone();
         let crawl_events = event_tx.clone();
         let crawl_gate = read_gate.clone();
+        let kin_booru = booru.clone();
+        let kin_index = index.clone();
+        let kin_gate = read_gate.clone();
+        let kin_events = event_tx.clone();
+        let _kin = thread::spawn(move || kin_loop(kin_booru, kin_index, kin_gate, kin_events));
         let _crawl =
             thread::spawn(move || crawl_loop(booru, crawl_index, crawl_gate, crawl_events));
         let merge_events = event_tx.clone();
@@ -237,6 +278,7 @@ impl Worker {
         Self {
             refresh_tx,
             warm_tx,
+            family_tx,
             media_tx,
             crier,
             rx: event_rx,
@@ -255,6 +297,7 @@ impl Worker {
                 query,
                 sort,
                 dates,
+                topology,
                 limit,
             } => self
                 .refresh_tx
@@ -263,6 +306,7 @@ impl Worker {
                     query,
                     sort,
                     dates,
+                    topology,
                     limit,
                 })
                 .context("send refresh worker command"),
@@ -274,6 +318,10 @@ impl Worker {
                 .refresh_tx
                 .send(RefreshCommand::Suggest { serial, prefix })
                 .context("send suggest worker command"),
+            Command::Family { serial, id } => self
+                .family_tx
+                .send(FamilyCommand { serial, id })
+                .context("send family worker command"),
             Command::Warm {
                 query,
                 sort,
@@ -337,6 +385,7 @@ enum RefreshCommand {
         query: Query,
         sort: Sort,
         dates: DateRange,
+        topology: GalleryTopology,
         limit: usize,
     },
     Stats {
@@ -346,6 +395,12 @@ enum RefreshCommand {
         serial: u64,
         prefix: String,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FamilyCommand {
+    serial: u64,
+    id: PostId,
 }
 
 #[derive(Debug)]
@@ -401,8 +456,8 @@ fn refresh_loop(index: Index, commands: Receiver<RefreshCommand>, events: Klaxon
             };
             events.send(event);
         }
-        if let Some((serial, query, sort, dates, limit)) = search {
-            let event = match index.search(&query, sort, dates, limit) {
+        if let Some((serial, query, sort, dates, topology, limit)) = search {
+            let event = match index.search_topology(&query, sort, dates, topology, limit) {
                 Ok(hit) => Event::Refreshed { serial, hit },
                 Err(err) => Event::RefreshFault {
                     serial,
@@ -424,7 +479,7 @@ fn refresh_loop(index: Index, commands: Receiver<RefreshCommand>, events: Klaxon
     }
 }
 
-type PendingSearch = Option<(u64, Query, Sort, DateRange, usize)>;
+type PendingSearch = Option<(u64, Query, Sort, DateRange, GalleryTopology, usize)>;
 
 fn collect_refresh(
     command: RefreshCommand,
@@ -438,11 +493,114 @@ fn collect_refresh(
             query,
             sort,
             dates,
+            topology,
             limit,
-        } => *search = Some((serial, query, sort, dates, limit)),
+        } => *search = Some((serial, query, sort, dates, topology, limit)),
         RefreshCommand::Stats { serial } => *stats = Some(serial),
         RefreshCommand::Suggest { serial, prefix } => *suggest = Some((serial, prefix)),
     }
+}
+
+fn family_loop(
+    booru: Danbooru,
+    index: Index,
+    gate: RateGate,
+    commands: Receiver<FamilyCommand>,
+    events: Klaxon,
+) {
+    while let Ok(mut command) = commands.recv() {
+        for newer in commands.try_iter() {
+            command = newer;
+        }
+        match index.family_tree(command.id) {
+            Ok(tree) => events.send(Event::Family {
+                serial: command.serial,
+                tree,
+            }),
+            Err(err) => {
+                events.send(Event::FamilyFault {
+                    serial: command.serial,
+                    fault: format!("{err:#}"),
+                });
+                continue;
+            }
+        }
+        match hydrate_family(&booru, &index, &gate, command.id) {
+            Ok(true) => match index.family_tree(command.id) {
+                Ok(tree) => events.send(Event::Family {
+                    serial: command.serial,
+                    tree,
+                }),
+                Err(err) => events.send(Event::FamilyFault {
+                    serial: command.serial,
+                    fault: format!("{err:#}"),
+                }),
+            },
+            Ok(false) => {}
+            Err(err) => events.send(Event::FamilyFault {
+                serial: command.serial,
+                fault: format!("{err:#}"),
+            }),
+        }
+    }
+}
+
+fn hydrate_family(booru: &Danbooru, index: &Index, gate: &RateGate, focus: PostId) -> Result<bool> {
+    if index.family_hydrated(focus)? {
+        return Ok(false);
+    }
+    let mut facts = BTreeMap::new();
+    let mut cursor = focus;
+    let mut root = focus;
+    for _ in 0..=4 {
+        gate.wait();
+        let Some(fact) = booru.kin_single(cursor)? else {
+            break;
+        };
+        root = fact.parent.unwrap_or(fact.id);
+        let parent = fact.parent;
+        let _old = facts.insert(fact.id, fact);
+        let Some(parent) = parent else {
+            root = cursor;
+            break;
+        };
+        cursor = parent;
+    }
+
+    let mut queue = VecDeque::from([root]);
+    let mut visited = HashSet::new();
+    let mut fetches = 0;
+    while let Some(parent) = queue.pop_front() {
+        if !visited.insert(parent) {
+            continue;
+        }
+        let may_have_children = facts.get(&parent).is_none_or(|fact| fact.has_children);
+        if !may_have_children {
+            continue;
+        }
+        if fetches == MAX_FAMILY_FETCHES {
+            anyhow::bail!("family rooted at #{root} exceeds {MAX_FAMILY_FETCHES} fetches");
+        }
+        fetches += 1;
+        gate.wait();
+        for child in booru.kin_children(parent)? {
+            if child.has_children {
+                queue.push_back(child.id);
+            }
+            let _old = facts.insert(child.id, child);
+        }
+    }
+    if facts.is_empty() {
+        anyhow::bail!("Danbooru returned no kin record for #{focus}");
+    }
+    let facts = facts.into_values().collect::<Vec<_>>();
+    let missing = index.missing_posts(facts.iter().map(|fact| fact.id))?;
+    for ids in missing.chunks(FAMILY_POST_BATCH) {
+        gate.wait();
+        index.absorb_harvest(&booru.posts_by_ids(ids)?)?;
+    }
+    index.absorb_family(&facts, root)?;
+    Ok(true)
 }
 
 fn warm_loop(
@@ -659,7 +817,7 @@ fn warm(
             break;
         }
         absorbed += posts.len();
-        index.absorb(&posts)?;
+        index.absorb_harvest(&posts)?;
     }
     Ok(Event::Warmed {
         query_key: query.to_text(),
@@ -674,9 +832,12 @@ fn warm(
 fn refetch(booru: &Danbooru, index: &Index, gate: &RateGate, id: PostId) -> Result<Event> {
     gate.wait();
     let posts = booru.single(id)?;
-    index.absorb(&posts)?;
+    index.absorb_harvest(&posts)?;
     Ok(Event::Refetched {
-        post: posts.into_iter().next().map(Box::new),
+        post: posts
+            .into_iter()
+            .next()
+            .map(|harvest| Box::new(harvest.post)),
     })
 }
 
@@ -684,13 +845,58 @@ fn crawl_once(booru: &Danbooru, index: &Index, gate: &RateGate) -> Result<Event>
     let before = index.crawl_before()?;
     gate.wait();
     let posts = booru.crawl_page(before)?;
-    let next = posts.iter().map(|post| post.id).min();
+    let next = posts.iter().map(|harvest| harvest.post.id).min();
     if !posts.is_empty() || next.is_some() {
-        index.absorb_crawl(&posts, next)?;
+        index.absorb_crawl_harvest(&posts, next)?;
     }
     Ok(Event::Crawled {
         posts: posts.len(),
         before: next,
+    })
+}
+
+fn kin_loop(booru: Danbooru, index: Index, gate: RateGate, events: Klaxon) {
+    loop {
+        let gap = match kin_once(&booru, &index, &gate) {
+            Ok(event @ Event::KinCrawled { complete, .. }) => {
+                events.murmur(event);
+                if complete {
+                    return;
+                }
+                CRAWL_GAP
+            }
+            Ok(event) => {
+                events.murmur(event);
+                CRAWL_GAP
+            }
+            Err(err) => {
+                events.murmur(Event::Fault(format!("{err:#}")));
+                CRAWL_FAULT_GAP
+            }
+        };
+        if !gap.is_zero() {
+            thread::sleep(gap);
+        }
+    }
+}
+
+fn kin_once(booru: &Danbooru, index: &Index, gate: &RateGate) -> Result<Event> {
+    let Backfill::Running(before) = index.kin_backfill()? else {
+        return Ok(Event::KinCrawled {
+            posts: 0,
+            before: None,
+            complete: true,
+        });
+    };
+    gate.wait();
+    let facts = booru.kin_page(before)?;
+    let next = facts.iter().map(|fact| fact.id).min();
+    let complete = facts.is_empty();
+    index.absorb_kin_crawl(&facts, next, complete)?;
+    Ok(Event::KinCrawled {
+        posts: facts.len(),
+        before: next,
+        complete,
     })
 }
 

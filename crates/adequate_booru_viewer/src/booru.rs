@@ -7,7 +7,7 @@ use std::{
 use ureq::Agent;
 
 use crate::model::{
-    PostId, PostRecord, Query, Rating, Sort, Tag, TagHint, TagKind, narrow_post_id,
+    Harvest, Kin, PostId, PostRecord, Query, Rating, Sort, Tag, TagHint, TagKind, narrow_post_id,
 };
 
 const POST_LIMIT: &str = "200";
@@ -17,7 +17,7 @@ pub fn post_url(id: PostId) -> String {
 }
 
 pub trait Booru {
-    fn posts(&self, query: &Query, sort: Sort, page: u32) -> Result<Vec<PostRecord>>;
+    fn posts(&self, query: &Query, sort: Sort, page: u32) -> Result<Vec<Harvest>>;
 }
 
 #[derive(Clone)]
@@ -37,15 +37,57 @@ impl Danbooru {
         }
     }
 
-    pub fn crawl_page(&self, before: Option<PostId>) -> Result<Vec<PostRecord>> {
+    pub fn crawl_page(&self, before: Option<PostId>) -> Result<Vec<Harvest>> {
         self.fetch("order:id_desc", before.map(|id| format!("b{}", id.0)))
     }
 
-    pub fn single(&self, id: PostId) -> Result<Vec<PostRecord>> {
+    pub fn single(&self, id: PostId) -> Result<Vec<Harvest>> {
         self.fetch(&format!("id:{id}"), None)
     }
 
-    fn fetch(&self, tags: &str, page: Option<String>) -> Result<Vec<PostRecord>> {
+    pub fn posts_by_ids(&self, ids: &[PostId]) -> Result<Vec<Harvest>> {
+        let ids = ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        self.fetch(&format!("id:{ids}"), None)
+    }
+
+    pub fn kin_page(&self, before: Option<PostId>) -> Result<Vec<Kin>> {
+        self.fetch_kin("order:id_desc", before.map(|id| format!("b{}", id.0)))
+    }
+
+    pub fn kin_single(&self, id: PostId) -> Result<Option<Kin>> {
+        self.fetch_kin(&format!("id:{id}"), None)
+            .map(|mut posts| posts.pop())
+    }
+
+    pub fn kin_children(&self, parent: PostId) -> Result<Vec<Kin>> {
+        self.fetch_kin(&format!("parent:{parent}"), None)
+    }
+
+    fn fetch_kin(&self, tags: &str, page: Option<String>) -> Result<Vec<Kin>> {
+        let mut request = self
+            .agent
+            .get("https://danbooru.donmai.us/posts.json")
+            .query("limit", POST_LIMIT)
+            .query("tags", tags)
+            .query("only", "id,parent_id,has_children");
+        if let Some(page) = page {
+            request = request.query("page", page);
+        }
+        let mut response = request.call().context("GET Danbooru kin page")?;
+        response
+            .body_mut()
+            .read_json::<Vec<DanbooruKin>>()
+            .context("decode Danbooru kin JSON")?
+            .into_iter()
+            .map(Kin::try_from)
+            .collect()
+    }
+
+    fn fetch(&self, tags: &str, page: Option<String>) -> Result<Vec<Harvest>> {
         let mut request = self
             .agent
             .get("https://danbooru.donmai.us/posts.json")
@@ -59,12 +101,12 @@ impl Danbooru {
             .body_mut()
             .read_json::<Vec<DanbooruPost>>()
             .context("decode Danbooru posts JSON")?;
-        wire.into_iter().map(PostRecord::try_from).collect()
+        wire.into_iter().map(Harvest::try_from).collect()
     }
 }
 
 impl Booru for Danbooru {
-    fn posts(&self, query: &Query, sort: Sort, page: u32) -> Result<Vec<PostRecord>> {
+    fn posts(&self, query: &Query, sort: Sort, page: u32) -> Result<Vec<Harvest>> {
         self.fetch(&query.remote_seed(sort), Some(page.to_string()))
     }
 }
@@ -72,6 +114,10 @@ impl Booru for Danbooru {
 #[derive(Debug, Deserialize)]
 struct DanbooruPost {
     id: u64,
+    #[serde(default)]
+    parent_id: Option<u64>,
+    #[serde(default)]
+    has_children: bool,
     #[serde(default)]
     created_at: String,
     #[serde(default)]
@@ -109,6 +155,15 @@ struct DanbooruPost {
 }
 
 #[derive(Debug, Deserialize)]
+struct DanbooruKin {
+    id: u64,
+    #[serde(default)]
+    parent_id: Option<u64>,
+    #[serde(default)]
+    has_children: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct DanbooruMediaAsset {
     #[serde(default)]
     variants: Vec<DanbooruVariant>,
@@ -121,7 +176,7 @@ struct DanbooruVariant {
     url: String,
 }
 
-impl TryFrom<DanbooruPost> for PostRecord {
+impl TryFrom<DanbooruPost> for Harvest {
     type Error = anyhow::Error;
 
     fn try_from(post: DanbooruPost) -> Result<Self> {
@@ -139,8 +194,11 @@ impl TryFrom<DanbooruPost> for PostRecord {
                 post.file_url,
             )
         };
-        Ok(Self {
-            id: narrow_post_id(post.id)?,
+        let id = narrow_post_id(post.id)?;
+        let parent = post.parent_id.map(narrow_post_id).transpose()?;
+        let has_children = post.has_children;
+        let post = PostRecord {
+            id,
             rating: Rating::parse(&post.rating),
             score: post.score,
             favs: post.fav_count,
@@ -154,6 +212,26 @@ impl TryFrom<DanbooruPost> for PostRecord {
             thumb_720_url,
             large_url,
             file_url,
+        };
+        Ok(Self {
+            post,
+            kin: Kin {
+                id,
+                parent,
+                has_children,
+            },
+        })
+    }
+}
+
+impl TryFrom<DanbooruKin> for Kin {
+    type Error = anyhow::Error;
+
+    fn try_from(post: DanbooruKin) -> Result<Self> {
+        Ok(Self {
+            id: narrow_post_id(post.id)?,
+            parent: post.parent_id.map(narrow_post_id).transpose()?,
+            has_children: post.has_children,
         })
     }
 }

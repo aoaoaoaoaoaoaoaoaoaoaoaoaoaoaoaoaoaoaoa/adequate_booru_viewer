@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "adequate_booru_viewer"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -40,6 +40,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "image",
+ "memmap2",
  "pollster",
  "redb",
  "rfd",
@@ -235,9 +236,9 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "bytemuck"
-version = "1.25.0"
+version = "1.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
+checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
 dependencies = [
  "bytemuck_derive",
 ]
@@ -606,11 +607,12 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "dwemer_poolrooms"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2825cf680fcef531f1d6ec9d464465be5626fc2a00ebf062c14e6b4481dd05cc"
+checksum = "d222242a9335eba0f22e53398807343e9dee52644eb2fad9635add628970f834"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "egui",
  "egui-wgpu",
 ]
@@ -3789,7 +3791,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
 name = "xtask"
-version = "0.9.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "serde",

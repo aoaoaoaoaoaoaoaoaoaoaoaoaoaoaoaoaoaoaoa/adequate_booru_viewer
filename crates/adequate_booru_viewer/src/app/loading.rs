@@ -59,7 +59,8 @@ impl Bayonet {
             CARD_H.min((arena.height() - 24.0).max(96.0)),
         );
         let rect = egui::Rect::from_center_size(arena.center(), size);
-        self.water.set_floor(Some(arena));
+        self.water
+            .set_floor(Some(crate::water::Floor::shallow(arena)));
         if state.raised() && self.water_mode.wet() {
             self.water.show_loading(ui.ctx(), rect);
         } else {

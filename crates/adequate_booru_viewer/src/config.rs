@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     date::DateRange,
-    model::{Query, QueryAtom, RatingClass, Sort, TagPolarity},
+    model::{GalleryTopology, Query, QueryAtom, RatingClass, Sort, TagPolarity},
 };
 
 /// User-authored intent only: everything here is something a person could
@@ -154,6 +154,7 @@ pub struct Slate {
     pub active_filter: Option<FilterName>,
     pub query: QueryConfig,
     pub sort: Sort,
+    pub gallery: GalleryTopology,
     pub dates: DateRange,
     pub images_per_row: u16,
     pub water: WaterMode,
@@ -168,6 +169,7 @@ impl Default for Slate {
             active_filter: None,
             query: QueryConfig::default(),
             sort: Sort::Score,
+            gallery: GalleryTopology::Ungrouped,
             dates: DateRange::default(),
             images_per_row: 5,
             water: WaterMode::Wet,
@@ -360,6 +362,7 @@ mod tests {
                 active_group: Vec::new(),
             },
             sort: Sort::Newest,
+            gallery: GalleryTopology::Grouped,
             dates: DateRange {
                 first: crate::date::CreatedDay::parse("2024-01-01"),
                 last: crate::date::CreatedDay::parse("2024-12-31"),

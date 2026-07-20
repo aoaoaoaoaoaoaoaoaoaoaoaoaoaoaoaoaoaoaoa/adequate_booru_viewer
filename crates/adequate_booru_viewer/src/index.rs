@@ -6,19 +6,23 @@ use redb::{
 use roaring::RoaringBitmap;
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BTreeSet, BinaryHeap},
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
     time::{Duration, Instant},
 };
 
-use crate::date::{CreatedDay, DateRange};
 use crate::model::{
-    BoolOp, PostId, PostRecord, Query, QueryAtom, QueryExpr, RatingClass, SearchHit, Sort, Tag,
-    TagKind, decode_record, encode_record, narrow_post_id, record_day,
+    BoolOp, FamilyTree, GalleryTopology, Harvest, Kin, PostId, PostRecord, Query, QueryAtom,
+    QueryExpr, RatingClass, SearchHit, Sort, Tag, TagKind, decode_record, encode_record,
+    narrow_post_id, record_day,
 };
 use crate::posting::{self, Batch as FactBatch, Lane as PostingLane};
 use crate::trace::startup;
+use crate::{
+    date::{CreatedDay, DateRange},
+    kin,
+};
 
 const POSTS: TableDefinition<'_, u64, &[u8]> = TableDefinition::new("posts");
 const TAG_CHUNKS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("tag_chunks.v1");
@@ -106,14 +110,14 @@ const SORT_HEAD_CAP: usize = 262_144;
 /// O(containers actually needed). Reach for it when the index outgrows this
 /// cache; it obsoletes the vault entirely.
 struct Vault {
-    slots: std::collections::HashMap<posting::Key, (Arc<RoaringBitmap>, u64)>,
+    slots: HashMap<posting::Key, (Arc<RoaringBitmap>, u64)>,
     clock: u64,
 }
 
 impl Vault {
     fn new() -> Self {
         Self {
-            slots: std::collections::HashMap::new(),
+            slots: HashMap::new(),
             clock: 0,
         }
     }
@@ -154,14 +158,14 @@ impl Vault {
 }
 
 struct RecordVault {
-    slots: std::collections::HashMap<PostId, (PostRecord, u64)>,
+    slots: HashMap<PostId, (PostRecord, u64)>,
     clock: u64,
 }
 
 impl RecordVault {
     fn new() -> Self {
         Self {
-            slots: std::collections::HashMap::new(),
+            slots: HashMap::new(),
             clock: 0,
         }
     }
@@ -246,7 +250,7 @@ impl SortKeyVault {
         }
     }
 
-    fn refresh(&mut self, posts: &[PostRecord]) {
+    fn refresh(&mut self, posts: &[&PostRecord]) {
         if let Some(keys) = &mut self.score {
             let keys = Arc::make_mut(keys);
             for post in posts {
@@ -273,6 +277,7 @@ impl SortKeyVault {
 #[derive(Clone)]
 pub struct Index {
     db: Arc<Database>,
+    kin: Arc<RwLock<kin::Atlas>>,
     anchor: Arc<Mutex<Instant>>,
     vault: Arc<Mutex<Vault>>,
     records: Arc<Mutex<RecordVault>>,
@@ -285,48 +290,134 @@ impl Index {
         startup("index.open.enter");
         let db = Database::create(path).with_context(|| format!("open redb {}", path.display()))?;
         startup("index.redb.create.done");
+        Self::prime_database(&db)?;
+        let minimum_slots = newest_slot(&db)?;
+        let atlas = kin::Atlas::open(&db, path.with_extension("kin.u32"), minimum_slots)?;
         let index = Self {
             db: Arc::new(db),
+            kin: Arc::new(RwLock::new(atlas)),
             anchor: Arc::new(Mutex::new(Instant::now())),
             vault: Arc::new(Mutex::new(Vault::new())),
             records: Arc::new(Mutex::new(RecordVault::new())),
             sort_heads: Arc::new(Mutex::new(SortHeadVault::default())),
             sort_keys: Arc::new(Mutex::new(SortKeyVault::default())),
         };
-        index.prime()?;
         startup("index.prime.done");
         Ok(index)
     }
 
+    #[allow(
+        dead_code,
+        reason = "the duplicated binary module does not see the benchmark/test consumers of the library API"
+    )]
     pub fn absorb(&self, posts: &[PostRecord]) -> Result<()> {
+        let posts = posts.iter().collect::<Vec<_>>();
         let tx = self.begin_quick_write("begin index write")?;
-        Self::absorb_into(&tx, posts)?;
+        Self::absorb_into(&tx, &posts)?;
         tx.commit().context("commit index write")?;
-        self.evict_records(posts);
+        self.evict_records(&posts);
         self.clear_sort_heads();
-        self.refresh_sort_keys(posts);
+        self.refresh_sort_keys(&posts);
         Ok(())
     }
 
-    /// One transaction per crawl page: posts and the advanced cursor land
-    /// together, halving commits on the hottest write path.
-    pub fn absorb_crawl(&self, posts: &[PostRecord], before: Option<PostId>) -> Result<()> {
-        let tx = self.begin_quick_write("begin crawl write")?;
-        Self::absorb_into(&tx, posts)?;
-        if let Some(before) = before {
+    pub fn absorb_harvest(&self, harvest: &[Harvest]) -> Result<()> {
+        self.absorb_harvest_with(harvest, None)
+    }
+
+    pub fn absorb_crawl_harvest(&self, harvest: &[Harvest], before: Option<PostId>) -> Result<()> {
+        self.absorb_harvest_with(harvest, Some((before, false)))
+    }
+
+    pub fn absorb_kin_crawl(
+        &self,
+        facts: &[Kin],
+        before: Option<PostId>,
+        complete: bool,
+    ) -> Result<()> {
+        let mut atlas = write(&self.kin);
+        let tx = self.begin_quick_write("begin kin crawl write")?;
+        let mutation = kin::absorb(&tx, facts)?;
+        kin::advance_backfill(&tx, before, complete)?;
+        tx.commit().context("commit kin crawl write")?;
+        atlas.apply(&mutation)
+    }
+
+    pub fn kin_backfill(&self) -> Result<kin::Backfill> {
+        kin::backfill(&self.db)
+    }
+
+    pub fn family_hydrated(&self, id: PostId) -> Result<bool> {
+        let root = read(&self.kin).root(id);
+        kin::hydrated(&self.db, root)
+    }
+
+    pub fn absorb_family(&self, facts: &[Kin], root: PostId) -> Result<()> {
+        let mut atlas = write(&self.kin);
+        let tx = self.begin_quick_write("begin family hydration write")?;
+        let mutation = kin::absorb(&tx, facts)?;
+        kin::seal_hydrated(&tx, root)?;
+        tx.commit().context("commit family hydration")?;
+        atlas.apply(&mutation)
+    }
+
+    pub fn missing_posts(&self, ids: impl IntoIterator<Item = PostId>) -> Result<Vec<PostId>> {
+        let tx = self.db.begin_read().context("begin missing-post read")?;
+        let posts = tx.open_table(POSTS).context("open missing-post table")?;
+        ids.into_iter()
+            .filter_map(|id| match posts.get(u64::from(id.0)) {
+                Ok(Some(_)) => None,
+                Ok(None) => Some(Ok(id)),
+                Err(err) => Some(Err(err).context("read missing family post")),
+            })
+            .collect()
+    }
+
+    pub fn family_tree(&self, focus: PostId) -> Result<FamilyTree> {
+        let atlas = read(&self.kin);
+        let tx = self.db.begin_read().context("begin family read")?;
+        let posts = tx.open_table(POSTS).context("open family posts")?;
+        let children = tx
+            .open_table(kin::CHILDREN)
+            .context("open family children")?;
+        let hints = tx
+            .open_table(kin::CHILD_HINTS)
+            .context("open family hints")?;
+        kin::family_tree(&posts, &children, &hints, &atlas, focus)
+    }
+
+    fn absorb_harvest_with(
+        &self,
+        harvest: &[Harvest],
+        crawl: Option<(Option<PostId>, bool)>,
+    ) -> Result<()> {
+        let posts = harvest.iter().map(|item| &item.post).collect::<Vec<_>>();
+        let facts = harvest.iter().map(|item| item.kin).collect::<Vec<_>>();
+        let mut atlas = write(&self.kin);
+        let tx = self.begin_quick_write("begin harvested index write")?;
+        Self::absorb_into(&tx, &posts)?;
+        let mutation = kin::absorb(&tx, &facts)?;
+        if let Some((before, complete)) = crawl {
             let mut table = tx.open_table(META).context("open meta")?;
-            let _old = table
-                .insert(DANBOORU_CRAWL_BEFORE, u64::from(before.0))
-                .context("write Danbooru crawl cursor")?;
+            if let Some(before) = before {
+                let _old = table
+                    .insert(DANBOORU_CRAWL_BEFORE, u64::from(before.0))
+                    .context("write Danbooru crawl cursor")?;
+            }
+            drop(table);
+            if complete {
+                kin::advance_backfill(&tx, before, true)?;
+            }
         }
-        tx.commit().context("commit crawl write")?;
-        self.evict_records(posts);
+        tx.commit().context("commit harvested index write")?;
+        atlas.apply(&mutation)?;
+        self.evict_records(&posts);
         self.clear_sort_heads();
-        self.refresh_sort_keys(posts);
+        self.refresh_sort_keys(&posts);
         Ok(())
     }
 
-    fn evict_records(&self, posts: &[PostRecord]) {
+    fn evict_records(&self, posts: &[&PostRecord]) {
         let mut records = lock(&self.records);
         for post in posts {
             records.evict(post.id);
@@ -337,11 +428,11 @@ impl Index {
         lock(&self.sort_heads).clear();
     }
 
-    fn refresh_sort_keys(&self, posts: &[PostRecord]) {
+    fn refresh_sort_keys(&self, posts: &[&PostRecord]) {
         lock(&self.sort_keys).refresh(posts);
     }
 
-    fn absorb_into(tx: &redb::WriteTransaction, posts: &[PostRecord]) -> Result<()> {
+    fn absorb_into(tx: &redb::WriteTransaction, posts: &[&PostRecord]) -> Result<()> {
         {
             let mut post_table = tx.open_table(POSTS).context("open posts")?;
             let mut score_table = tx.open_table(SCORE_POSTS).context("open score_posts")?;
@@ -547,11 +638,26 @@ impl Index {
         })
     }
 
+    #[allow(
+        dead_code,
+        reason = "the duplicated binary module does not see the retrieval benchmark's POSTS-only facade"
+    )]
     pub fn search(
         &self,
         query: &Query,
         sort: Sort,
         dates: DateRange,
+        limit: usize,
+    ) -> Result<SearchHit> {
+        self.search_topology(query, sort, dates, GalleryTopology::Ungrouped, limit)
+    }
+
+    pub fn search_topology(
+        &self,
+        query: &Query,
+        sort: Sort,
+        dates: DateRange,
+        topology: GalleryTopology,
         limit: usize,
     ) -> Result<SearchHit> {
         startup("index.search.enter");
@@ -588,32 +694,38 @@ impl Index {
         }?;
         startup("index.search.candidates.len");
 
-        let ids = match (&candidate, sort) {
-            (None, Sort::Newest) => newest_ids(&posts, window, limit)?,
-            (Some(Candidate::Finite(bitmap)), Sort::Newest) => {
-                newest_bitmap_ids(bitmap.as_ref(), window, limit)
-            }
-            (Some(candidate @ Candidate::Cofinite(_)), Sort::Newest) => {
-                newest_ids_filtered(&posts, candidate, window, limit)?
-            }
-            (None, Sort::Score | Sort::Favorites) => {
-                self.ranked_ids(&tx, sort, None, window, limit)?
-            }
-            (Some(candidate @ Candidate::Finite(bitmap)), Sort::Score)
-                if bitmap.len() > SMALL_SORT =>
-            {
-                self.ranked_ids(&tx, sort, Some(candidate), window, limit)?
-            }
-            (Some(candidate @ Candidate::Finite(bitmap)), Sort::Favorites)
-                if bitmap.len() > SMALL_SORT =>
-            {
-                self.ranked_ids(&tx, sort, Some(candidate), window, limit)?
-            }
-            (Some(candidate @ Candidate::Cofinite(_)), Sort::Score | Sort::Favorites) => {
-                self.ranked_ids(&tx, sort, Some(candidate), window, limit)?
-            }
-            (Some(Candidate::Finite(bitmap)), Sort::Score | Sort::Favorites) => {
-                self.local_sorted_ids(&tx, bitmap.as_ref(), sort, window, limit)?
+        let ids = match topology {
+            GalleryTopology::Ungrouped => match (&candidate, sort) {
+                (None, Sort::Newest) => newest_ids(&posts, window, limit)?,
+                (Some(Candidate::Finite(bitmap)), Sort::Newest) => {
+                    newest_bitmap_ids(bitmap.as_ref(), window, limit)
+                }
+                (Some(candidate @ Candidate::Cofinite(_)), Sort::Newest) => {
+                    newest_ids_filtered(&posts, candidate, window, limit)?
+                }
+                (None, Sort::Score | Sort::Favorites) => {
+                    self.ranked_ids(&tx, sort, None, window, limit)?
+                }
+                (Some(candidate @ Candidate::Finite(bitmap)), Sort::Score)
+                    if bitmap.len() > SMALL_SORT =>
+                {
+                    self.ranked_ids(&tx, sort, Some(candidate), window, limit)?
+                }
+                (Some(candidate @ Candidate::Finite(bitmap)), Sort::Favorites)
+                    if bitmap.len() > SMALL_SORT =>
+                {
+                    self.ranked_ids(&tx, sort, Some(candidate), window, limit)?
+                }
+                (Some(candidate @ Candidate::Cofinite(_)), Sort::Score | Sort::Favorites) => {
+                    self.ranked_ids(&tx, sort, Some(candidate), window, limit)?
+                }
+                (Some(Candidate::Finite(bitmap)), Sort::Score | Sort::Favorites) => {
+                    self.local_sorted_ids(&tx, bitmap.as_ref(), sort, window, limit)?
+                }
+            },
+            GalleryTopology::Grouped => {
+                let atlas = read(&self.kin);
+                self.family_ids(&tx, &posts, &atlas, &candidate, sort, window, limit)?
             }
         };
         startup("index.search.ids");
@@ -642,9 +754,36 @@ impl Index {
             }
         }
         startup("index.search.posts.loaded");
+        let mut families = BTreeMap::new();
+        if topology == GalleryTopology::Grouped {
+            let atlas = read(&self.kin);
+            let children = tx
+                .open_table(kin::CHILDREN)
+                .context("open result-family children")?;
+            let hints = tx
+                .open_table(kin::CHILD_HINTS)
+                .context("open result-family hints")?;
+            let mut badges = BTreeMap::new();
+            for post in &hydrated {
+                let root = atlas.root(post.id);
+                let badge = if let Some(badge) = badges.get(&root).copied() {
+                    Some(badge)
+                } else {
+                    let badge = kin::family_badge(&posts, &children, &hints, &atlas, post.id)?;
+                    if let Some(badge) = badge {
+                        let _old = badges.insert(root, badge);
+                    }
+                    badge
+                };
+                if let Some(badge) = badge {
+                    let _old = families.insert(post.id, badge);
+                }
+            }
+        }
         Ok(SearchHit {
             posts: hydrated,
             candidates,
+            families,
         })
     }
 
@@ -717,6 +856,113 @@ impl Index {
         }
     }
 
+    fn family_ids(
+        &self,
+        tx: &redb::ReadTransaction,
+        posts: &impl redb::ReadableTable<u64, &'static [u8]>,
+        atlas: &kin::Atlas,
+        candidate: &Option<Candidate>,
+        sort: Sort,
+        window: Option<DateWindow>,
+        limit: usize,
+    ) -> Result<Vec<u32>> {
+        match (candidate, sort) {
+            (None, Sort::Newest) => newest_family_ids(posts, atlas, None, window, limit),
+            (Some(Candidate::Finite(bitmap)), Sort::Newest) => Ok(newest_bitmap_family_ids(
+                bitmap.as_ref(),
+                atlas,
+                window,
+                limit,
+            )),
+            (Some(candidate @ Candidate::Cofinite(_)), Sort::Newest) => {
+                newest_family_ids(posts, atlas, Some(candidate), window, limit)
+            }
+            (Some(Candidate::Finite(bitmap)), Sort::Score | Sort::Favorites)
+                if bitmap.len() <= SMALL_SORT =>
+            {
+                self.local_sorted_family_ids(tx, bitmap.as_ref(), atlas, sort, window, limit)
+            }
+            (candidate, Sort::Score | Sort::Favorites) => {
+                self.ranked_family_ids(tx, sort, candidate.as_ref(), atlas, window, limit)
+            }
+        }
+    }
+
+    fn ranked_family_ids(
+        &self,
+        tx: &redb::ReadTransaction,
+        sort: Sort,
+        candidate: Option<&Candidate>,
+        atlas: &kin::Atlas,
+        window: Option<DateWindow>,
+        limit: usize,
+    ) -> Result<Vec<u32>> {
+        let head = self.sort_head(tx, sort)?;
+        let ids = family_stream(head.iter().copied(), atlas, candidate, window, limit);
+        if ids.len() == limit {
+            return Ok(ids);
+        }
+        match sort {
+            Sort::Score => lane_family_ids(
+                &tx.open_table(SCORE_POSTS).context("open score_posts")?,
+                atlas,
+                candidate,
+                window,
+                limit,
+            ),
+            Sort::Favorites => lane_family_ids(
+                &tx.open_table(FAV_POSTS).context("open fav_posts")?,
+                atlas,
+                candidate,
+                window,
+                limit,
+            ),
+            Sort::Newest => unreachable!("newest is not a ranked family lane"),
+        }
+    }
+
+    fn local_sorted_family_ids(
+        &self,
+        tx: &redb::ReadTransaction,
+        bitmap: &RoaringBitmap,
+        atlas: &kin::Atlas,
+        sort: Sort,
+        window: Option<DateWindow>,
+        limit: usize,
+    ) -> Result<Vec<u32>> {
+        let keys = self.sort_keys(tx, sort)?;
+        let mut strongest = HashMap::<u32, (u64, u32)>::new();
+        let ids: Box<dyn Iterator<Item = u32> + '_> = match window {
+            Some(window) => Box::new(bitmap.range(window.bounds())),
+            None => Box::new(bitmap.iter()),
+        };
+        for id in ids {
+            let Some(&key) = keys.get(id as usize) else {
+                continue;
+            };
+            if key == 0 {
+                continue;
+            }
+            let root = atlas.root(PostId(id)).0;
+            let candidate = (key, id);
+            let _best = strongest
+                .entry(root)
+                .and_modify(|best| *best = (*best).max(candidate))
+                .or_insert(candidate);
+        }
+        let mut heap = BinaryHeap::<Reverse<(u64, u32)>>::with_capacity(limit + 1);
+        for item in strongest.into_values() {
+            if heap.len() < limit {
+                heap.push(Reverse(item));
+            } else if let Some(mut cold) = heap.peek_mut()
+                && item > cold.0
+            {
+                *cold = Reverse(item);
+            }
+        }
+        Ok(finish_sorted_heap(heap))
+    }
+
     fn sort_keys(&self, tx: &redb::ReadTransaction, sort: Sort) -> Result<Arc<Vec<u64>>> {
         if let Some(keys) = lock(&self.sort_keys).get(sort) {
             return Ok(keys);
@@ -738,12 +984,13 @@ impl Index {
         Ok(keys)
     }
 
-    fn prime(&self) -> Result<()> {
-        if self.schema_ready()? {
+    fn prime_database(db: &Database) -> Result<()> {
+        if Self::schema_ready(db)? {
             startup("index.prime.schema.ready");
             return Ok(());
         }
-        let tx = self.begin_quick_write("begin schema prime")?;
+        let mut tx = db.begin_write().context("begin schema prime")?;
+        tx.set_quick_repair(true);
         {
             let _posts = tx.open_table(POSTS).context("prime posts")?;
             let _tags = tx.open_table(TAG_CHUNKS).context("prime tag chunks")?;
@@ -757,12 +1004,21 @@ impl Index {
             let _score = tx.open_table(SCORE_POSTS).context("prime score_posts")?;
             let _favs = tx.open_table(FAV_POSTS).context("prime fav_posts")?;
             let _meta = tx.open_table(META).context("prime meta")?;
+            let _parents = tx.open_table(kin::PARENTS).context("prime kin parents")?;
+            let _children = tx.open_table(kin::CHILDREN).context("prime kin children")?;
+            let _hints = tx
+                .open_table(kin::CHILD_HINTS)
+                .context("prime kin child hints")?;
+            let _hydrated = tx
+                .open_table(kin::HYDRATED)
+                .context("prime hydrated families")?;
+            let _kin_meta = tx.open_table(kin::META).context("prime kin meta")?;
         }
         tx.commit().context("commit schema prime")
     }
 
-    fn schema_ready(&self) -> Result<bool> {
-        let tx = self.db.begin_read().context("begin schema read")?;
+    fn schema_ready(db: &Database) -> Result<bool> {
+        let tx = db.begin_read().context("begin schema read")?;
         macro_rules! open {
             ($table:expr) => {
                 match tx.open_table($table) {
@@ -780,6 +1036,11 @@ impl Index {
         open!(SCORE_POSTS);
         open!(FAV_POSTS);
         open!(META);
+        open!(kin::PARENTS);
+        open!(kin::CHILDREN);
+        open!(kin::CHILD_HINTS);
+        open!(kin::HYDRATED);
+        open!(kin::META);
         Ok(true)
     }
 
@@ -1548,6 +1809,111 @@ fn newest_ids_filtered(
     Ok(ids)
 }
 
+struct FamilyPage<'a> {
+    atlas: &'a kin::Atlas,
+    seen: RoaringBitmap,
+    ids: Vec<u32>,
+    limit: usize,
+}
+
+impl<'a> FamilyPage<'a> {
+    fn new(atlas: &'a kin::Atlas, limit: usize) -> Self {
+        Self {
+            atlas,
+            seen: RoaringBitmap::new(),
+            ids: Vec::with_capacity(limit),
+            limit,
+        }
+    }
+
+    fn offer(&mut self, id: u32) -> bool {
+        let root = self.atlas.root(PostId(id)).0;
+        if self.seen.insert(root) {
+            self.ids.push(id);
+        }
+        self.ids.len() == self.limit
+    }
+}
+
+fn family_stream(
+    ids: impl IntoIterator<Item = u32>,
+    atlas: &kin::Atlas,
+    candidate: Option<&Candidate>,
+    window: Option<DateWindow>,
+    limit: usize,
+) -> Vec<u32> {
+    let mut page = FamilyPage::new(atlas, limit);
+    if limit == 0 {
+        return page.ids;
+    }
+    for id in ids {
+        if window.is_none_or(|window| window.contains(id))
+            && candidate.is_none_or(|candidate| candidate.contains(id))
+            && page.offer(id)
+        {
+            break;
+        }
+    }
+    page.ids
+}
+
+fn newest_family_ids(
+    table: &impl redb::ReadableTable<u64, &'static [u8]>,
+    atlas: &kin::Atlas,
+    candidate: Option<&Candidate>,
+    window: Option<DateWindow>,
+    limit: usize,
+) -> Result<Vec<u32>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let range = window.map_or(0_u64..=u64::MAX, |window| {
+        u64::from(window.lo)..=u64::from(window.hi)
+    });
+    let mut page = FamilyPage::new(atlas, limit);
+    for row in table
+        .range(range)
+        .context("range family newest posts")?
+        .rev()
+    {
+        let (id, _) = row.context("read family newest row")?;
+        let id = u32::try_from(id.value()).context("family post id exceeds u32")?;
+        if candidate.is_none_or(|candidate| candidate.contains(id)) && page.offer(id) {
+            break;
+        }
+    }
+    Ok(page.ids)
+}
+
+fn newest_bitmap_family_ids(
+    bitmap: &RoaringBitmap,
+    atlas: &kin::Atlas,
+    window: Option<DateWindow>,
+    limit: usize,
+) -> Vec<u32> {
+    let mut page = FamilyPage::new(atlas, limit);
+    if limit == 0 {
+        return page.ids;
+    }
+    match window {
+        Some(window) => {
+            for id in bitmap.range(window.bounds()).rev() {
+                if page.offer(id) {
+                    break;
+                }
+            }
+        }
+        None => {
+            for id in bitmap.iter().rev() {
+                if page.offer(id) {
+                    break;
+                }
+            }
+        }
+    }
+    page.ids
+}
+
 fn all_post_ids(table: &impl redb::ReadableTable<u64, &'static [u8]>) -> Result<RoaringBitmap> {
     let mut bitmap = RoaringBitmap::new();
     for row in table.range(0_u64..=u64::MAX).context("range all posts")? {
@@ -1582,6 +1948,34 @@ fn lane_ids(
         }
     }
     Ok(ids)
+}
+
+fn lane_family_ids(
+    table: &impl redb::ReadableTable<u64, u32>,
+    atlas: &kin::Atlas,
+    candidate: Option<&Candidate>,
+    window: Option<DateWindow>,
+    limit: usize,
+) -> Result<Vec<u32>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut page = FamilyPage::new(atlas, limit);
+    for row in table
+        .range(0_u64..=u64::MAX)
+        .context("range family sort lane")?
+        .rev()
+    {
+        let (_, id) = row.context("read family sort row")?;
+        let id = id.value();
+        if window.is_none_or(|window| window.contains(id))
+            && candidate.is_none_or(|candidate| candidate.contains(id))
+            && page.offer(id)
+        {
+            break;
+        }
+    }
+    Ok(page.ids)
 }
 
 fn lane_head(table: &impl redb::ReadableTable<u64, u32>, cap: usize) -> Result<Vec<u32>> {
@@ -1698,5 +2092,30 @@ fn normalize_prefix(prefix: &str) -> Option<String> {
     let prefix = prefix.trim().to_ascii_lowercase().replace(' ', "_");
     (!prefix.is_empty()).then_some(prefix)
 }
+
+fn newest_slot(db: &Database) -> Result<usize> {
+    let tx = db.begin_read().context("begin newest-slot read")?;
+    let posts = tx.open_table(POSTS).context("open newest-slot posts")?;
+    posts
+        .last()
+        .context("read newest-slot post")?
+        .map_or(Ok(0), |(id, _)| {
+            usize::try_from(id.value())
+                .context("newest post id exceeds usize")?
+                .checked_add(1)
+                .context("newest post slot overflow")
+        })
+}
+
+fn read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests;

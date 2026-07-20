@@ -39,7 +39,7 @@ impl Bayonet {
             cuts.1 = area.response.rect;
         }
         for rect in pulses {
-            self.bump_plunge(rect);
+            self.water.bump(rect);
         }
         for strike in strikes {
             self.apply_tag_strike(strike);
@@ -66,7 +66,7 @@ impl Bayonet {
             },
         );
         for rect in pulses {
-            self.bump_plunge(rect);
+            self.water.bump(rect);
         }
         for strike in strikes {
             self.apply_tag_strike(strike);

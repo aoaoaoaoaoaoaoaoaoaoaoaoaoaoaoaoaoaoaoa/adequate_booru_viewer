@@ -38,6 +38,7 @@ mod config;
 mod date;
 mod filter_bank;
 mod index;
+mod kin;
 mod media;
 mod model;
 mod posting;
@@ -51,7 +52,7 @@ mod wire;
 mod worker;
 mod xdg;
 
-pub(crate) use dwemer_poolrooms::{chrome, water as frost};
+pub(crate) use dwemer_poolrooms::{chrome, water};
 
 use anyhow::Result;
 

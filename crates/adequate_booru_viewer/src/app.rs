@@ -14,12 +14,11 @@ use crate::{
     config::{Config, FilterConfig, FilterName, QueryConfig, SavedFilter, Slate, WaterMode},
     date::{CreatedDay, DateRange},
     filter_bank::Bank,
-    frost::{Cut, Veil},
     index::{CacheStats, Index, TagSuggestion},
     media::{MediaCache, RgbaBlade, extension},
     model::{
-        BoolOp, GroupCycle, PostId, PostRecord, Query, QueryAtom, SearchHit, Sort, Tag, TagKind,
-        TagPolarity,
+        BoolOp, FamilyBadge, FamilyTree, GalleryTopology, GroupCycle, PostId, PostRecord, Query,
+        QueryAtom, SearchHit, Sort, Tag, TagKind, TagPolarity,
     },
     query_ui::{QueryAction, render_query_tree},
     saved_filter_ui::{self, Action as SavedFilterAction, NameEdit, ShelfEdit},
@@ -30,6 +29,7 @@ use crate::{
     },
     tag_palette,
     trace::startup,
+    water::{Cut, Veil},
     worker::{BladeEpoch, Command, Event, Worker},
     xdg::Lair,
 };
@@ -47,7 +47,7 @@ mod water;
 
 use refresh::{AsyncPulse, PulseGate};
 use scroll::ThumbCruise;
-use viewer::{FullWait, ZoomGate};
+use viewer::{FullWait, ViewerSurface, ZoomGate};
 
 const RESULT_LIMIT: usize = 360;
 const HIT_CACHE_LIMIT: usize = 24;
@@ -61,6 +61,7 @@ const GAP: f32 = 12.0;
 const VIEWER_CHROME: f32 = 40.0;
 const MAX_GROUP_DEPTH: usize = 8;
 const PLATE_PAD: f32 = 4.0;
+const TILE_RADIUS: u8 = 2;
 const PREFETCH_DWELL: Duration = Duration::from_millis(120);
 const THUMB_PREFETCH_BUDGET: usize = 48;
 const CONFIG_SETTLE: Duration = Duration::from_millis(400);
@@ -87,6 +88,7 @@ pub struct Bayonet {
     filters: Bank,
     shelf_edit: Option<ShelfEdit>,
     sort: Sort,
+    gallery: GalleryTopology,
     date_range: DateRange,
     refresh_serial: u64,
     refresh_pulse: AsyncPulse,
@@ -115,8 +117,19 @@ pub struct Bayonet {
     full_inflight: HashSet<PostId>,
     full_faults: HashSet<PostId>,
     zoom: Option<PostRecord>,
+    /// The global-result tile from which the current family excursion began.
+    /// Family focus may leave `hit.posts`; this anchor must not.
+    viewer_gallery_anchor: Option<PostId>,
     zoom_gate: ZoomGate,
     zoom_rect: Option<egui::Rect>,
+    family_serial: u64,
+    viewer_family: Option<FamilyTree>,
+    viewer_surface: ViewerSurface,
+    viewer_drag: viewer::KinDrag,
+    viewer_recoil: Option<Instant>,
+    viewer_tree_zoom: f32,
+    viewer_tree_pan: egui::Vec2,
+    viewer_tree_fresh: bool,
     viewer_tags_open: bool,
     viewer_tag_groups: Option<(PostId, TagGroups)>,
     images_per_row: u16,
@@ -127,7 +140,8 @@ pub struct Bayonet {
     tag_menu: TagMenu,
     tag_menu_rect: Option<egui::Rect>,
     menu_cuts: Option<(egui::Rect, egui::Rect)>,
-    water: crate::frost::WaterTable,
+    water: crate::water::Surface,
+    family_water: crate::water::Surface,
     water_mode: WaterMode,
     thumb_cruise: ThumbCruise,
     bench_open: bool,
@@ -144,6 +158,7 @@ pub struct Bayonet {
     cache_status: String,
     warm_status: String,
     crawl_status: String,
+    kin_status: String,
     status: String,
     startup_probe: Option<StartupProbe>,
 }
@@ -193,6 +208,7 @@ impl Bayonet {
         let mut app = Self {
             status: format!("index {}", lair.index_path().display()),
             crawl_status: "crawl waking".to_owned(),
+            kin_status: "family index waking".to_owned(),
             lair,
             index,
             worker,
@@ -205,6 +221,7 @@ impl Bayonet {
             filters,
             shelf_edit: None,
             sort,
+            gallery: slate.gallery,
             date_range,
             refresh_serial: 0,
             refresh_pulse: AsyncPulse::Idle,
@@ -231,8 +248,17 @@ impl Bayonet {
             full_inflight: HashSet::new(),
             full_faults: HashSet::new(),
             zoom: None,
+            viewer_gallery_anchor: None,
             zoom_gate: ZoomGate::Fresh,
             zoom_rect: None,
+            family_serial: 0,
+            viewer_family: None,
+            viewer_surface: ViewerSurface::Image,
+            viewer_drag: viewer::KinDrag::default(),
+            viewer_recoil: None,
+            viewer_tree_zoom: viewer::TREE_ZOOM_DEFAULT,
+            viewer_tree_pan: egui::Vec2::ZERO,
+            viewer_tree_fresh: true,
             viewer_tags_open: slate.viewer_tags_open,
             viewer_tag_groups: None,
             images_per_row: slate
@@ -242,10 +268,15 @@ impl Bayonet {
             tag_menu: TagMenu::Closed,
             tag_menu_rect: None,
             menu_cuts: None,
-            water: crate::frost::WaterTable::new(match slate.water {
-                WaterMode::Dry => crate::frost::Wetness::Dry,
-                WaterMode::Wet => crate::frost::Wetness::Wet,
-                WaterMode::ReallyWet => crate::frost::Wetness::Deluge,
+            water: crate::water::Surface::new(match slate.water {
+                WaterMode::Dry => crate::water::Wetness::Dry,
+                WaterMode::Wet => crate::water::Wetness::Wet,
+                WaterMode::ReallyWet => crate::water::Wetness::Deluge,
+            }),
+            family_water: crate::water::Surface::new(match slate.water {
+                WaterMode::Dry => crate::water::Wetness::Dry,
+                WaterMode::Wet => crate::water::Wetness::Wet,
+                WaterMode::ReallyWet => crate::water::Wetness::Deluge,
             }),
             water_mode: slate.water,
             thumb_cruise: ThumbCruise::default(),
@@ -364,19 +395,22 @@ impl Bayonet {
         active_prefix(&self.tag_entry).is_some()
     }
 
-    /// Frost parameters for the boiler's blur pass, in logical points. The
-    /// water table performs the sole logical-to-physical conversion.
+    /// Optical veil for the boiler's water pass, in logical points. The active
+    /// surface performs the sole logical-to-physical conversion.
     /// `None` while no veil is showing (the common case — zero GPU cost).
     ///
     /// While a veil is fading out its cutouts are dropped, so the blur turns
     /// uniform and recedes evenly instead of leaving sharp negative space.
-    pub fn frost_veil(&self, ctx: &egui::Context) -> Option<Veil> {
-        let cut = |rect: egui::Rect, radius: f32| Cut { rect, radius };
+    pub fn water_veil(&self, ctx: &egui::Context) -> Option<Veil> {
         let zoom_open = self.zoom.is_some();
-        let zoom_strength = veil_strength(ctx, "frost-zoom", zoom_open);
+        let zoom_strength = veil_strength(ctx, "water-zoom", zoom_open);
         if zoom_strength > 0.0 {
             let cuts = if zoom_open && let Some(rect) = self.zoom_rect {
-                [cut(rect, VEIL_RADIUS), Cut::NONE]
+                let cut = match self.viewer_surface {
+                    ViewerSurface::Image => Cut::barrier(rect, VEIL_RADIUS),
+                    ViewerSurface::Family => Cut::aperture(rect, VEIL_RADIUS),
+                };
+                [cut, Cut::NONE]
             } else {
                 [Cut::NONE, Cut::NONE]
             };
@@ -388,10 +422,10 @@ impl Bayonet {
             });
         }
         let menu_open = self.tag_menu.is_open();
-        let menu_strength = veil_strength(ctx, "frost-menu", menu_open);
+        let menu_strength = veil_strength(ctx, "water-menu", menu_open);
         if menu_strength > 0.0 {
             let cuts = if menu_open && let Some((tile, menu)) = self.menu_cuts {
-                [cut(tile, 0.0), cut(menu, VEIL_RADIUS)]
+                [Cut::barrier(tile, 0.0), Cut::barrier(menu, VEIL_RADIUS)]
             } else {
                 [Cut::NONE, Cut::NONE]
             };
@@ -452,7 +486,7 @@ impl Bayonet {
 
     fn remember_hit(&mut self) {
         self.hit_cache.put(
-            HitKey::new(&self.query, self.sort, self.date_range),
+            HitKey::new(&self.query, self.sort, self.date_range, self.gallery),
             self.hit.clone(),
         );
     }
@@ -461,7 +495,7 @@ impl Bayonet {
         // The key just changed, so any result deferred behind an open tag menu
         // was for the old key — drop it lest it commit stale when the menu closes.
         self.parked_hit = None;
-        let key = HitKey::new(&self.query, self.sort, self.date_range);
+        let key = HitKey::new(&self.query, self.sort, self.date_range, self.gallery);
         let Some(hit) = self.hit_cache.get(&key) else {
             return false;
         };
@@ -484,19 +518,26 @@ impl Bayonet {
         if std::mem::take(&mut self.thwack_pending) {
             let energy = swap_fraction(&self.hit.posts, &hit.posts);
             if energy > 0.0 {
-                self.pool_thwack(self.water.domain(), energy);
+                self.water.thwack(self.water.domain(), energy);
             }
         }
         if posts_changed(&self.hit.posts, &hit.posts) {
             self.advance_thumb_epoch();
         }
         self.hit = hit;
-        let live = self
+        let mut live = self
             .hit
             .posts
             .iter()
             .map(|post| post.id)
             .collect::<HashSet<_>>();
+        if let Some(tree) = &self.viewer_family {
+            live.extend(
+                tree.nodes
+                    .values()
+                    .filter_map(|node| node.post.as_ref().map(|post| post.id)),
+            );
+        }
         self.thumbs.retain(|key, _| live.contains(&key.id));
         self.thumb_faults.retain(|key| live.contains(&key.id));
         self.prefetched.retain(|id| live.contains(id));
@@ -809,6 +850,47 @@ impl Bayonet {
                     self.nudge_stats();
                     ctx.request_repaint();
                 }
+                Event::KinCrawled {
+                    posts,
+                    before,
+                    complete,
+                } => {
+                    self.kin_status = if complete {
+                        "complete".to_owned()
+                    } else {
+                        before.map_or_else(
+                            || format!("+{posts}"),
+                            |before| format!("+{posts}; before #{before}"),
+                        )
+                    };
+                    if self.gallery == GalleryTopology::Grouped {
+                        self.nudge_refresh();
+                    }
+                    ctx.request_repaint();
+                }
+                Event::Family { serial, mut tree } => {
+                    let focus = self
+                        .viewer_family
+                        .as_ref()
+                        .map(|family| family.focus)
+                        .or_else(|| self.zoom.as_ref().map(|post| post.id));
+                    if serial == self.family_serial
+                        && let Some(focus) = focus
+                        && tree.node(focus).is_some()
+                    {
+                        tree.focus = focus;
+                        self.viewer_family = Some(tree);
+                        if self.viewer_surface == ViewerSurface::Family {
+                            self.viewer_tree_fresh = true;
+                        }
+                        ctx.request_repaint();
+                    }
+                }
+                Event::FamilyFault { serial, fault } => {
+                    if serial == self.family_serial {
+                        self.status = format!("family lookup failed: {fault}");
+                    }
+                }
                 Event::Suggested { serial, hits } => {
                     if serial == self.suggest_serial
                         && let Some((_, memo)) = &mut self.suggest_memo
@@ -930,7 +1012,7 @@ impl Bayonet {
         let mut menu_opened = false;
         let mut visible_rows = 0..0;
         let arena = ui.max_rect();
-        self.water.begin_surface(arena);
+        self.water.begin(crate::water::Domain::shelf(arena));
         let scroll = egui::ScrollArea::vertical().show_rows(ui, row_height, rows, |ui, range| {
             visible_rows = range.clone();
             ui.spacing_mut().item_spacing.x = GAP;
@@ -939,7 +1021,8 @@ impl Bayonet {
                 let end = (start + cols).min(posts.len());
                 let _row = ui.horizontal(|ui| {
                     for post in &posts[start..end] {
-                        menu_opened |= self.tile(ui, post, tile);
+                        let family = self.hit.families.get(&post.id).copied();
+                        menu_opened |= self.tile(ui, post, family, tile);
                     }
                 });
             }
@@ -964,29 +1047,32 @@ impl Bayonet {
                 offset: scroll.state.offset.y,
             },
         );
-        self.heave(ui.ctx(), scroll.state.offset.y);
+        self.water.heave(ui.ctx(), scroll.state.offset.y);
         self.hit.posts = posts;
         menu_opened
     }
 
-    fn tile(&mut self, ui: &mut egui::Ui, post: &PostRecord, tile: f32) -> bool {
+    fn tile(
+        &mut self,
+        ui: &mut egui::Ui,
+        post: &PostRecord,
+        family: Option<FamilyBadge>,
+        tile: f32,
+    ) -> bool {
         let mut menu_opened = false;
         let (rect, response) = ui.allocate_exact_size(egui::vec2(tile, tile), egui::Sense::click());
         crate::probe_anchor!(ui, format!("tile:{}", post.id.0), rect);
-        paint_plate(ui, rect, response.hovered());
-        let well = rect.shrink(PLATE_PAD);
+        let plate = Plate::flat(rect);
+        plate.paint(ui, response.hovered());
         match self.thumb(post, tile) {
-            Some(ThumbLoad::Ready(texture)) => {
-                let size = fit(texture.size_vec2(), well.size());
-                let image = egui::Rect::from_center_size(well.center(), size);
-                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                let _image = ui
-                    .painter()
-                    .image(texture.id(), image, uv, egui::Color32::WHITE);
-            }
+            Some(ThumbLoad::Ready(texture)) => plate.paint_image(ui, post, &texture),
             Some(ThumbLoad::Loading) => paint_tile_text(ui, rect, "loading"),
             Some(ThumbLoad::Fault) => paint_tile_text(ui, rect, "fault"),
             None => paint_tile_text(ui, rect, "no image"),
+        }
+        if let Some(family) = family {
+            crate::probe_anchor!(ui, format!("family-tile:{}", post.id.0), rect);
+            paint_family_badge(ui, rect, family);
         }
         if response.hovered() {
             self.arm_prefetch(ui.ctx(), post);
@@ -1101,13 +1187,29 @@ impl Bayonet {
             return Some(ThumbLoad::Ready(texture));
         }
         if self.thumb_faults.contains(&key) {
-            return Some(ThumbLoad::Fault);
+            return Some(
+                self.resident_thumb(post.id)
+                    .map_or(ThumbLoad::Fault, ThumbLoad::Ready),
+            );
         }
-        match self.arm_thumb(post, edge) {
+        let arm = self.arm_thumb(post, edge);
+        if let Some(texture) = self.resident_thumb(post.id) {
+            return Some(ThumbLoad::Ready(texture));
+        }
+        match arm {
             ThumbArm::Missing => None,
             ThumbArm::Fault => Some(ThumbLoad::Fault),
             ThumbArm::Armed | ThumbArm::Pending => Some(ThumbLoad::Loading),
         }
+    }
+
+    /// Keeps geometry alive while a sharper raster tier is in flight. The
+    /// post's canonical aspect owns layout, so replacing this texture cannot
+    /// move an edge; it can only add detail.
+    fn resident_thumb(&self, id: PostId) -> Option<TextureHandle> {
+        [2, 1, 0]
+            .into_iter()
+            .find_map(|bucket| self.thumbs.get(&ThumbKey { id, bucket }).cloned())
     }
 
     fn prefetch_scroll_thumbs(
@@ -1256,6 +1358,7 @@ impl Bayonet {
                 active_group: self.active_group.clone(),
             },
             sort: self.sort,
+            gallery: self.gallery,
             dates: self.date_range.normalized(),
             images_per_row: self.images_per_row,
             water: self.water_mode,
@@ -1367,14 +1470,16 @@ struct HitKey {
     query: String,
     sort: Sort,
     dates: DateRange,
+    gallery: GalleryTopology,
 }
 
 impl HitKey {
-    fn new(query: &Query, sort: Sort, dates: DateRange) -> Self {
+    fn new(query: &Query, sort: Sort, dates: DateRange, gallery: GalleryTopology) -> Self {
         Self {
             query: query.to_text(),
             sort,
             dates: dates.normalized(),
+            gallery,
         }
     }
 }
@@ -1503,21 +1608,54 @@ fn blade_texture(ctx: &egui::Context, blade: &RgbaBlade, kind: BladeKind) -> Tex
     )
 }
 
-/// The mat under every thumbnail: a faintly raised plate that separates
-/// neighbors across the gutter and gives badges a surface to anchor to.
-fn paint_plate(ui: &egui::Ui, rect: egui::Rect, hovered: bool) {
-    let _fill = ui.painter().rect_filled(rect, 2.0, chrome::SURFACE);
-    let edge = if hovered {
-        chrome::EDGE_STRONG
-    } else {
-        chrome::EDGE.gamma_multiply(0.55)
-    };
-    let _stroke = ui.painter().rect_stroke(
-        rect,
-        2.0,
-        egui::Stroke::new(1.0_f32, edge),
-        egui::StrokeKind::Inside,
-    );
+/// One immutable geometry truth for a thumbnail's mat and raster well.
+/// Animation may forge a new `Plate`, but no constituent is independently
+/// transformed: frame, image, focus, and water all consume this value.
+#[derive(Clone, Copy)]
+struct Plate {
+    rect: egui::Rect,
+    well: egui::Rect,
+}
+
+impl Plate {
+    fn flat(rect: egui::Rect) -> Self {
+        Self::dilated(rect, 1.0)
+    }
+
+    fn dilated(rect: egui::Rect, dilation: f32) -> Self {
+        let rect = egui::Rect::from_center_size(rect.center(), rect.size() * dilation);
+        Self {
+            rect,
+            well: rect.shrink(PLATE_PAD),
+        }
+    }
+
+    fn paint(self, ui: &egui::Ui, hovered: bool) {
+        let radius = egui::CornerRadius::same(TILE_RADIUS);
+        let _fill = ui.painter().rect_filled(self.rect, radius, chrome::SURFACE);
+        let edge = if hovered {
+            chrome::EDGE_STRONG
+        } else {
+            chrome::EDGE.gamma_multiply(0.55)
+        };
+        let _stroke = ui.painter().rect_stroke(
+            self.rect,
+            radius,
+            egui::Stroke::new(1.0_f32, edge),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    fn paint_image(self, ui: &egui::Ui, post: &PostRecord, texture: &TextureHandle) {
+        let image = egui::Rect::from_center_size(
+            self.well.center(),
+            contain(stable_image_size(post, Some(texture)), self.well.size()),
+        );
+        let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+        let _image = ui
+            .painter()
+            .image(texture.id(), image, uv, egui::Color32::WHITE);
+    }
 }
 
 fn paint_tile_text(ui: &egui::Ui, rect: egui::Rect, text: &str) {
@@ -1530,12 +1668,61 @@ fn paint_tile_text(ui: &egui::Ui, rect: egui::Rect, text: &str) {
     );
 }
 
-fn fit(image: egui::Vec2, bounds: egui::Vec2) -> egui::Vec2 {
+fn paint_family_badge(ui: &egui::Ui, tile: egui::Rect, family: FamilyBadge) {
+    let text = format!(
+        "◇ {}{}",
+        family.posts,
+        if family.incomplete { "+" } else { "" }
+    );
+    let font = egui::FontId::new(13.0, egui::FontFamily::Monospace);
+    let galley = ui.painter().layout_no_wrap(text, font, chrome::TEXT);
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(tile.right() - galley.size().x - 12.0, tile.top()),
+        galley.size() + egui::vec2(12.0, 6.0),
+    );
+    let radius = egui::CornerRadius {
+        nw: 0,
+        ne: TILE_RADIUS,
+        sw: 0,
+        se: 0,
+    };
+    let _fill = ui.painter().rect_filled(rect, radius, chrome::RAISED);
+    let _edge = ui.painter().rect_stroke(
+        rect,
+        radius,
+        egui::Stroke::new(1.0_f32, chrome::EDGE_STRONG),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter()
+        .galley(rect.center() - galley.size() * 0.5, galley, chrome::TEXT);
+}
+
+fn contain(image: egui::Vec2, bounds: egui::Vec2) -> egui::Vec2 {
+    contain_at(image, bounds, f32::INFINITY)
+}
+
+fn contain_native(image: egui::Vec2, bounds: egui::Vec2) -> egui::Vec2 {
+    contain_at(image, bounds, 1.0)
+}
+
+fn contain_at(image: egui::Vec2, bounds: egui::Vec2, scale_ceiling: f32) -> egui::Vec2 {
     if image.x <= 0.0 || image.y <= 0.0 {
         return bounds;
     }
-    let scale = (bounds.x / image.x).min(bounds.y / image.y).min(1.0);
+    let scale = (bounds.x / image.x)
+        .min(bounds.y / image.y)
+        .min(scale_ceiling);
     image * scale
+}
+
+/// The post record, not whichever raster tier happens to be resident this
+/// frame, owns image geometry. Texture swaps must be photometric only.
+fn stable_image_size(post: &PostRecord, texture: Option<&TextureHandle>) -> egui::Vec2 {
+    if post.width > 0 && post.height > 0 {
+        egui::vec2(post.width as f32, post.height as f32)
+    } else {
+        texture.map_or_else(|| egui::Vec2::splat(720.0), TextureHandle::size_vec2)
+    }
 }
 
 fn tile_edge(width: f32, columns: usize) -> f32 {
@@ -1610,5 +1797,29 @@ impl Bayonet {
         }
         self.retain_tag_menu(&ctx, menu_opened);
         self.full_frame(&ctx);
+    }
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+
+    fn close(left: egui::Vec2, right: egui::Vec2) {
+        assert!((left - right).length_sq() < 1.0e-6, "{left:?} != {right:?}");
+    }
+
+    #[test]
+    fn raster_tiers_cannot_move_plate_geometry() {
+        let bounds = egui::vec2(240.0, 240.0);
+        let low = contain(egui::vec2(90.0, 180.0), bounds);
+        let high = contain(egui::vec2(360.0, 720.0), bounds);
+        close(low, egui::vec2(120.0, 240.0));
+        close(low, high);
+    }
+
+    #[test]
+    fn full_viewer_retains_native_size_for_small_images() {
+        let native = egui::vec2(90.0, 180.0);
+        close(contain_native(native, egui::Vec2::splat(500.0)), native);
     }
 }
