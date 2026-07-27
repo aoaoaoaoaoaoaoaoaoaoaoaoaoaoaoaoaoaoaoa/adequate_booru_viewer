@@ -14,8 +14,8 @@ use std::{
 
 use crate::model::{
     BoolOp, FamilyTree, GalleryTopology, Harvest, Kin, PostId, PostRecord, Query, QueryAtom,
-    QueryExpr, RatingClass, SearchHit, Sort, Tag, TagKind, decode_record, encode_record,
-    narrow_post_id, record_day,
+    QueryExpr, RatingClass, SearchHit, SearchTail, Sort, Tag, TagKind, decode_record,
+    encode_record, narrow_post_id, record_day,
 };
 use crate::posting::{self, Batch as FactBatch, Lane as PostingLane};
 use crate::trace::startup;
@@ -667,7 +667,10 @@ impl Index {
         let posts = tx.open_table(POSTS).context("open posts")?;
         let window = date_window(&posts, dates)?;
         if window.is_some_and(DateWindow::empty) {
-            return Ok(SearchHit::default());
+            return Ok(SearchHit {
+                horizon: limit,
+                ..SearchHit::default()
+            });
         }
 
         let candidate = self.candidate_set(&tx, query, &posts)?;
@@ -730,6 +733,11 @@ impl Index {
         };
         startup("index.search.ids");
 
+        let tail = if limit > 0 && ids.len() == limit {
+            SearchTail::Open
+        } else {
+            SearchTail::Exhausted
+        };
         let mut hydrated = Vec::with_capacity(ids.len());
         for id in ids {
             let id = PostId(id);
@@ -784,6 +792,8 @@ impl Index {
             posts: hydrated,
             candidates,
             families,
+            horizon: limit,
+            tail,
         })
     }
 
@@ -1788,6 +1798,9 @@ fn newest_ids_filtered(
     window: Option<DateWindow>,
     limit: usize,
 ) -> Result<Vec<u32>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
     let range = window.map_or(0_u64..=u64::MAX, |window| {
         u64::from(window.lo)..=u64::from(window.hi)
     });
@@ -1930,6 +1943,9 @@ fn lane_ids(
     window: Option<DateWindow>,
     limit: usize,
 ) -> Result<Vec<u32>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
     let mut ids = Vec::with_capacity(limit);
     for row in table
         .range(0_u64..=u64::MAX)
@@ -1997,6 +2013,9 @@ fn head_ids(
     window: Option<DateWindow>,
     limit: usize,
 ) -> Option<Vec<u32>> {
+    if limit == 0 {
+        return Some(Vec::new());
+    }
     let mut ids = Vec::with_capacity(limit);
     for id in head {
         if window.is_none_or(|window| window.contains(*id))

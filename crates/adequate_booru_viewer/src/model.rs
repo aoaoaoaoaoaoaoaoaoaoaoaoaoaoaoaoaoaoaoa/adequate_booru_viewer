@@ -114,7 +114,7 @@ impl TagHint {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Sort {
     Newest,
@@ -1018,11 +1018,24 @@ impl PostRecord {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SearchTail {
+    #[default]
+    Exhausted,
+    Open,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct SearchHit {
     pub posts: Vec<PostRecord>,
     pub candidates: u64,
     pub families: BTreeMap<PostId, FamilyBadge>,
+    /// Requested top-N horizon which produced this hit.
+    pub horizon: usize,
+    /// `Open` means the selector filled its horizon exactly, so another
+    /// geometric probe may expose more indexed results. `Exhausted` is proof
+    /// that the selector itself ran dry before reaching the horizon.
+    pub tail: SearchTail,
 }
 
 pub fn encode_record(post: &PostRecord) -> Vec<u8> {

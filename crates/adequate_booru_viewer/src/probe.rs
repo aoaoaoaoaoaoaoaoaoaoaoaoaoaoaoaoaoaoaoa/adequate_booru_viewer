@@ -64,6 +64,10 @@ pub fn record(ui: &Ui, name: impl Into<String>, rect: Rect) {
 /// Live app state the choreography reads for closed-loop steps. Visible tiles
 /// are not duplicated here — the `tile:<id>` anchors already enumerate them.
 #[derive(Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "debug telemetry reports orthogonal live predicates, not one state machine"
+)]
 pub struct State {
     pub active_group: Vec<usize>,
     pub text_edit_focused: bool,
@@ -71,6 +75,18 @@ pub struct State {
     pub sort: Sort,
     pub dates: DateRange,
     pub images_per_row: u16,
+    pub result_posts: usize,
+    pub result_candidates: u64,
+    pub result_horizon: usize,
+    pub result_tail_open: bool,
+    pub requested_horizon: usize,
+    pub horizon_pending: bool,
+    pub grid_rows: usize,
+    pub grid_visible_end: usize,
+    pub grid_scroll_offset: f32,
+    pub refresh_in_flight: bool,
+    pub status: String,
+    pub warm_status: String,
     pub zoom_post: Option<u32>,
     pub tag_menu_post: Option<u32>,
 }

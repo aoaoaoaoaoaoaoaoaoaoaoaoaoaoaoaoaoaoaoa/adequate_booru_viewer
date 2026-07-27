@@ -46,7 +46,7 @@ impl Bayonet {
     fn empty_state(&self) -> EmptyState {
         if self.refresh_pulse.inflight_serial().is_some() {
             EmptyState::Loading
-        } else if !self.date_range.active() && self.warm_state == WarmState::InFlight {
+        } else if !self.date_range.active() && self.warm.active().state == WarmState::InFlight {
             EmptyState::Warming
         } else {
             EmptyState::Settled

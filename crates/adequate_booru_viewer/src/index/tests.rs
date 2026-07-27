@@ -4,6 +4,44 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
+fn search_tail_proves_exhaustion_without_a_silent_horizon() -> Result<()> {
+    let path = std::env::temp_dir().join(format!(
+        "adequate-booru-search-tail-{}.redb",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ));
+    remove_index(&path);
+    let index = Index::open(&path)?;
+    index.absorb(&[
+        post(1, 10, Rating::General, &["solo"])?,
+        post(2, 20, Rating::General, &["solo"])?,
+        post(3, 30, Rating::General, &["solo"])?,
+    ])?;
+    let query = Query::parse("solo");
+
+    for sort in Sort::ALL {
+        let empty = index.search(&query, sort, DateRange::default(), 0)?;
+        assert!(empty.posts.is_empty());
+        assert_eq!(empty.candidates, 3);
+        assert_eq!(empty.horizon, 0);
+        assert_eq!(empty.tail, SearchTail::Exhausted);
+    }
+
+    let shallow = index.search(&query, Sort::Score, DateRange::default(), 2)?;
+    assert_eq!(shallow.horizon, 2);
+    assert_eq!(shallow.tail, SearchTail::Open);
+    assert_eq!(ids(shallow), [3, 2]);
+
+    let deep = index.search(&query, Sort::Score, DateRange::default(), 4)?;
+    assert_eq!(deep.horizon, 4);
+    assert_eq!(deep.tail, SearchTail::Exhausted);
+    assert_eq!(ids(deep), [3, 2, 1]);
+
+    drop(index);
+    remove_index(&path);
+    Ok(())
+}
+
+#[test]
 fn boolean_query_evaluator_cuts_with_roaring_algebra() -> Result<()> {
     let path = std::env::temp_dir().join(format!(
         "adequate-booru-bool-{}.redb",

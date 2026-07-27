@@ -126,6 +126,12 @@ pub enum Event {
         posts: usize,
         exhausted: bool,
     },
+    WarmFault {
+        query_key: String,
+        sort: Sort,
+        first_page: u32,
+        fault: String,
+    },
     Crawled {
         posts: usize,
         before: Option<PostId>,
@@ -611,23 +617,30 @@ fn warm_loop(
     events: Klaxon,
 ) {
     for command in commands {
-        let outcome = match command {
+        let event = match command {
             WarmCommand::Warm {
                 query,
                 sort,
                 first_page,
                 pages,
-            } => warm(&booru, &index, &gate, query, sort, first_page, pages),
-            WarmCommand::Refetch(id) => refetch(&booru, &index, &gate, id),
+            } => {
+                let query_key = query.to_text();
+                match warm(&booru, &index, &gate, query, sort, first_page, pages) {
+                    Ok(event) => event,
+                    Err(err) => Event::WarmFault {
+                        query_key,
+                        sort,
+                        first_page,
+                        fault: format!("{err:#}"),
+                    },
+                }
+            }
+            WarmCommand::Refetch(id) => match refetch(&booru, &index, &gate, id) {
+                Ok(event) => event,
+                Err(err) => Event::Fault(format!("{err:#}")),
+            },
         };
-        match outcome {
-            Ok(event) => {
-                events.send(event);
-            }
-            Err(err) => {
-                events.send(Event::Fault(format!("{err:#}")));
-            }
-        }
+        events.send(event);
     }
 }
 

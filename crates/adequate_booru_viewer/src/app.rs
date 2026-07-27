@@ -18,7 +18,7 @@ use crate::{
     media::{MediaCache, RgbaBlade, extension},
     model::{
         BoolOp, FamilyBadge, FamilyTree, GalleryTopology, GroupCycle, PostId, PostRecord, Query,
-        QueryAtom, SearchHit, Sort, Tag, TagKind, TagPolarity,
+        QueryAtom, SearchHit, SearchTail, Sort, Tag, TagKind, TagPolarity,
     },
     query_ui::{QueryAction, render_query_tree},
     saved_filter_ui::{self, Action as SavedFilterAction, NameEdit, ShelfEdit},
@@ -49,7 +49,9 @@ use refresh::{AsyncPulse, PulseGate};
 use scroll::ThumbCruise;
 use viewer::{FullWait, ViewerSurface, ZoomGate};
 
-const RESULT_LIMIT: usize = 360;
+const INITIAL_RESULT_HORIZON: usize = 360;
+const RESULT_HORIZON_GROWTH: usize = 2;
+const RESULT_TAIL_MARGIN: usize = 120;
 const HIT_CACHE_LIMIT: usize = 24;
 const EVENT_BUDGET: usize = 12;
 const AUTO_WARM_PAGES: u32 = 1;
@@ -97,8 +99,11 @@ pub struct Bayonet {
     stats_pulse: AsyncPulse,
     stats_gate: PulseGate,
     hit: SearchHit,
+    hit_key: HitKey,
     hit_cache: HitCache,
-    parked_hit: Option<SearchHit>,
+    parked_hit: Option<(HitKey, SearchHit)>,
+    retrieval_horizon: usize,
+    horizon_pending: bool,
     /// A user filter/sort change is in flight; the next `commit_hit` thwacks the
     /// pool with energy set by how many tiles the new result actually replaces.
     thwack_pending: bool,
@@ -106,10 +111,7 @@ pub struct Bayonet {
     thumb_inflight: HashSet<ThumbKey>,
     thumb_faults: HashSet<ThumbKey>,
     thumb_epoch: BladeEpoch,
-    warm_key: WarmKey,
-    warm_next_page: u32,
-    warm_stride: u32,
-    warm_state: WarmState,
+    warm: WarmLedger,
     full: HashMap<PostId, TextureHandle>,
     full_rgba: HashMap<PostId, RgbaBlade>,
     full_loaded_at: HashMap<PostId, Instant>,
@@ -161,6 +163,12 @@ pub struct Bayonet {
     kin_status: String,
     status: String,
     startup_probe: Option<StartupProbe>,
+    #[cfg(feature = "devtools")]
+    probe_grid_rows: usize,
+    #[cfg(feature = "devtools")]
+    probe_grid_visible_end: usize,
+    #[cfg(feature = "devtools")]
+    probe_grid_scroll_offset: f32,
 }
 
 impl Bayonet {
@@ -205,6 +213,7 @@ impl Bayonet {
                 || query.clamp_group_path(&slate.query.active_group),
                 |filter| query.clamp_group_path(&filter.active_group),
             );
+        let hit_key = HitKey::new(&query, sort, date_range, slate.gallery);
         let mut app = Self {
             status: format!("index {}", lair.index_path().display()),
             crawl_status: "crawl waking".to_owned(),
@@ -230,17 +239,17 @@ impl Bayonet {
             stats_pulse: AsyncPulse::Idle,
             stats_gate: PulseGate::stats(),
             hit: SearchHit::default(),
+            hit_key,
             hit_cache: HitCache::default(),
             parked_hit: None,
+            retrieval_horizon: INITIAL_RESULT_HORIZON,
+            horizon_pending: false,
             thwack_pending: false,
             thumbs: HashMap::new(),
             thumb_inflight: HashSet::new(),
             thumb_faults: HashSet::new(),
             thumb_epoch: BladeEpoch::ROOT,
-            warm_key: WarmKey::new(&query, sort),
-            warm_next_page: 1,
-            warm_stride: AUTO_WARM_PAGES,
-            warm_state: WarmState::Idle,
+            warm: WarmLedger::new(WarmKey::new(&query, sort)),
             full: HashMap::new(),
             full_rgba: HashMap::new(),
             full_loaded_at: HashMap::new(),
@@ -294,6 +303,12 @@ impl Bayonet {
             cache_status: "cache measuring".to_owned(),
             warm_status: "query warm idle".to_owned(),
             startup_probe: StartupProbe::from_env(),
+            #[cfg(feature = "devtools")]
+            probe_grid_rows: 0,
+            #[cfg(feature = "devtools")]
+            probe_grid_visible_end: 0,
+            #[cfg(feature = "devtools")]
+            probe_grid_scroll_offset: 0.0,
         };
         startup("app.state.built");
         #[cfg(feature = "devtools")]
@@ -329,6 +344,18 @@ impl Bayonet {
                 sort: self.sort,
                 dates: self.date_range,
                 images_per_row: self.images_per_row,
+                result_posts: self.hit.posts.len(),
+                result_candidates: self.hit.candidates,
+                result_horizon: self.hit.horizon,
+                result_tail_open: self.hit.tail == SearchTail::Open,
+                requested_horizon: self.retrieval_horizon,
+                horizon_pending: self.horizon_pending,
+                grid_rows: self.probe_grid_rows,
+                grid_visible_end: self.probe_grid_visible_end,
+                grid_scroll_offset: self.probe_grid_scroll_offset,
+                refresh_in_flight: self.refresh_pulse.inflight_serial().is_some(),
+                status: self.status.clone(),
+                warm_status: self.warm_status.clone(),
                 zoom_post: self.zoom.as_ref().map(|post| post.id.0),
                 tag_menu_post: self.tag_menu.post_id().map(|id| id.0),
             },
@@ -451,6 +478,7 @@ impl Bayonet {
         }
         self.remember_hit();
         self.date_range = dates;
+        self.reset_retrieval_horizon();
         // A `strike` is about to replace the tiles, so never blank to a loading
         // card in the meantime: restore a cached hit if we have one, else leave
         // the current tiles up and let the async result swap in. `commit_hit`
@@ -461,10 +489,9 @@ impl Bayonet {
         let _ = self.restore_hit();
         self.save_config();
         if dates.active() {
-            self.warm_state = WarmState::Idle;
             "date range active; upstream warm suspended".clone_into(&mut self.warm_status);
         }
-        self.strike(false, 0);
+        self.strike(!dates.active(), AUTO_WARM_PAGES);
     }
 
     fn install_query_at(&mut self, query: Query, active_group: Vec<usize>) {
@@ -473,6 +500,7 @@ impl Bayonet {
         self.remember_hit();
         self.active_group = query.clamp_group_path(&active_group);
         self.query = query;
+        self.reset_retrieval_horizon();
         // Keep the current tiles up until the async `strike` swaps in the new
         // ones (or restore a cached hit) — no loading-card flash on a re-query;
         // `commit_hit` thwacks by how much actually changed.
@@ -485,10 +513,7 @@ impl Bayonet {
     }
 
     fn remember_hit(&mut self) {
-        self.hit_cache.put(
-            HitKey::new(&self.query, self.sort, self.date_range, self.gallery),
-            self.hit.clone(),
-        );
+        self.hit_cache.put(self.hit_key.clone(), self.hit.clone());
     }
 
     fn restore_hit(&mut self) -> bool {
@@ -499,19 +524,21 @@ impl Bayonet {
         let Some(hit) = self.hit_cache.get(&key) else {
             return false;
         };
-        self.commit_hit(hit);
+        self.retrieval_horizon = self.retrieval_horizon.max(hit.horizon);
+        self.commit_hit(key, hit);
         true
     }
 
     fn install_hit(&mut self, hit: SearchHit) {
+        let key = HitKey::new(&self.query, self.sort, self.date_range, self.gallery);
         if self.tag_menu.is_open() {
-            self.parked_hit = Some(hit);
+            self.parked_hit = Some((key, hit));
             return;
         }
-        self.commit_hit(hit);
+        self.commit_hit(key, hit);
     }
 
-    fn commit_hit(&mut self, hit: SearchHit) {
+    fn commit_hit(&mut self, key: HitKey, hit: SearchHit) {
         // A user filter/sort change thwacks the pool by how much it actually
         // replaced — zero for the appends/tail-trims a date scroll makes, full
         // for a reorder or re-query. Read before `self.hit` is overwritten.
@@ -525,6 +552,7 @@ impl Bayonet {
             self.advance_thumb_epoch();
         }
         self.hit = hit;
+        self.hit_key = key;
         let mut live = self
             .hit
             .posts
@@ -546,9 +574,34 @@ impl Bayonet {
     fn close_tag_menu(&mut self) {
         self.tag_menu = TagMenu::Closed;
         self.tag_menu_rect = None;
-        if let Some(hit) = self.parked_hit.take() {
-            self.commit_hit(hit);
+        if let Some((key, hit)) = self.parked_hit.take() {
+            self.commit_hit(key, hit);
         }
+    }
+
+    fn reset_retrieval_horizon(&mut self) {
+        self.retrieval_horizon = INITIAL_RESULT_HORIZON;
+        self.horizon_pending = false;
+    }
+
+    fn deepen_results(&mut self) {
+        let key = HitKey::new(&self.query, self.sort, self.date_range, self.gallery);
+        if self.horizon_pending
+            || self.tag_menu.is_open()
+            || self.hit_key != key
+            || self.hit.tail != SearchTail::Open
+        {
+            return;
+        }
+        let base = self.retrieval_horizon.max(self.hit.horizon).max(1);
+        let next = base.saturating_mul(RESULT_HORIZON_GROWTH);
+        if next == base {
+            return;
+        }
+        self.retrieval_horizon = next;
+        self.horizon_pending = true;
+        self.status = format!("search extending to {next} indexed matches");
+        self.request_refresh();
     }
 
     fn advance_thumb_epoch(&mut self) {
@@ -709,18 +762,11 @@ impl Bayonet {
 
     fn align_warm(&mut self, query: &Query) {
         let key = WarmKey::new(query, self.sort);
-        if self.warm_key == key {
-            return;
-        }
-        self.warm_key = key;
-        self.warm_next_page = 1;
-        self.warm_stride = AUTO_WARM_PAGES;
-        self.warm_state = WarmState::Idle;
+        self.warm.activate(key);
     }
 
     fn dispatch_warm(&mut self, query: Query, pages: u32) -> Result<()> {
         if self.date_range.active() {
-            self.warm_state = WarmState::Idle;
             "date range active; upstream warm suspended".clone_into(&mut self.warm_status);
             return Ok(());
         }
@@ -728,29 +774,30 @@ impl Bayonet {
         if pages == 0 {
             return Ok(());
         }
-        self.warm_stride = self.warm_stride.max(pages);
-        if self.warm_state != WarmState::Idle {
+        let cursor = self.warm.active_mut();
+        cursor.stride = cursor.stride.max(pages);
+        if cursor.state != WarmState::Idle {
             return Ok(());
         }
-        let first_page = self.warm_next_page;
+        let first_page = cursor.next_page;
         if first_page > DANBOORU_SEARCH_PAGE_LIMIT {
-            self.warm_state = WarmState::Exhausted;
+            cursor.state = WarmState::Exhausted;
             self.warm_status = format!(
                 "query warm hit Danbooru page cap after {} p{}",
-                self.warm_key.label(),
+                self.warm.active_key().label(),
                 DANBOORU_SEARCH_PAGE_LIMIT
             );
             return Ok(());
         }
-        let pages = self
-            .warm_stride
+        let pages = cursor
+            .stride
             .max(1)
             .min(DANBOORU_SEARCH_PAGE_LIMIT - first_page + 1);
-        self.warm_state = WarmState::InFlight;
+        cursor.state = WarmState::InFlight;
         let last_page = first_page.saturating_add(pages.saturating_sub(1));
         self.warm_status = format!(
             "query warm {} p{}..p{}",
-            self.warm_key.label(),
+            self.warm.active_key().label(),
             first_page,
             last_page
         );
@@ -761,7 +808,7 @@ impl Bayonet {
             pages,
         });
         if let Err(err) = send {
-            self.warm_state = WarmState::Idle;
+            self.warm.active_mut().state = WarmState::Idle;
             "query warm fault".clone_into(&mut self.warm_status);
             return Err(err);
         }
@@ -804,18 +851,19 @@ impl Bayonet {
                         query: query_key,
                         sort,
                     };
+                    let active = self.warm.active_key() == &event_key;
+                    let cursor = self.warm.get_mut(event_key.clone());
+                    cursor.state = if exhausted {
+                        WarmState::Exhausted
+                    } else {
+                        WarmState::Idle
+                    };
+                    cursor.next_page = cursor.next_page.max(first_page.saturating_add(pages));
+                    let cursor = *cursor;
                     if self.date_range.active() {
-                        self.warm_state = WarmState::Idle;
                         "date range active; upstream warm suspended"
                             .clone_into(&mut self.warm_status);
-                    } else if self.warm_key == event_key {
-                        self.warm_state = if exhausted {
-                            WarmState::Exhausted
-                        } else {
-                            WarmState::Idle
-                        };
-                        self.warm_next_page =
-                            self.warm_next_page.max(first_page.saturating_add(pages));
+                    } else if active {
                         self.warm_status = if exhausted {
                             let last_page = first_page.saturating_add(pages.saturating_sub(1));
                             format!(
@@ -827,17 +875,35 @@ impl Bayonet {
                             format!(
                                 "query warm +{posts} {}; next p{}",
                                 event_key.label(),
-                                self.warm_next_page
+                                cursor.next_page
                             )
                         };
                     }
                     self.nudge_refresh();
                     self.nudge_stats();
-                    if self.warm_key == event_key && self.warm_state != WarmState::Exhausted {
+                    if active && !self.date_range.active() && cursor.state != WarmState::Exhausted {
                         let query = self.query.clone();
-                        if let Err(err) = self.dispatch_warm(query, self.warm_stride) {
+                        if let Err(err) = self.dispatch_warm(query, cursor.stride) {
                             self.status = format!("{err:#}");
                         }
+                    }
+                    ctx.request_repaint();
+                }
+                Event::WarmFault {
+                    query_key,
+                    sort,
+                    first_page,
+                    fault,
+                } => {
+                    let key = WarmKey {
+                        query: query_key,
+                        sort,
+                    };
+                    self.warm.get_mut(key.clone()).state = WarmState::Idle;
+                    if self.warm.active_key() == &key {
+                        self.warm_status =
+                            format!("query warm fault at {} p{first_page}", key.label());
+                        self.status = fault;
                     }
                     ctx.request_repaint();
                 }
@@ -848,6 +914,13 @@ impl Bayonet {
                     );
                     self.nudge_refresh();
                     self.nudge_stats();
+                    let cursor = self.warm.active();
+                    if cursor.state == WarmState::Idle {
+                        let query = self.query.clone();
+                        if let Err(err) = self.dispatch_warm(query, cursor.stride) {
+                            self.status = format!("{err:#}");
+                        }
+                    }
                     ctx.request_repaint();
                 }
                 Event::KinCrawled {
@@ -1035,6 +1108,15 @@ impl Bayonet {
             self.water.hide_loading();
             self.water.hide_drain();
         }
+        let visible_posts = visible_rows.end.saturating_mul(cols).min(posts.len());
+        let tail_reached =
+            rows > 0 && posts.len().saturating_sub(visible_posts) <= RESULT_TAIL_MARGIN;
+        #[cfg(feature = "devtools")]
+        {
+            self.probe_grid_rows = rows;
+            self.probe_grid_visible_end = visible_rows.end;
+            self.probe_grid_scroll_offset = scroll.state.offset.y;
+        }
         self.prefetch_scroll_thumbs(
             ui.ctx(),
             &posts,
@@ -1049,6 +1131,9 @@ impl Bayonet {
         );
         self.water.heave(ui.ctx(), scroll.state.offset.y);
         self.hit.posts = posts;
+        if tail_reached {
+            self.deepen_results();
+        }
         menu_opened
     }
 
@@ -1394,6 +1479,57 @@ enum WarmState {
     Exhausted,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct WarmCursor {
+    next_page: u32,
+    stride: u32,
+    state: WarmState,
+}
+
+impl Default for WarmCursor {
+    fn default() -> Self {
+        Self {
+            next_page: 1,
+            stride: AUTO_WARM_PAGES,
+            state: WarmState::Idle,
+        }
+    }
+}
+
+struct WarmLedger {
+    active: WarmKey,
+    cursors: HashMap<WarmKey, WarmCursor>,
+}
+
+impl WarmLedger {
+    fn new(active: WarmKey) -> Self {
+        let mut cursors = HashMap::new();
+        let _old = cursors.insert(active.clone(), WarmCursor::default());
+        Self { active, cursors }
+    }
+
+    fn activate(&mut self, key: WarmKey) {
+        self.active = key.clone();
+        let _cursor = self.cursors.entry(key).or_default();
+    }
+
+    fn active_key(&self) -> &WarmKey {
+        &self.active
+    }
+
+    fn active(&self) -> WarmCursor {
+        self.cursors.get(&self.active).copied().unwrap_or_default()
+    }
+
+    fn active_mut(&mut self) -> &mut WarmCursor {
+        self.cursors.entry(self.active.clone()).or_default()
+    }
+
+    fn get_mut(&mut self, key: WarmKey) -> &mut WarmCursor {
+        self.cursors.entry(key).or_default()
+    }
+}
+
 #[derive(Clone, Copy)]
 enum BladeKind {
     Thumb(u8),
@@ -1442,7 +1578,7 @@ struct ThumbKey {
     bucket: u8,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct WarmKey {
     query: String,
     sort: Sort,
@@ -1503,7 +1639,11 @@ impl HitCache {
             return;
         }
         if let Some(slot) = self.slots.iter().position(|(found, _)| found == &key) {
-            let _old = self.slots.remove(slot);
+            let old = self.slots.remove(slot);
+            if old.1.horizon > hit.horizon {
+                self.slots.insert(0, old);
+                return;
+            }
         }
         self.slots.insert(0, (key, hit));
         self.slots.truncate(HIT_CACHE_LIMIT);
@@ -1821,5 +1961,86 @@ mod geometry_tests {
     fn full_viewer_retains_native_size_for_small_images() {
         let native = egui::vec2(90.0, 180.0);
         close(contain_native(native, egui::Vec2::splat(500.0)), native);
+    }
+
+    #[test]
+    fn warm_frontiers_survive_sort_switches() {
+        let score = WarmKey {
+            query: "solo".to_owned(),
+            sort: Sort::Score,
+        };
+        let newest = WarmKey {
+            query: "solo".to_owned(),
+            sort: Sort::Newest,
+        };
+        let mut warm = WarmLedger::new(score.clone());
+        *warm.active_mut() = WarmCursor {
+            next_page: 19,
+            stride: 3,
+            state: WarmState::Idle,
+        };
+        warm.activate(newest);
+        warm.active_mut().next_page = 7;
+        warm.activate(score);
+
+        assert_eq!(warm.active().next_page, 19);
+        assert_eq!(warm.active().stride, 3);
+        warm.activate(WarmKey {
+            query: "other".to_owned(),
+            sort: Sort::Score,
+        });
+        assert_eq!(warm.active().next_page, 1);
+    }
+
+    #[test]
+    fn hit_cache_never_replaces_a_deep_horizon_with_a_shallow_one() {
+        let key = HitKey::new(
+            &Query::parse("solo"),
+            Sort::Score,
+            DateRange::default(),
+            GalleryTopology::Ungrouped,
+        );
+        let mut cache = HitCache::default();
+        cache.put(
+            key.clone(),
+            SearchHit {
+                posts: vec![test_post(720)],
+                horizon: 720,
+                tail: SearchTail::Open,
+                ..SearchHit::default()
+            },
+        );
+        cache.put(
+            key.clone(),
+            SearchHit {
+                posts: vec![test_post(360)],
+                horizon: 360,
+                tail: SearchTail::Open,
+                ..SearchHit::default()
+            },
+        );
+
+        let hit = cache.get(&key).expect("cached hit");
+        assert_eq!(hit.horizon, 720);
+        assert_eq!(hit.posts[0].id, PostId(720));
+    }
+
+    fn test_post(id: u32) -> PostRecord {
+        PostRecord {
+            id: PostId(id),
+            rating: crate::model::Rating::General,
+            score: 0,
+            favs: 0,
+            width: 1,
+            height: 1,
+            created_at: String::new(),
+            tags: Vec::new(),
+            tag_hints: Vec::new(),
+            preview_url: Some("https://example.invalid/image.jpg".to_owned()),
+            thumb_360_url: None,
+            thumb_720_url: None,
+            large_url: None,
+            file_url: None,
+        }
     }
 }

@@ -251,6 +251,7 @@ impl Bayonet {
                 if button.clicked() && self.gallery != topology {
                     self.remember_hit();
                     self.gallery = topology;
+                    self.reset_retrieval_horizon();
                     self.thwack_pending = true;
                     let _restored = self.restore_hit();
                     self.save_config();
@@ -264,12 +265,15 @@ impl Bayonet {
                 let button = chrome::glyph(ui, sort.label(), self.sort == sort);
                 crate::probe_anchor!(ui, format!("sort:{}", sort.label()), button.interact_rect);
                 if button.clicked() && self.sort != sort {
+                    self.remember_hit();
                     self.sort = sort;
+                    self.reset_retrieval_horizon();
+                    self.thwack_pending = true;
+                    let _restored = self.restore_hit();
                     self.save_config();
                     // Keep the current tiles up; the strike reorders them in
                     // place when its result lands (and thwacks by how much the
                     // reorder shifts), rather than blanking first.
-                    self.thwack_pending = true;
                     self.strike(true, AUTO_WARM_PAGES);
                 }
             }

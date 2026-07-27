@@ -69,7 +69,7 @@ impl Bayonet {
             sort: self.sort,
             dates: self.date_range.normalized(),
             topology: self.gallery,
-            limit: RESULT_LIMIT,
+            limit: self.retrieval_horizon,
         });
         match send {
             Ok(()) => {
@@ -112,17 +112,23 @@ impl Bayonet {
     fn install_refresh(&mut self, hit: SearchHit) {
         let posts = hit.posts.len();
         let candidates = hit.candidates;
+        let tail = hit.tail;
+        self.horizon_pending = hit.horizon < self.retrieval_horizon;
         self.hit_cache.put(
             HitKey::new(&self.query, self.sort, self.date_range, self.gallery),
             hit.clone(),
         );
         self.install_hit(hit);
-        self.status = format!(
-            "{} hits from {} candidates; {}",
-            posts,
-            candidates,
-            self.lair.data.display()
-        );
+        self.status = match tail {
+            SearchTail::Open => format!(
+                "{posts} loaded from {candidates} matching posts; scroll for more; {}",
+                self.lair.data.display()
+            ),
+            SearchTail::Exhausted => format!(
+                "{posts} hits from {candidates} matching posts; {}",
+                self.lair.data.display()
+            ),
+        };
     }
 
     pub(super) fn request_stats(&mut self) {
