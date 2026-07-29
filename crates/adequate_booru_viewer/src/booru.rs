@@ -18,6 +18,29 @@ pub fn post_url(id: PostId) -> String {
 
 pub trait Booru {
     fn posts(&self, query: &Query, sort: Sort, page: u32) -> Result<Vec<Harvest>>;
+
+    /// Optional provider capability. A backend without a tag-reference corpus
+    /// returns `None`; callers must not synthesize network affordances for it.
+    fn tag_definitions(&self) -> Option<&dyn TagDefinitionSource> {
+        None
+    }
+}
+
+pub trait TagDefinitionSource {
+    fn tag_definition(&self, tag: &Tag) -> Result<Option<TagDefinition>>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TagDefinition {
+    pub title: String,
+    pub blocks: Vec<DefinitionBlock>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DefinitionBlock {
+    Heading(String),
+    Paragraph(String),
+    Bullet(String),
 }
 
 #[derive(Clone)]
@@ -67,6 +90,25 @@ impl Danbooru {
         self.fetch_kin(&format!("parent:{parent}"), None)
     }
 
+    fn fetch_tag_definition(&self, tag: &Tag) -> Result<Option<TagDefinition>> {
+        let mut response = self
+            .agent
+            .get("https://danbooru.donmai.us/wiki_pages.json")
+            .query("search[title]", tag.as_str())
+            .query("limit", "1")
+            .query("only", "title,body,is_deleted")
+            .call()
+            .with_context(|| format!("GET Danbooru wiki page for {tag}"))?;
+        let pages = response
+            .body_mut()
+            .read_json::<Vec<DanbooruWikiPage>>()
+            .with_context(|| format!("decode Danbooru wiki page for {tag}"))?;
+        Ok(pages
+            .into_iter()
+            .find(|page| !page.is_deleted && page.title.eq_ignore_ascii_case(tag.as_str()))
+            .and_then(TagDefinition::from_danbooru))
+    }
+
     fn fetch_kin(&self, tags: &str, page: Option<String>) -> Result<Vec<Kin>> {
         let mut request = self
             .agent
@@ -109,6 +151,25 @@ impl Booru for Danbooru {
     fn posts(&self, query: &Query, sort: Sort, page: u32) -> Result<Vec<Harvest>> {
         self.fetch(&query.remote_seed(sort), Some(page.to_string()))
     }
+
+    fn tag_definitions(&self) -> Option<&dyn TagDefinitionSource> {
+        Some(self)
+    }
+}
+
+impl TagDefinitionSource for Danbooru {
+    fn tag_definition(&self, tag: &Tag) -> Result<Option<TagDefinition>> {
+        self.fetch_tag_definition(tag)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DanbooruWikiPage {
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    is_deleted: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,6 +235,157 @@ struct DanbooruVariant {
     #[serde(rename = "type")]
     kind: String,
     url: String,
+}
+
+impl TagDefinition {
+    fn from_danbooru(page: DanbooruWikiPage) -> Option<Self> {
+        let blocks = dtext_blocks(&page.body);
+        (!blocks.is_empty()).then_some(Self {
+            title: page.title,
+            blocks,
+        })
+    }
+}
+
+fn dtext_blocks(body: &str) -> Vec<DefinitionBlock> {
+    let mut blocks = Vec::new();
+    let mut paragraph = String::new();
+    let mut omit_section = false;
+    for raw in body.lines() {
+        let line = raw.trim();
+        if let Some(heading) = dtext_heading(line) {
+            flush_paragraph(&mut blocks, &mut paragraph);
+            omit_section = omitted_heading(heading);
+            if !omit_section {
+                blocks.push(DefinitionBlock::Heading(dtext_inline(heading)));
+            }
+            continue;
+        }
+        if omit_section {
+            continue;
+        }
+        if line.is_empty() {
+            flush_paragraph(&mut blocks, &mut paragraph);
+            continue;
+        }
+        if let Some(item) = line.strip_prefix("* ") {
+            flush_paragraph(&mut blocks, &mut paragraph);
+            if !example_reference(item) {
+                let item = dtext_inline(item);
+                if !item.is_empty() {
+                    blocks.push(DefinitionBlock::Bullet(item));
+                }
+            }
+            continue;
+        }
+        if !paragraph.is_empty() {
+            paragraph.push(' ');
+        }
+        paragraph.push_str(line);
+    }
+    flush_paragraph(&mut blocks, &mut paragraph);
+    // A retained heading whose entire body consisted of post examples is just
+    // visual debris. Drop headings with no content before the next heading.
+    let mut useful = vec![true; blocks.len()];
+    for (slot, block) in blocks.iter().enumerate() {
+        if matches!(block, DefinitionBlock::Heading(_))
+            && blocks
+                .get(slot + 1)
+                .is_none_or(|next| matches!(next, DefinitionBlock::Heading(_)))
+        {
+            useful[slot] = false;
+        }
+    }
+    blocks
+        .into_iter()
+        .zip(useful)
+        .filter_map(|(block, keep)| keep.then_some(block))
+        .collect()
+}
+
+fn flush_paragraph(blocks: &mut Vec<DefinitionBlock>, paragraph: &mut String) {
+    if paragraph.is_empty() {
+        return;
+    }
+    let text = dtext_inline(paragraph);
+    if !text.is_empty() && !example_reference(&text) {
+        blocks.push(DefinitionBlock::Paragraph(text));
+    }
+    paragraph.clear();
+}
+
+fn dtext_heading(line: &str) -> Option<&str> {
+    let (marker, heading) = line.split_once(". ")?;
+    let level = marker.strip_prefix('h')?.split('#').next()?;
+    (!level.is_empty() && level.bytes().all(|byte| byte.is_ascii_digit())).then_some(heading)
+}
+
+fn omitted_heading(heading: &str) -> bool {
+    let heading = heading.trim().to_ascii_lowercase();
+    [
+        "example",
+        "examples",
+        "non-example",
+        "non-examples",
+        "related",
+        "related tags",
+        "see also",
+        "external links",
+        "references",
+        "resources",
+    ]
+    .contains(&heading.as_str())
+}
+
+fn example_reference(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with("!post ") || text.starts_with("!asset ")
+}
+
+fn dtext_inline(text: &str) -> String {
+    let mut rendered = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find("[[") {
+        rendered.push_str(&strip_dtext_tags(&rest[..open]));
+        let inner = &rest[open + 2..];
+        let Some(close) = inner.find("]]") else {
+            rendered.push_str(&strip_dtext_tags(&rest[open..]));
+            rest = "";
+            break;
+        };
+        let link = &inner[..close];
+        let (target, label) = link.split_once('|').unwrap_or((link, link));
+        let label = if label.trim().is_empty() {
+            target
+        } else {
+            label
+        };
+        rendered.push_str(&label.replace('_', " "));
+        rest = &inner[close + 2..];
+    }
+    rendered.push_str(&strip_dtext_tags(rest));
+    rendered = rendered
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'");
+    rendered.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn strip_dtext_tags(text: &str) -> String {
+    let mut rendered = String::with_capacity(text.len());
+    let mut markup = None;
+    for ch in text.chars() {
+        match (markup, ch) {
+            (None, '<') => markup = Some('>'),
+            (None, '[') => markup = Some(']'),
+            (Some(end), found) if found == end => markup = None,
+            (None, _) => rendered.push(ch),
+            (Some(_), _) => {}
+        }
+    }
+    rendered
 }
 
 impl TryFrom<DanbooruPost> for Harvest {
@@ -284,5 +496,36 @@ impl From<Option<&DanbooruMediaAsset>> for Variants {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn danbooru_advertises_tag_definitions() {
+        assert!(Danbooru::new().tag_definitions().is_some());
+    }
+
+    #[test]
+    fn dtext_definition_keeps_prose_and_discards_reference_furniture() {
+        let blocks = dtext_blocks(
+            "Hair that is [[blue hair|blue]].\r\n\r\n\
+             h4. Usage\r\n\r\nUse with [[1girl|]].\r\n\r\n\
+             * A descriptive bullet\r\n* !post #123: Example\r\n\r\n\
+             h4. Examples\r\n\r\n* !post #456\r\n\r\n\
+             h4. See also\r\n\r\n* [[aqua hair]]",
+        );
+
+        assert_eq!(
+            blocks,
+            vec![
+                DefinitionBlock::Paragraph("Hair that is blue.".to_owned()),
+                DefinitionBlock::Heading("Usage".to_owned()),
+                DefinitionBlock::Paragraph("Use with 1girl.".to_owned()),
+                DefinitionBlock::Bullet("A descriptive bullet".to_owned()),
+            ]
+        );
     }
 }

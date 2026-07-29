@@ -119,17 +119,18 @@ impl TagHint {
 pub enum Sort {
     Newest,
     Score,
-    Favorites,
+    #[serde(rename = "favorites")]
+    FavCount,
 }
 
 impl Sort {
-    pub const ALL: [Self; 3] = [Self::Newest, Self::Score, Self::Favorites];
+    pub const ALL: [Self; 3] = [Self::Newest, Self::Score, Self::FavCount];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Newest => "newest",
             Self::Score => "score",
-            Self::Favorites => "favorites",
+            Self::FavCount => "fav count",
         }
     }
 
@@ -137,7 +138,7 @@ impl Sort {
         match self {
             Self::Newest => "order:id_desc",
             Self::Score => "order:score",
-            Self::Favorites => "order:favcount",
+            Self::FavCount => "order:favcount",
         }
     }
 }
@@ -425,6 +426,16 @@ impl Default for Query {
             },
         }
     }
+}
+
+/// Which resident post universe a retrieval ranges over. This is orthogonal to
+/// [`Query`]: provider predicates describe membership inside the indexed
+/// universe; user-owned favorites select a different universe outright.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum Corpus {
+    #[default]
+    All,
+    LocalFavorites,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1211,6 +1222,24 @@ mod tests {
             query.atom_polarity(&QueryAtom::Rating(RatingClass::Explicit)),
             Some(TagPolarity::Negative)
         );
+    }
+
+    #[test]
+    fn favorites_is_an_ordinary_provider_tag() -> Result<()> {
+        let remote = Query::parse("favorites");
+        assert_eq!(remote.to_text(), "favorites");
+        assert_eq!(
+            remote.atom_polarity(&QueryAtom::Tag(
+                Tag::forge("favorites").context("valid favorites tag")?
+            )),
+            Some(TagPolarity::Positive)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn query_rejects_the_retired_local_favorites_flag() {
+        assert!(toml::from_str::<Query>("local_favorites_only = false").is_err());
     }
 
     #[test]

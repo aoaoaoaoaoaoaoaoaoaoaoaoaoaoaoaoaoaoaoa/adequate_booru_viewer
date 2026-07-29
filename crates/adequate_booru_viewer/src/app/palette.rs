@@ -14,8 +14,9 @@ impl Bayonet {
         };
         let pos = tag_menu_pos(anchor, ctx.content_rect());
         let query = &self.query;
+        let water = &mut self.water;
         let mut strikes = Vec::new();
-        let mut pulses = Vec::new();
+        let mut hovered_definition = None;
         // Per-post area id: egui remembers area sizes by id and never shrinks
         // them, so a shared id would inherit the widest menu ever shown.
         let area = egui::Area::new(egui::Id::new(("tag-palette", post.id.0)))
@@ -28,18 +29,17 @@ impl Bayonet {
                         ui,
                         groups,
                         query,
+                        water,
                         TAG_MENU_HEIGHT,
                         &mut strikes,
-                        &mut pulses,
+                        None,
+                        &mut hovered_definition,
                     );
                 });
             });
         self.tag_menu_rect = Some(area.response.rect);
         if let Some(cuts) = &mut self.menu_cuts {
             cuts.1 = area.response.rect;
-        }
-        for rect in pulses {
-            self.water.bump(rect);
         }
         for strike in strikes {
             self.apply_tag_strike(strike);
@@ -49,7 +49,11 @@ impl Bayonet {
     pub(super) fn viewer_tag_drawer(&mut self, ui: &mut egui::Ui, post: &PostRecord, height: f32) {
         let groups = self.cached_viewer_groups(post);
         let mut strikes = Vec::new();
-        let mut pulses = Vec::new();
+        let mut hovered_definition = None;
+        let definitions = self
+            .worker
+            .has_tag_definitions()
+            .then_some(&self.tag_definitions);
         let _slot = ui.allocate_ui_with_layout(
             egui::vec2(TAG_MENU_WIDTH, height),
             egui::Layout::top_down(egui::Align::Min),
@@ -61,12 +65,21 @@ impl Bayonet {
                     .inner_margin(egui::Margin::symmetric(7, 6))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
-                        palette_body(ui, &groups, &self.query, height, &mut strikes, &mut pulses);
+                        palette_body(
+                            ui,
+                            &groups,
+                            &self.query,
+                            &mut self.water,
+                            height,
+                            &mut strikes,
+                            definitions,
+                            &mut hovered_definition,
+                        );
                     });
             },
         );
-        for rect in pulses {
-            self.water.bump(rect);
+        if let Some(tag) = hovered_definition {
+            self.request_tag_definition(tag);
         }
         for strike in strikes {
             self.apply_tag_strike(strike);
@@ -93,6 +106,34 @@ impl Bayonet {
                 self.add_atom(QueryAtom::Tag(tag), TagPolarity::Negative);
             }
             TagStrike::Remove(tag) => self.remove_atom(&QueryAtom::Tag(tag)),
+        }
+    }
+
+    fn request_tag_definition(&mut self, tag: Tag) {
+        let should_fetch = match self.tag_definitions.get(&tag) {
+            None => true,
+            Some(TagDefinitionMemo::Fault { born, .. }) => born.elapsed() >= TAG_DEFINITION_RETRY,
+            Some(TagDefinitionMemo::Pending(_) | TagDefinitionMemo::Ready(_)) => false,
+        };
+        if !should_fetch {
+            return;
+        }
+        self.tag_definition_serial = self.tag_definition_serial.saturating_add(1);
+        let serial = self.tag_definition_serial;
+        let _old = self
+            .tag_definitions
+            .insert(tag.clone(), TagDefinitionMemo::Pending(serial));
+        if let Err(err) = self.worker.send(Command::TagDefinition {
+            serial,
+            tag: tag.clone(),
+        }) {
+            let _old = self.tag_definitions.insert(
+                tag,
+                TagDefinitionMemo::Fault {
+                    message: format!("{err:#}"),
+                    born: Instant::now(),
+                },
+            );
         }
     }
 
@@ -132,9 +173,11 @@ fn palette_body(
     ui: &mut egui::Ui,
     groups: &[(TagKind, Vec<Tag>)],
     query: &Query,
+    water: &mut crate::water::Surface,
     max_height: f32,
     strikes: &mut Vec<TagStrike>,
-    pulses: &mut Vec<egui::Rect>,
+    definitions: Option<&HashMap<Tag, TagDefinitionMemo>>,
+    hovered_definition: &mut Option<Tag>,
 ) {
     let _scroll = egui::ScrollArea::vertical()
         .max_height(max_height)
@@ -148,75 +191,153 @@ fn palette_body(
                     let active = query.polarity(tag);
                     let _row = ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
-                        if let Some(remove) =
-                            tag_action(ui, active.is_some().then_some("×"), "remove from query")
-                        {
+                        if let Some(remove) = tag_action(
+                            ui,
+                            water,
+                            active.is_some().then_some('×'),
+                            "remove from query",
+                        ) {
                             crate::probe_anchor!(
                                 ui,
                                 format!("tagrow:{}:remove", tag.as_str()),
                                 remove.interact_rect
                             );
-                            if chrome::hover_started(ui, &remove) {
-                                pulses.push(remove.rect);
-                            }
                             if remove.clicked() {
                                 strikes.push(TagStrike::Remove(tag.clone()));
                             }
                         }
-                        let require = tag_action(ui, Some("+"), "require tag");
+                        let require = tag_action(ui, water, Some('+'), "require tag");
                         if require.as_ref().is_some_and(|response| {
                             crate::probe_anchor!(
                                 ui,
                                 format!("tagrow:{}:require", tag.as_str()),
                                 response.interact_rect
                             );
-                            if chrome::hover_started(ui, response) {
-                                pulses.push(response.rect);
-                            }
                             response.clicked()
                         }) {
                             strikes.push(TagStrike::Require(tag.clone()));
                         }
-                        let exclude = tag_action(ui, Some("-"), "exclude tag");
+                        let exclude = tag_action(ui, water, Some('−'), "exclude tag");
                         if exclude.as_ref().is_some_and(|response| {
                             crate::probe_anchor!(
                                 ui,
                                 format!("tagrow:{}:exclude", tag.as_str()),
                                 response.interact_rect
                             );
-                            if chrome::hover_started(ui, response) {
-                                pulses.push(response.rect);
-                            }
                             response.clicked()
                         }) {
                             strikes.push(TagStrike::Exclude(tag.clone()));
                         }
                         ui.add_space(4.0);
-                        let _tag = ui
-                            .add(egui::Label::new(tag_chroma::text(tag.as_str(), *kind)).truncate())
-                            .on_hover_text(tag.as_str());
+                        let response = ui.add(
+                            egui::Label::new(tag_chroma::text(tag.as_str(), *kind)).truncate(),
+                        );
+                        crate::probe_anchor!(
+                            ui,
+                            format!("tagrow:{}:definition", tag.as_str()),
+                            response.interact_rect
+                        );
+                        let _tag = if let Some(definitions) = definitions {
+                            if response.hovered() {
+                                *hovered_definition = Some(tag.clone());
+                            }
+                            response.on_hover_ui(|ui| {
+                                definition_tooltip(ui, tag, *kind, definitions.get(tag));
+                            })
+                        } else {
+                            response.on_hover_text(tag.as_str())
+                        };
                     });
                 }
             }
         });
 }
 
+fn definition_tooltip(
+    ui: &mut egui::Ui,
+    tag: &Tag,
+    kind: TagKind,
+    memo: Option<&TagDefinitionMemo>,
+) {
+    const WIDTH: f32 = 420.0;
+    const HEIGHT: f32 = 360.0;
+    ui.set_max_width(WIDTH);
+    let title = match memo {
+        Some(TagDefinitionMemo::Ready(Some(definition))) => definition.title.as_str(),
+        _ => tag.as_str(),
+    };
+    let _title = ui.label(tag_chroma::text(title, kind).strong().size(14.0));
+    let _rule = ui.separator();
+    match memo {
+        None | Some(TagDefinitionMemo::Pending(_)) => {
+            let _loading = ui.label(
+                egui::RichText::new("fetching definition…")
+                    .italics()
+                    .color(chrome::MUTED),
+            );
+        }
+        Some(TagDefinitionMemo::Ready(None)) => {
+            let _missing = ui.label(
+                egui::RichText::new("no definition")
+                    .italics()
+                    .color(chrome::MUTED),
+            );
+        }
+        Some(TagDefinitionMemo::Fault { message, .. }) => {
+            let _fault = ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("definition unavailable\n{message}"))
+                        .italics()
+                        .color(chrome::MUTED),
+                )
+                .wrap(),
+            );
+        }
+        Some(TagDefinitionMemo::Ready(Some(definition))) => {
+            let _body = egui::ScrollArea::vertical()
+                .max_height(HEIGHT)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.set_min_width(WIDTH);
+                    for block in &definition.blocks {
+                        match block {
+                            crate::booru::DefinitionBlock::Heading(text) => {
+                                ui.add_space(5.0);
+                                let _heading = ui
+                                    .label(egui::RichText::new(text).strong().color(chrome::TEXT));
+                            }
+                            crate::booru::DefinitionBlock::Paragraph(text) => {
+                                let _paragraph = ui.add(egui::Label::new(text).wrap());
+                                ui.add_space(4.0);
+                            }
+                            crate::booru::DefinitionBlock::Bullet(text) => {
+                                let _bullet = ui.horizontal_top(|ui| {
+                                    let _mark = ui.label("•");
+                                    let _text = ui.add(egui::Label::new(text).wrap());
+                                });
+                            }
+                        }
+                    }
+                });
+        }
+    }
+}
+
 fn tag_action(
     ui: &mut egui::Ui,
-    glyph: Option<&'static str>,
+    water: &mut crate::water::Surface,
+    glyph: Option<char>,
     hover: &'static str,
-) -> Option<egui::Response> {
-    const ACTION: f32 = 22.0;
-    let size = egui::vec2(ACTION, ui.spacing().interact_size.y);
+) -> Option<chrome::MonoglyphResponse> {
+    let size = egui::Vec2::splat(chrome::MechanismSize::Small.side());
     let Some(glyph) = glyph else {
         let _blank = ui.allocate_space(size);
         return None;
     };
-    Some(
-        ui.add_sized(
-            size,
-            egui::Button::new(egui::RichText::new(glyph).monospace()).small(),
-        )
-        .on_hover_text(hover),
-    )
+    let response = chrome::Monoglyph::new(glyph)
+        .size(chrome::MechanismSize::Small)
+        .show(ui)
+        .on_hover_text(hover);
+    water.monoglyph(&response);
+    Some(response)
 }

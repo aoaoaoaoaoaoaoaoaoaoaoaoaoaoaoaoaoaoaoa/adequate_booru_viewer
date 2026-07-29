@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::MirrorPolicy;
 
 impl Bayonet {
     fn autocomplete(&mut self, ui: &mut egui::Ui, focused: bool) -> bool {
@@ -150,9 +151,10 @@ impl Bayonet {
         let mut edit = self.name_edit;
         let actions = saved_filter_ui::active_card(
             ui,
+            &mut self.water,
             &mut self.filter_name_entry,
             &mut edit,
-            self.active_filter.as_ref(),
+            &self.filter_selection,
         );
         self.name_edit = edit;
         self.apply_saved_filter_actions(actions);
@@ -204,15 +206,20 @@ impl Bayonet {
         if query.is_empty() {
             let _empty = ui.label(chrome::muted("neutral query"));
         }
-        render_query_tree(ui, query.root(), &active_group, &mut actions, &mut |atom| {
-            self.atom_kind(atom)
-        });
+        let index = &self.index;
+        let kinds = &mut self.tag_kinds;
+        let status = &mut self.status;
+        render_query_tree(
+            ui,
+            &mut self.water,
+            query.root(),
+            &active_group,
+            &mut actions,
+            &mut |atom| atom_kind(index, kinds, status, atom),
+        );
         ui.add_space(5.0);
         let _active = ui.horizontal_wrapped(|ui| {
-            let add = chrome::icon_still(ui, "✚").on_hover_text("add group");
-            if chrome::hover_started(ui, &add) {
-                actions.push(QueryAction::Pulse(add.rect));
-            }
+            let add = controls::plunger(ui, &mut self.water, '+').on_hover_text("add group");
             if add.clicked() {
                 actions.push(QueryAction::AddGroup { op: BoolOp::And });
             }
@@ -247,7 +254,7 @@ impl Bayonet {
         let _view = ui.horizontal_wrapped(|ui| {
             let _label = ui.label(chrome::eyebrow("VIEW"));
             for topology in GalleryTopology::ALL {
-                let button = chrome::glyph(ui, topology.label(), self.gallery == topology);
+                let button = controls::plate(ui, topology.label(), self.gallery == topology);
                 if button.clicked() && self.gallery != topology {
                     self.remember_hit();
                     self.gallery = topology;
@@ -262,7 +269,7 @@ impl Bayonet {
         let _sort = ui.horizontal_wrapped(|ui| {
             let _label = ui.label(chrome::eyebrow("SORT"));
             for sort in Sort::ALL {
-                let button = chrome::glyph(ui, sort.label(), self.sort == sort);
+                let button = controls::plate(ui, sort.label(), self.sort == sort);
                 crate::probe_anchor!(ui, format!("sort:{}", sort.label()), button.interact_rect);
                 if button.clicked() && self.sort != sort {
                     self.remember_hit();
@@ -283,21 +290,20 @@ impl Bayonet {
             let _label = ui.label(chrome::eyebrow("IMAGES/ROW"));
             let _value = ui.label(chrome::muted(format!("{}", self.images_per_row)));
         });
-        if chrome::rail_u16(
+        let rail = chrome::rail_u16(
             ui,
             &mut self.images_per_row,
             MIN_IMAGES_PER_ROW..=MAX_IMAGES_PER_ROW,
-        )
-        .changed()
-        {
+        );
+        self.water.rail(&rail);
+        if rail.changed() {
             self.advance_thumb_epoch();
             self.save_config();
         }
-        let prefetch = ui
-            .checkbox(&mut self.prefetch_on_hover, "prefetch on hover")
-            .on_hover_text("warm the disk cache with the full image while hovering");
+        let prefetch =
+            chrome::Checkbox::new(&mut self.prefetch_on_hover, "PREFETCH ON HOVER").show(ui);
+        self.water.checkbox(&prefetch);
         if prefetch.changed() {
-            self.water.bump(prefetch.rect);
             self.save_config();
         }
     }
@@ -306,37 +312,60 @@ impl Bayonet {
         ui.add_space(2.0);
         let _title = ui.label(chrome::eyebrow("DATE RANGE"));
         let mut next = self.date_range;
-        let from = date_spool::date_bound(ui, "date-from", "FROM", next.first);
-        if from.changed {
-            next.first = from.value;
-        }
-        for pulse in from.pulse.into_iter().chain(from.couple) {
-            self.date_plunge(pulse);
-        }
-        let to = date_spool::date_bound(ui, "date-to", "UNTIL", next.last);
-        if to.changed {
-            next.last = to.value;
-        }
-        for pulse in to.pulse.into_iter().chain(to.couple) {
-            self.date_plunge(pulse);
-        }
+        next.first = self.date_bound(ui, "date-from", "FROM", next.first);
+        next.last = self.date_bound(ui, "date-to", "UNTIL", next.last);
         if clean_dates(next) != self.date_range {
             self.install_dates(next);
         }
     }
 
-    fn date_plunge(&mut self, pulse: date_spool::DatePulse) {
-        match pulse {
-            date_spool::DatePulse::Tape(rect, dir) => self.water.drag(rect, dir),
-            date_spool::DatePulse::Lever(rect, sign) => self.water.lever(rect, sign),
-        }
+    fn date_bound(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: &'static str,
+        label: &'static str,
+        value: Option<CreatedDay>,
+    ) -> Option<CreatedDay> {
+        let armed = value.is_some();
+        let mut day = value.unwrap_or_else(CreatedDay::today_utc);
+        let mut next = value;
+        let _row = ui.horizontal_top(|ui| {
+            let width = (ui.available_width() - 38.0).max(chrome::DateReels::ALL.minimum_width());
+            let year = CreatedDay::today_utc().ymd().0 + 1;
+            let spool = chrome::DateSpool::new(&mut day, 2005..=year)
+                .label(label)
+                .width(width)
+                .loaded(armed)
+                .show(ui, id);
+            self.water.date_spool(&spool);
+            if spool.changed() {
+                next = Some(day);
+            }
+
+            let (glyph, hint) = if armed {
+                ('×', "clear date bound")
+            } else {
+                ('+', "arm date bound at today")
+            };
+            let lever = controls::plunger(ui, &mut self.water, glyph).on_hover_text(hint);
+            crate::probe_anchor!(
+                ui,
+                format!("date:{}:lever", id.trim_start_matches("date-")),
+                lever.interact_rect
+            );
+            if lever.clicked() {
+                next = (!armed).then_some(day);
+            }
+        });
+        next
     }
 
     fn filter_library_panel(&mut self, ui: &mut egui::Ui) {
         let mut shelf_edit = self.shelf_edit.take();
         let actions = saved_filter_ui::library(
             ui,
-            self.active_filter.as_ref(),
+            &mut self.water,
+            &self.filter_selection,
             &self.filters,
             &mut shelf_edit,
         );
@@ -345,7 +374,38 @@ impl Bayonet {
     }
 
     fn index_status_panel(&mut self, ui: &mut egui::Ui) {
+        let mut active = self.mirror_policy.active();
+        let mirror = chrome::Checkbox::new(&mut active, "BACKGROUND MIRROR").show(ui);
+        self.water.checkbox(&mirror);
+        if mirror.changed() {
+            self.mirror_policy = if active {
+                MirrorPolicy::Active
+            } else {
+                MirrorPolicy::Paused
+            };
+            self.worker.set_mirror_policy(self.mirror_policy);
+            if self.mirror_policy.active() {
+                "crawl waking".clone_into(&mut self.crawl_status);
+                "family index waking".clone_into(&mut self.kin_status);
+            } else {
+                "paused".clone_into(&mut self.crawl_status);
+                "paused".clone_into(&mut self.kin_status);
+            }
+            self.save_config();
+        }
+        let _contract = chrome::note(
+            ui,
+            "persistent full Danbooru mirror · anonymous read-only · stops with abv",
+        );
         for line in [
+            format!(
+                "mirror: {}",
+                if self.mirror_policy.active() {
+                    "active"
+                } else {
+                    "paused"
+                }
+            ),
             format!("status: {}", self.status),
             format!("cache: {}", self.cache_status),
             format!("warm: {}", self.warm_status),
@@ -366,20 +426,20 @@ impl Bayonet {
         let really = self.water_mode == WaterMode::ReallyWet;
         let _wet = ui.horizontal_wrapped(|ui| {
             let dry_btn =
-                chrome::glyph(ui, "DRY", dry).on_hover_text("disable the water shader entirely");
+                controls::plate(ui, "DRY", dry).on_hover_text("disable the water shader entirely");
             crate::probe_anchor!(ui, "water:dry", dry_btn.interact_rect);
             if dry_btn.clicked() && !dry {
                 self.water_mode = WaterMode::Dry;
                 changed = true;
             }
-            let wet_btn = chrome::glyph(ui, "WET", wet)
+            let wet_btn = controls::plate(ui, "WET", wet)
                 .on_hover_text("enable water, refraction, and veil shaders");
             crate::probe_anchor!(ui, "water:wet", wet_btn.interact_rect);
             if wet_btn.clicked() && !wet {
                 self.water_mode = WaterMode::Wet;
                 changed = true;
             }
-            let really_btn = chrome::glyph(ui, "REALLY WET", really)
+            let really_btn = controls::plate(ui, "REALLY WET", really)
                 .on_hover_text("stronger, slower, wetter water");
             crate::probe_anchor!(ui, "water:really", really_btn.interact_rect);
             if really_btn.clicked() && !really {
@@ -432,6 +492,7 @@ impl Bayonet {
                 SavedFilterAction::BeginNameEdit => self.begin_name_edit(),
                 SavedFilterAction::Rename => self.rename_filter(),
                 SavedFilterAction::Load(filter) => self.load_filter(filter),
+                SavedFilterAction::LoadLocalFavorites => self.load_local_favorites(),
                 SavedFilterAction::Clone(name) => self.clone_filter(&name),
                 SavedFilterAction::Delete(name) => self.delete_filter(&name),
                 SavedFilterAction::Moor { name, berth } => {
@@ -546,7 +607,6 @@ impl Bayonet {
                     self.install_query_at(query, path);
                 }
             }
-            QueryAction::Pulse(rect) => self.water.bump(rect),
         }
     }
 }

@@ -1,4 +1,4 @@
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use redb::{
     Database, ReadableDatabase as _, ReadableTable as _, ReadableTableMetadata as _,
     TableDefinition, TableError,
@@ -13,8 +13,8 @@ use std::{
 };
 
 use crate::model::{
-    BoolOp, FamilyTree, GalleryTopology, Harvest, Kin, PostId, PostRecord, Query, QueryAtom,
-    QueryExpr, RatingClass, SearchHit, SearchTail, Sort, Tag, TagKind, decode_record,
+    BoolOp, Corpus, FamilyTree, GalleryTopology, Harvest, Kin, PostId, PostRecord, Query,
+    QueryAtom, QueryExpr, RatingClass, SearchHit, SearchTail, Sort, Tag, TagKind, decode_record,
     encode_record, narrow_post_id, record_day,
 };
 use crate::posting::{self, Batch as FactBatch, Lane as PostingLane};
@@ -208,7 +208,7 @@ impl SortHeadVault {
     fn get(&self, sort: Sort) -> Option<Arc<Vec<u32>>> {
         match sort {
             Sort::Score => self.score.clone(),
-            Sort::Favorites => self.favs.clone(),
+            Sort::FavCount => self.favs.clone(),
             Sort::Newest => None,
         }
     }
@@ -216,7 +216,7 @@ impl SortHeadVault {
     fn put(&mut self, sort: Sort, ids: Arc<Vec<u32>>) {
         match sort {
             Sort::Score => self.score = Some(ids),
-            Sort::Favorites => self.favs = Some(ids),
+            Sort::FavCount => self.favs = Some(ids),
             Sort::Newest => {}
         }
     }
@@ -237,7 +237,7 @@ impl SortKeyVault {
     fn get(&self, sort: Sort) -> Option<Arc<Vec<u64>>> {
         match sort {
             Sort::Score => self.score.clone(),
-            Sort::Favorites => self.favs.clone(),
+            Sort::FavCount => self.favs.clone(),
             Sort::Newest => None,
         }
     }
@@ -245,7 +245,7 @@ impl SortKeyVault {
     fn put(&mut self, sort: Sort, keys: Arc<Vec<u64>>) {
         match sort {
             Sort::Score => self.score = Some(keys),
-            Sort::Favorites => self.favs = Some(keys),
+            Sort::FavCount => self.favs = Some(keys),
             Sort::Newest => {}
         }
     }
@@ -274,6 +274,60 @@ impl SortKeyVault {
     }
 }
 
+/// One dynamic binary rank dimension laid over immutable provider lanes.
+///
+/// For `F` favorites, a new favorite snapshot costs `O(F log_B N + F log F)`
+/// once: `F` keyed post reads and two complete orderings. Warm retrieval scans
+/// only the favorite prefixes surviving the arbitrary query, then resumes the
+/// provider lane for ordinary posts. Space is `O(F)`; no dense `O(N)` rank
+/// projection is created merely because one favorite exists.
+struct FavoriteRanks {
+    source: Arc<RoaringBitmap>,
+    available: Arc<RoaringBitmap>,
+    score: Vec<u32>,
+    fav_count: Vec<u32>,
+}
+
+impl FavoriteRanks {
+    fn ids(&self, sort: Sort) -> &[u32] {
+        match sort {
+            Sort::Score => &self.score,
+            Sort::FavCount => &self.fav_count,
+            Sort::Newest => unreachable!("newest iterates the favorite bitmap"),
+        }
+    }
+}
+
+#[derive(Default)]
+struct FavoriteRankVault {
+    ranks: Option<Arc<FavoriteRanks>>,
+}
+
+impl FavoriteRankVault {
+    fn get(&self, source: &Arc<RoaringBitmap>) -> Option<Arc<FavoriteRanks>> {
+        self.ranks
+            .as_ref()
+            .filter(|ranks| Arc::ptr_eq(&ranks.source, source))
+            .map(Arc::clone)
+    }
+
+    fn put(&mut self, ranks: FavoriteRanks) -> Arc<FavoriteRanks> {
+        let ranks = Arc::new(ranks);
+        self.ranks = Some(Arc::clone(&ranks));
+        ranks
+    }
+
+    fn invalidate(&mut self, posts: &[&PostRecord]) {
+        if self
+            .ranks
+            .as_ref()
+            .is_some_and(|ranks| posts.iter().any(|post| ranks.source.contains(post.id.0)))
+        {
+            self.ranks = None;
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Index {
     db: Arc<Database>,
@@ -283,6 +337,7 @@ pub struct Index {
     records: Arc<Mutex<RecordVault>>,
     sort_heads: Arc<Mutex<SortHeadVault>>,
     sort_keys: Arc<Mutex<SortKeyVault>>,
+    favorite_ranks: Arc<Mutex<FavoriteRankVault>>,
 }
 
 impl Index {
@@ -301,6 +356,7 @@ impl Index {
             records: Arc::new(Mutex::new(RecordVault::new())),
             sort_heads: Arc::new(Mutex::new(SortHeadVault::default())),
             sort_keys: Arc::new(Mutex::new(SortKeyVault::default())),
+            favorite_ranks: Arc::new(Mutex::new(FavoriteRankVault::default())),
         };
         startup("index.prime.done");
         Ok(index)
@@ -318,6 +374,7 @@ impl Index {
         self.evict_records(&posts);
         self.clear_sort_heads();
         self.refresh_sort_keys(&posts);
+        self.invalidate_favorite_ranks(&posts);
         Ok(())
     }
 
@@ -414,6 +471,7 @@ impl Index {
         self.evict_records(&posts);
         self.clear_sort_heads();
         self.refresh_sort_keys(&posts);
+        self.invalidate_favorite_ranks(&posts);
         Ok(())
     }
 
@@ -430,6 +488,10 @@ impl Index {
 
     fn refresh_sort_keys(&self, posts: &[&PostRecord]) {
         lock(&self.sort_keys).refresh(posts);
+    }
+
+    fn invalidate_favorite_ranks(&self, posts: &[&PostRecord]) {
+        lock(&self.favorite_ranks).invalidate(posts);
     }
 
     fn absorb_into(tx: &redb::WriteTransaction, posts: &[&PostRecord]) -> Result<()> {
@@ -649,12 +711,42 @@ impl Index {
         dates: DateRange,
         limit: usize,
     ) -> Result<SearchHit> {
-        self.search_topology(query, sort, dates, GalleryTopology::Ungrouped, limit)
+        let local_favorites = Arc::new(RoaringBitmap::new());
+        self.search_topology(
+            query,
+            &local_favorites,
+            sort,
+            dates,
+            GalleryTopology::Ungrouped,
+            limit,
+        )
     }
 
     pub fn search_topology(
         &self,
         query: &Query,
+        local_favorites: &Arc<RoaringBitmap>,
+        sort: Sort,
+        dates: DateRange,
+        topology: GalleryTopology,
+        limit: usize,
+    ) -> Result<SearchHit> {
+        self.search_corpus(
+            query,
+            local_favorites,
+            Corpus::All,
+            sort,
+            dates,
+            topology,
+            limit,
+        )
+    }
+
+    pub fn search_corpus(
+        &self,
+        query: &Query,
+        local_favorites: &Arc<RoaringBitmap>,
+        corpus: Corpus,
         sort: Sort,
         dates: DateRange,
         topology: GalleryTopology,
@@ -673,7 +765,16 @@ impl Index {
             });
         }
 
-        let candidate = self.candidate_set(&tx, query, &posts)?;
+        let favorite_ranks = if local_favorites.is_empty() {
+            None
+        } else {
+            Some(self.favorite_ranks(&posts, local_favorites)?)
+        };
+        let available_favorites = favorite_ranks.as_ref().map_or_else(
+            || Arc::clone(local_favorites),
+            |ranks| Arc::clone(&ranks.available),
+        );
+        let candidate = self.candidate_set(&tx, query, &posts, &available_favorites, corpus)?;
         startup("index.search.candidate");
         let candidates = match &candidate {
             None => window.map_or_else(
@@ -698,37 +799,27 @@ impl Index {
         startup("index.search.candidates.len");
 
         let ids = match topology {
-            GalleryTopology::Ungrouped => match (&candidate, sort) {
-                (None, Sort::Newest) => newest_ids(&posts, window, limit)?,
-                (Some(Candidate::Finite(bitmap)), Sort::Newest) => {
-                    newest_bitmap_ids(bitmap.as_ref(), window, limit)
-                }
-                (Some(candidate @ Candidate::Cofinite(_)), Sort::Newest) => {
-                    newest_ids_filtered(&posts, candidate, window, limit)?
-                }
-                (None, Sort::Score | Sort::Favorites) => {
-                    self.ranked_ids(&tx, sort, None, window, limit)?
-                }
-                (Some(candidate @ Candidate::Finite(bitmap)), Sort::Score)
-                    if bitmap.len() > SMALL_SORT =>
-                {
-                    self.ranked_ids(&tx, sort, Some(candidate), window, limit)?
-                }
-                (Some(candidate @ Candidate::Finite(bitmap)), Sort::Favorites)
-                    if bitmap.len() > SMALL_SORT =>
-                {
-                    self.ranked_ids(&tx, sort, Some(candidate), window, limit)?
-                }
-                (Some(candidate @ Candidate::Cofinite(_)), Sort::Score | Sort::Favorites) => {
-                    self.ranked_ids(&tx, sort, Some(candidate), window, limit)?
-                }
-                (Some(Candidate::Finite(bitmap)), Sort::Score | Sort::Favorites) => {
-                    self.local_sorted_ids(&tx, bitmap.as_ref(), sort, window, limit)?
-                }
-            },
+            GalleryTopology::Ungrouped => self.favorite_ordered_ids(
+                &tx,
+                &posts,
+                &candidate,
+                favorite_ranks.as_deref(),
+                sort,
+                window,
+                limit,
+            )?,
             GalleryTopology::Grouped => {
                 let atlas = read(&self.kin);
-                self.family_ids(&tx, &posts, &atlas, &candidate, sort, window, limit)?
+                self.favorite_ordered_family_ids(
+                    &tx,
+                    &posts,
+                    &atlas,
+                    &candidate,
+                    favorite_ranks.as_deref(),
+                    sort,
+                    window,
+                    limit,
+                )?
             }
         };
         startup("index.search.ids");
@@ -797,6 +888,114 @@ impl Index {
         })
     }
 
+    fn favorite_ranks(
+        &self,
+        posts: &impl redb::ReadableTable<u64, &'static [u8]>,
+        source: &Arc<RoaringBitmap>,
+    ) -> Result<Arc<FavoriteRanks>> {
+        if let Some(ranks) = lock(&self.favorite_ranks).get(source) {
+            return Ok(ranks);
+        }
+        let mut available = RoaringBitmap::new();
+        let mut score = Vec::with_capacity(source.len() as usize);
+        let mut fav_count = Vec::with_capacity(source.len() as usize);
+        for id in source.iter() {
+            let Some(post) = posts
+                .get(u64::from(id))
+                .context("read local favorite post")?
+                .map(|guard| decode_record(guard.value()))
+                .transpose()?
+                .filter(PostRecord::indexable)
+            else {
+                continue;
+            };
+            let _inserted = available.insert(id);
+            score.push((sort_key_i32(post.score, post.id), id));
+            fav_count.push((sort_key_u32(post.favs, post.id), id));
+        }
+        score.sort_unstable_by(|left, right| right.cmp(left));
+        fav_count.sort_unstable_by(|left, right| right.cmp(left));
+        let ranks = FavoriteRanks {
+            source: Arc::clone(source),
+            available: Arc::new(available),
+            score: score.into_iter().map(|(_, id)| id).collect(),
+            fav_count: fav_count.into_iter().map(|(_, id)| id).collect(),
+        };
+        let mut vault = lock(&self.favorite_ranks);
+        if let Some(raced) = vault.get(source) {
+            return Ok(raced);
+        }
+        Ok(vault.put(ranks))
+    }
+
+    fn favorite_ordered_ids(
+        &self,
+        tx: &redb::ReadTransaction,
+        posts: &impl redb::ReadableTable<u64, &'static [u8]>,
+        candidate: &Option<Candidate>,
+        favorite_ranks: Option<&FavoriteRanks>,
+        sort: Sort,
+        window: Option<DateWindow>,
+        limit: usize,
+    ) -> Result<Vec<u32>> {
+        let Some(favorite_ranks) = favorite_ranks else {
+            return self.post_ids(tx, posts, candidate, sort, window, limit);
+        };
+        let (favored, ordinary) = favorite_partition(candidate, &favorite_ranks.available);
+        let mut ids = favorite_ids(favorite_ranks, &favored, sort, window, limit);
+        if ids.len() < limit {
+            ids.extend(self.post_ids(
+                tx,
+                posts,
+                &Some(ordinary),
+                sort,
+                window,
+                limit - ids.len(),
+            )?);
+        }
+        Ok(ids)
+    }
+
+    fn post_ids(
+        &self,
+        tx: &redb::ReadTransaction,
+        posts: &impl redb::ReadableTable<u64, &'static [u8]>,
+        candidate: &Option<Candidate>,
+        sort: Sort,
+        window: Option<DateWindow>,
+        limit: usize,
+    ) -> Result<Vec<u32>> {
+        let ids = match (candidate, sort) {
+            (None, Sort::Newest) => newest_ids(posts, window, limit)?,
+            (Some(Candidate::Finite(bitmap)), Sort::Newest) => {
+                newest_bitmap_ids(bitmap.as_ref(), window, limit)
+            }
+            (Some(candidate @ Candidate::Cofinite(_)), Sort::Newest) => {
+                newest_ids_filtered(posts, candidate, window, limit)?
+            }
+            (None, Sort::Score | Sort::FavCount) => {
+                self.ranked_ids(tx, sort, None, window, limit)?
+            }
+            (Some(candidate @ Candidate::Finite(bitmap)), Sort::Score)
+                if bitmap.len() > SMALL_SORT =>
+            {
+                self.ranked_ids(tx, sort, Some(candidate), window, limit)?
+            }
+            (Some(candidate @ Candidate::Finite(bitmap)), Sort::FavCount)
+                if bitmap.len() > SMALL_SORT =>
+            {
+                self.ranked_ids(tx, sort, Some(candidate), window, limit)?
+            }
+            (Some(candidate @ Candidate::Cofinite(_)), Sort::Score | Sort::FavCount) => {
+                self.ranked_ids(tx, sort, Some(candidate), window, limit)?
+            }
+            (Some(Candidate::Finite(bitmap)), Sort::Score | Sort::FavCount) => {
+                self.local_sorted_ids(tx, bitmap.as_ref(), sort, window, limit)?
+            }
+        };
+        Ok(ids)
+    }
+
     fn ranked_ids(
         &self,
         tx: &redb::ReadTransaction,
@@ -816,7 +1015,7 @@ impl Index {
                 window,
                 limit,
             ),
-            Sort::Favorites => lane_ids(
+            Sort::FavCount => lane_ids(
                 &tx.open_table(FAV_POSTS).context("open fav_posts")?,
                 candidate,
                 window,
@@ -835,7 +1034,7 @@ impl Index {
                 &tx.open_table(SCORE_POSTS).context("open score_posts")?,
                 SORT_HEAD_CAP,
             )?,
-            Sort::Favorites => lane_head(
+            Sort::FavCount => lane_head(
                 &tx.open_table(FAV_POSTS).context("open fav_posts")?,
                 SORT_HEAD_CAP,
             )?,
@@ -858,7 +1057,7 @@ impl Index {
         limit: usize,
     ) -> Result<Vec<u32>> {
         match sort {
-            Sort::Score | Sort::Favorites => {
+            Sort::Score | Sort::FavCount => {
                 let keys = self.sort_keys(tx, sort)?;
                 Ok(local_sorted_ids_from_keys(bitmap, &keys, window, limit))
             }
@@ -866,66 +1065,109 @@ impl Index {
         }
     }
 
-    fn family_ids(
+    fn favorite_ordered_family_ids(
         &self,
         tx: &redb::ReadTransaction,
         posts: &impl redb::ReadableTable<u64, &'static [u8]>,
         atlas: &kin::Atlas,
         candidate: &Option<Candidate>,
+        favorite_ranks: Option<&FavoriteRanks>,
         sort: Sort,
         window: Option<DateWindow>,
         limit: usize,
     ) -> Result<Vec<u32>> {
-        match (candidate, sort) {
-            (None, Sort::Newest) => newest_family_ids(posts, atlas, None, window, limit),
-            (Some(Candidate::Finite(bitmap)), Sort::Newest) => Ok(newest_bitmap_family_ids(
-                bitmap.as_ref(),
-                atlas,
+        let mut page = FamilyPage::new(atlas, limit);
+        let Some(favorite_ranks) = favorite_ranks else {
+            self.extend_family_page(tx, posts, candidate, sort, window, &mut page)?;
+            return Ok(page.ids);
+        };
+        let (favored, ordinary) = favorite_partition(candidate, &favorite_ranks.available);
+        match sort {
+            Sort::Newest => offer_family_stream(
+                favorite_ranks.available.iter().rev(),
+                Some(&favored),
                 window,
-                limit,
-            )),
-            (Some(candidate @ Candidate::Cofinite(_)), Sort::Newest) => {
-                newest_family_ids(posts, atlas, Some(candidate), window, limit)
+                &mut page,
+            ),
+            Sort::Score | Sort::FavCount => offer_family_stream(
+                favorite_ranks.ids(sort).iter().copied(),
+                Some(&favored),
+                window,
+                &mut page,
+            ),
+        }
+        if !page.full() {
+            self.extend_family_page(tx, posts, &Some(ordinary), sort, window, &mut page)?;
+        }
+        Ok(page.ids)
+    }
+
+    fn extend_family_page(
+        &self,
+        tx: &redb::ReadTransaction,
+        posts: &impl redb::ReadableTable<u64, &'static [u8]>,
+        candidate: &Option<Candidate>,
+        sort: Sort,
+        window: Option<DateWindow>,
+        page: &mut FamilyPage<'_>,
+    ) -> Result<()> {
+        match (candidate, sort) {
+            (None, Sort::Newest) => newest_family_ids(posts, None, window, page),
+            (Some(Candidate::Finite(bitmap)), Sort::Newest) => {
+                newest_bitmap_family_ids(bitmap.as_ref(), window, page);
+                Ok(())
             }
-            (Some(Candidate::Finite(bitmap)), Sort::Score | Sort::Favorites)
+            (Some(candidate @ Candidate::Cofinite(_)), Sort::Newest) => {
+                newest_family_ids(posts, Some(candidate), window, page)
+            }
+            (Some(Candidate::Finite(bitmap)), Sort::Score | Sort::FavCount)
                 if bitmap.len() <= SMALL_SORT =>
             {
-                self.local_sorted_family_ids(tx, bitmap.as_ref(), atlas, sort, window, limit)
+                for id in self.local_sorted_family_ids(
+                    tx,
+                    bitmap.as_ref(),
+                    page.atlas,
+                    sort,
+                    window,
+                    page.remaining(),
+                )? {
+                    if page.offer(id) {
+                        break;
+                    }
+                }
+                Ok(())
             }
-            (candidate, Sort::Score | Sort::Favorites) => {
-                self.ranked_family_ids(tx, sort, candidate.as_ref(), atlas, window, limit)
+            (candidate, Sort::Score | Sort::FavCount) => {
+                self.extend_ranked_family_page(tx, sort, candidate.as_ref(), window, page)
             }
         }
     }
 
-    fn ranked_family_ids(
+    fn extend_ranked_family_page(
         &self,
         tx: &redb::ReadTransaction,
         sort: Sort,
         candidate: Option<&Candidate>,
-        atlas: &kin::Atlas,
         window: Option<DateWindow>,
-        limit: usize,
-    ) -> Result<Vec<u32>> {
+        page: &mut FamilyPage<'_>,
+    ) -> Result<()> {
         let head = self.sort_head(tx, sort)?;
-        let ids = family_stream(head.iter().copied(), atlas, candidate, window, limit);
-        if ids.len() == limit {
-            return Ok(ids);
+        offer_family_stream(head.iter().copied(), candidate, window, page);
+        if page.full() {
+            return Ok(());
         }
         match sort {
             Sort::Score => lane_family_ids(
                 &tx.open_table(SCORE_POSTS).context("open score_posts")?,
-                atlas,
                 candidate,
                 window,
-                limit,
+                page,
             ),
-            Sort::Favorites => lane_family_ids(
+            Sort::FavCount => lane_family_ids(
                 &tx.open_table(FAV_POSTS).context("open fav_posts")?,
-                atlas,
                 candidate,
                 window,
-                limit,
+                page,
             ),
             Sort::Newest => unreachable!("newest is not a ranked family lane"),
         }
@@ -981,9 +1223,7 @@ impl Index {
             Sort::Score => {
                 lane_sort_keys(&tx.open_table(SCORE_POSTS).context("open score_posts")?)?
             }
-            Sort::Favorites => {
-                lane_sort_keys(&tx.open_table(FAV_POSTS).context("open fav_posts")?)?
-            }
+            Sort::FavCount => lane_sort_keys(&tx.open_table(FAV_POSTS).context("open fav_posts")?)?,
             Sort::Newest => unreachable!("newest has no dense sort-key cache"),
         });
         let mut vault = lock(&self.sort_keys);
@@ -1059,25 +1299,37 @@ impl Index {
         tx: &redb::ReadTransaction,
         query: &Query,
         posts: &impl redb::ReadableTable<u64, &'static [u8]>,
+        local_favorites: &Arc<RoaringBitmap>,
+        corpus: Corpus,
     ) -> Result<Option<Candidate>> {
-        if query.is_empty() {
-            return Ok(None);
+        if corpus == Corpus::LocalFavorites {
+            if !query.is_empty() {
+                bail!("local-favorites corpus cannot carry provider predicates");
+            }
+            return Ok(Some(Candidate::Finite(BitmapCow::Shared(Arc::clone(
+                local_favorites,
+            )))));
         }
-
-        let tag_chunks = tx.open_table(TAG_CHUNKS).context("open tag chunks")?;
-        let rating_chunks = tx.open_table(RATING_CHUNKS).context("open rating chunks")?;
-        let facts = tx.open_table(POSTING_FACTS).context("open posting facts")?;
-        let pending = pending_facts(&facts)?;
-        BitmapEval {
-            posts,
-            tags: &tag_chunks,
-            ratings: &rating_chunks,
-            pending: &pending,
-            vault: &self.vault,
-            universe: None,
-        }
-        .eval(query.root())
-        .map(Some)
+        let remote = if query.is_empty() {
+            None
+        } else {
+            let tag_chunks = tx.open_table(TAG_CHUNKS).context("open tag chunks")?;
+            let rating_chunks = tx.open_table(RATING_CHUNKS).context("open rating chunks")?;
+            let facts = tx.open_table(POSTING_FACTS).context("open posting facts")?;
+            let pending = pending_facts(&facts)?;
+            Some(
+                BitmapEval {
+                    posts,
+                    tags: &tag_chunks,
+                    ratings: &rating_chunks,
+                    pending: &pending,
+                    vault: &self.vault,
+                    universe: None,
+                }
+                .eval(query.root())?,
+            )
+        };
+        Ok(remote)
     }
 
     /// Write transactions default to non-durable commits — the index is a
@@ -1163,6 +1415,21 @@ impl Candidate {
                 bitmap
             }
         }
+    }
+}
+
+fn favorite_partition(
+    candidate: &Option<Candidate>,
+    local_favorites: &Arc<RoaringBitmap>,
+) -> (Candidate, Candidate) {
+    let favored = Candidate::Finite(BitmapCow::Shared(Arc::clone(local_favorites)));
+    let ordinary = Candidate::Cofinite(BitmapCow::Shared(Arc::clone(local_favorites)));
+    match candidate {
+        Some(candidate) => (
+            conjunction(vec![candidate.clone(), favored]),
+            conjunction(vec![candidate.clone(), ordinary]),
+        ),
+        None => (favored, ordinary),
     }
 }
 
@@ -1792,6 +2059,33 @@ fn newest_bitmap_ids(bitmap: &RoaringBitmap, window: Option<DateWindow>, limit: 
     }
 }
 
+fn favorite_ids(
+    ranks: &FavoriteRanks,
+    candidate: &Candidate,
+    sort: Sort,
+    window: Option<DateWindow>,
+    limit: usize,
+) -> Vec<u32> {
+    let accept =
+        |id: &u32| window.is_none_or(|window| window.contains(*id)) && candidate.contains(*id);
+    match sort {
+        Sort::Newest => ranks
+            .available
+            .iter()
+            .rev()
+            .filter(accept)
+            .take(limit)
+            .collect(),
+        Sort::Score | Sort::FavCount => ranks
+            .ids(sort)
+            .iter()
+            .copied()
+            .filter(accept)
+            .take(limit)
+            .collect(),
+    }
+}
+
 fn newest_ids_filtered(
     table: &impl redb::ReadableTable<u64, &'static [u8]>,
     candidate: &Candidate,
@@ -1844,20 +2138,26 @@ impl<'a> FamilyPage<'a> {
         if self.seen.insert(root) {
             self.ids.push(id);
         }
-        self.ids.len() == self.limit
+        self.full()
+    }
+
+    fn full(&self) -> bool {
+        self.ids.len() >= self.limit
+    }
+
+    fn remaining(&self) -> usize {
+        self.limit - self.ids.len()
     }
 }
 
-fn family_stream(
+fn offer_family_stream(
     ids: impl IntoIterator<Item = u32>,
-    atlas: &kin::Atlas,
     candidate: Option<&Candidate>,
     window: Option<DateWindow>,
-    limit: usize,
-) -> Vec<u32> {
-    let mut page = FamilyPage::new(atlas, limit);
-    if limit == 0 {
-        return page.ids;
+    page: &mut FamilyPage<'_>,
+) {
+    if page.full() {
+        return;
     }
     for id in ids {
         if window.is_none_or(|window| window.contains(id))
@@ -1867,23 +2167,20 @@ fn family_stream(
             break;
         }
     }
-    page.ids
 }
 
 fn newest_family_ids(
     table: &impl redb::ReadableTable<u64, &'static [u8]>,
-    atlas: &kin::Atlas,
     candidate: Option<&Candidate>,
     window: Option<DateWindow>,
-    limit: usize,
-) -> Result<Vec<u32>> {
-    if limit == 0 {
-        return Ok(Vec::new());
+    page: &mut FamilyPage<'_>,
+) -> Result<()> {
+    if page.full() {
+        return Ok(());
     }
     let range = window.map_or(0_u64..=u64::MAX, |window| {
         u64::from(window.lo)..=u64::from(window.hi)
     });
-    let mut page = FamilyPage::new(atlas, limit);
     for row in table
         .range(range)
         .context("range family newest posts")?
@@ -1895,18 +2192,16 @@ fn newest_family_ids(
             break;
         }
     }
-    Ok(page.ids)
+    Ok(())
 }
 
 fn newest_bitmap_family_ids(
     bitmap: &RoaringBitmap,
-    atlas: &kin::Atlas,
     window: Option<DateWindow>,
-    limit: usize,
-) -> Vec<u32> {
-    let mut page = FamilyPage::new(atlas, limit);
-    if limit == 0 {
-        return page.ids;
+    page: &mut FamilyPage<'_>,
+) {
+    if page.full() {
+        return;
     }
     match window {
         Some(window) => {
@@ -1924,7 +2219,6 @@ fn newest_bitmap_family_ids(
             }
         }
     }
-    page.ids
 }
 
 fn all_post_ids(table: &impl redb::ReadableTable<u64, &'static [u8]>) -> Result<RoaringBitmap> {
@@ -1968,15 +2262,13 @@ fn lane_ids(
 
 fn lane_family_ids(
     table: &impl redb::ReadableTable<u64, u32>,
-    atlas: &kin::Atlas,
     candidate: Option<&Candidate>,
     window: Option<DateWindow>,
-    limit: usize,
-) -> Result<Vec<u32>> {
-    if limit == 0 {
-        return Ok(Vec::new());
+    page: &mut FamilyPage<'_>,
+) -> Result<()> {
+    if page.full() {
+        return Ok(());
     }
-    let mut page = FamilyPage::new(atlas, limit);
     for row in table
         .range(0_u64..=u64::MAX)
         .context("range family sort lane")?
@@ -1991,7 +2283,7 @@ fn lane_family_ids(
             break;
         }
     }
-    Ok(page.ids)
+    Ok(())
 }
 
 fn lane_head(table: &impl redb::ReadableTable<u64, u32>, cap: usize) -> Result<Vec<u32>> {

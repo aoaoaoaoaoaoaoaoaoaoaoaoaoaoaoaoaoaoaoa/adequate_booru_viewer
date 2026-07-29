@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     date::DateRange,
-    model::{GalleryTopology, Query, QueryAtom, RatingClass, Sort, TagPolarity},
+    model::{Corpus, GalleryTopology, Query, QueryAtom, RatingClass, Sort, TagPolarity},
 };
 
 /// User-authored intent only: everything here is something a person could
@@ -17,6 +17,7 @@ use crate::{
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub prefetch_on_hover: bool,
+    pub mirror: MirrorConfig,
     pub filters: FilterConfig,
 }
 
@@ -24,6 +25,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             prefetch_on_hover: true,
+            mirror: MirrorConfig::default(),
             filters: FilterConfig::default(),
         }
     }
@@ -46,9 +48,8 @@ impl Config {
         }
     }
 
-    /// The shipped first-launch library: one deletable `helpful and harmless`
-    /// filter (rating:general), so a new user is not dropped straight into the
-    /// full firehose. See [`Self::load`].
+    /// The shipped first-launch library: one deletable `general rating` filter,
+    /// so a new user is not dropped straight into the full firehose.
     fn first_run() -> Self {
         let mut config = Self::default();
         if let Some(filter) = safe_default_filter() {
@@ -64,7 +65,7 @@ impl Config {
 
 /// The canonical name of the seeded first-run filter; the app activates it on a
 /// first launch (see `Bayonet::open`).
-pub const SAFE_DEFAULT_FILTER: &str = "helpful and harmless";
+pub const SAFE_DEFAULT_FILTER: &str = "general rating";
 
 fn safe_default_filter() -> Option<SavedFilter> {
     let name = FilterName::forge(SAFE_DEFAULT_FILTER)?;
@@ -98,11 +99,62 @@ fn save_toml(value: &impl Serialize, path: &Path, what: &'static str) -> Result<
         .with_context(|| format!("replace {} with {}", path.display(), tmp.display()))
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MirrorConfig {
+    pub policy: MirrorPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MirrorPolicy {
+    #[default]
+    Active,
+    Paused,
+}
+
+impl MirrorPolicy {
+    pub fn active(self) -> bool {
+        self == Self::Active
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QueryConfig {
     pub tree: Query,
     pub active_group: Vec<usize>,
+}
+
+/// The selected filter-library object. Saved filters name user-authored query
+/// trees; local favorites names a built-in corpus and therefore cannot be
+/// represented by a query flag or collide with a saved filter named
+/// `favorites`.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FilterSelection {
+    #[default]
+    Scratch,
+    Saved {
+        name: FilterName,
+    },
+    LocalFavorites,
+}
+
+impl FilterSelection {
+    pub fn saved(&self) -> Option<&FilterName> {
+        match self {
+            Self::Saved { name } => Some(name),
+            Self::Scratch | Self::LocalFavorites => None,
+        }
+    }
+
+    pub fn corpus(&self) -> Corpus {
+        match self {
+            Self::Scratch | Self::Saved { .. } => Corpus::All,
+            Self::LocalFavorites => Corpus::LocalFavorites,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -151,7 +203,7 @@ pub struct Slate {
     /// `closed_folders` but for the left-rail recesses, which carry mixed
     /// defaults so a bare set cannot say which way a section was thrown.
     pub shutters: std::collections::BTreeMap<String, bool>,
-    pub active_filter: Option<FilterName>,
+    pub filter: FilterSelection,
     pub query: QueryConfig,
     pub sort: Sort,
     pub gallery: GalleryTopology,
@@ -166,7 +218,7 @@ impl Default for Slate {
         Self {
             closed_folders: std::collections::BTreeSet::new(),
             shutters: std::collections::BTreeMap::new(),
-            active_filter: None,
+            filter: FilterSelection::Scratch,
             query: QueryConfig::default(),
             sort: Sort::Score,
             gallery: GalleryTopology::Ungrouped,
@@ -280,6 +332,9 @@ mod tests {
 
         let config = Config {
             prefetch_on_hover: false,
+            mirror: MirrorConfig {
+                policy: MirrorPolicy::Paused,
+            },
             filters: FilterConfig {
                 saved: vec![SavedFilter::new(
                     FilterName::forge("beach").context("filter name")?,
@@ -296,6 +351,7 @@ mod tests {
         let text = toml::to_string_pretty(&config)?;
         let roundtrip = toml::from_str::<Config>(&text)?;
         assert!(!roundtrip.prefetch_on_hover);
+        assert_eq!(roundtrip.mirror.policy, MirrorPolicy::Paused);
         assert_eq!(roundtrip.filters.saved[0].name.as_str(), "beach");
         assert_eq!(roundtrip.filters.saved[0].tree, query);
         assert_eq!(roundtrip.filters.saved[0].active_group, choice);
@@ -325,7 +381,7 @@ mod tests {
         // Slate decays to defaults on error, which would mask a typo; parse strict.
         let slate: Slate = toml::from_str(&std::fs::read_to_string(demo.join("slate.toml"))?)?;
         assert_eq!(
-            slate.active_filter.as_ref().map(FilterName::as_str),
+            slate.filter.saved().map(FilterName::as_str),
             Some("harmless screenshot")
         );
         assert_eq!(slate.water, WaterMode::Dry);
@@ -356,7 +412,9 @@ mod tests {
         let slate = Slate {
             closed_folders: std::collections::BTreeSet::from(["trips".to_owned()]),
             shutters: std::collections::BTreeMap::from([("gallery-controls".to_owned(), true)]),
-            active_filter: FilterName::forge("beach"),
+            filter: FilterSelection::Saved {
+                name: FilterName::forge("beach").context("filter name")?,
+            },
             query: QueryConfig {
                 tree: query.clone(),
                 active_group: Vec::new(),
@@ -380,6 +438,45 @@ mod tests {
         assert_eq!(roundtrip.dates, slate.dates);
         assert_eq!(roundtrip.water, WaterMode::ReallyWet);
         assert!(roundtrip.viewer_tags_open);
+        Ok(())
+    }
+
+    #[test]
+    fn slate_roundtrips_the_builtin_favorites_corpus_without_a_saved_name() -> Result<()> {
+        let slate = Slate {
+            filter: FilterSelection::LocalFavorites,
+            ..Slate::default()
+        };
+        let text = toml::to_string_pretty(&slate)?;
+        let roundtrip = toml::from_str::<Slate>(&text)?;
+        assert_eq!(roundtrip.filter, FilterSelection::LocalFavorites);
+        assert!(roundtrip.query.tree.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn builtin_favorites_cannot_collide_with_a_saved_filter_name() -> Result<()> {
+        let named = FilterSelection::Saved {
+            name: FilterName::forge("favorites").context("filter name")?,
+        };
+        assert_ne!(named, FilterSelection::LocalFavorites);
+        assert_eq!(named.saved().map(FilterName::as_str), Some("favorites"));
+        assert_eq!(named.corpus(), Corpus::All);
+        assert_eq!(
+            FilterSelection::LocalFavorites.corpus(),
+            Corpus::LocalFavorites
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn slate_rejects_the_retired_active_filter_schema() -> Result<()> {
+        let text = toml::to_string_pretty(&Slate::default())?.replacen(
+            "[filter]\nkind = \"scratch\"",
+            "active_filter = \"beach\"",
+            1,
+        );
+        assert!(toml::from_str::<Slate>(&text).is_err());
         Ok(())
     }
 

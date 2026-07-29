@@ -17,7 +17,7 @@ and no, it's not an organizer.
 
 ### install
 
-linux & macos (needs recent stable rust):
+linux & macos (rust 1.96+):
 
 ```sh
 cargo install adequate_booru_viewer   # gives you the `abv` binary
@@ -25,6 +25,13 @@ cargo install adequate_booru_viewer   # gives you the `abv` binary
 
 linux also wants a vulkan driver + X11/Wayland libs (your distro's mesa-vulkan /
 vulkan-icd and libxkbcommon). macos uses metal, nothing extra.
+
+first launch starts an anonymous, read-only, persistent danbooru mirror which may
+grow to tens of gibibytes. pause it under `INDEX STATUS`; closing `abv` stops it.
+media bytes remain disposable cache.
+
+linux/X11 is the release-tested coordinate. wayland and macos are carried by the
+same winit/wgpu/rfd stack and platform-neutral owned code, but not release-tested.
 
 anyway, check out how wet it is:
 

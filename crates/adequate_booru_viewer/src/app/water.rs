@@ -7,7 +7,7 @@ impl Bayonet {
         pixels_per_point: f32,
         tooltip_rects: &[egui::Rect],
     ) -> crate::water::Frame {
-        let veil = self.water_veil(ctx);
+        let veil = self.water_veil(ctx, tooltip_rects);
         let wetness = wetness(self.water_mode);
         self.water.set_wetness(wetness);
         self.family_water.set_wetness(wetness);

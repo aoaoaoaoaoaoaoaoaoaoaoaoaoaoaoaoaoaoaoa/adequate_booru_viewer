@@ -37,6 +37,10 @@ impl Lair {
         self.data.join("index.redb")
     }
 
+    pub fn favorites_path(&self) -> PathBuf {
+        self.data.join("favorites.roar")
+    }
+
     pub fn config_path(&self) -> PathBuf {
         self.config.join("config.toml")
     }

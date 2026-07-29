@@ -1,7 +1,9 @@
 use crate::{
     chrome,
-    config::{FilterName, SavedFilter, Shelf},
+    config::{FilterName, FilterSelection, SavedFilter, Shelf},
+    controls,
     filter_bank::{Bank, Berth},
+    water,
 };
 
 #[derive(Clone, Debug)]
@@ -11,6 +13,7 @@ pub enum Action {
     BeginNameEdit,
     Rename,
     Load(SavedFilter),
+    LoadLocalFavorites,
     Clone(FilterName),
     Delete(FilterName),
     Moor { name: FilterName, berth: Berth },
@@ -42,23 +45,26 @@ pub struct ShelfEdit {
 
 pub fn active_card(
     ui: &mut egui::Ui,
+    water: &mut water::Surface,
     name_entry: &mut String,
     edit: &mut NameEdit,
-    active: Option<&FilterName>,
+    selection: &FilterSelection,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
     let _title = ui.horizontal(|ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-        if chrome::icon(ui, "✎")
-            .on_hover_text("rename in place")
-            .clicked()
+        if *selection != FilterSelection::LocalFavorites
+            && controls::plunger(ui, water, '✎')
+                .on_hover_text("rename in place")
+                .clicked()
         {
             actions.push(Action::BeginNameEdit);
         }
         if *edit == NameEdit::Idle {
-            let _name = ui.label(match active {
-                Some(name) => chrome::title(name.to_string()),
-                None => chrome::title("new unsaved filter"),
+            let _name = ui.label(match selection {
+                FilterSelection::Scratch => chrome::title("new unsaved filter"),
+                FilterSelection::Saved { name } => chrome::title(name.to_string()),
+                FilterSelection::LocalFavorites => chrome::title("♥ favorites"),
             });
         } else {
             // The pencil edits the name where it is written.
@@ -76,10 +82,12 @@ pub fn active_card(
             }
             let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
             if enter && (entry.has_focus() || entry.lost_focus()) {
-                actions.push(if active.is_some() {
-                    Action::Rename
-                } else {
-                    Action::Save
+                actions.push(match selection {
+                    FilterSelection::Saved { .. } => Action::Rename,
+                    FilterSelection::Scratch => Action::Save,
+                    FilterSelection::LocalFavorites => {
+                        unreachable!("the immutable local-favorites card cannot enter name editing")
+                    }
                 });
             } else if entry.lost_focus() {
                 *edit = NameEdit::Idle;
@@ -87,20 +95,42 @@ pub fn active_card(
         }
     });
     let _save = ui.horizontal_wrapped(|ui| {
-        if chrome::icon(ui, "✚").on_hover_text("new filter").clicked() {
+        if controls::plunger(ui, water, '+')
+            .on_hover_text("new filter")
+            .clicked()
+        {
             actions.push(Action::New);
         }
-        if chrome::icon(ui, "✓").on_hover_text("save").clicked() {
-            actions.push(if *edit != NameEdit::Idle && active.is_some() {
-                Action::Rename
-            } else {
-                Action::Save
-            });
-        }
-        if let Some(active) = active
-            && chrome::icon(ui, "⧉").on_hover_text("clone").clicked()
-        {
-            actions.push(Action::Clone(active.clone()));
+        match selection {
+            FilterSelection::Saved { name: active } => {
+                let assembly = chrome::Coupled::horizontal_with_gap(
+                    ui,
+                    chrome::CouplingGap::MINIMUM,
+                    |ui| chrome::Monoglyph::new('✓').show(ui).on_hover_text("save"),
+                    |ui| chrome::Monoglyph::new('⧉').show(ui).on_hover_text("clone"),
+                );
+                water.monoglyph(&assembly.left);
+                water.monoglyph(&assembly.right);
+                if assembly.left.clicked() {
+                    actions.push(if *edit == NameEdit::Idle {
+                        Action::Save
+                    } else {
+                        Action::Rename
+                    });
+                }
+                if assembly.right.clicked() {
+                    actions.push(Action::Clone(active.clone()));
+                }
+            }
+            FilterSelection::Scratch => {
+                if controls::plunger(ui, water, '✓')
+                    .on_hover_text("save")
+                    .clicked()
+                {
+                    actions.push(Action::Save);
+                }
+            }
+            FilterSelection::LocalFavorites => {}
         }
     });
     actions
@@ -108,22 +138,29 @@ pub fn active_card(
 
 pub fn library(
     ui: &mut egui::Ui,
-    active: Option<&FilterName>,
+    water: &mut water::Surface,
+    selection: &FilterSelection,
     bank: &Bank,
     shelf_edit: &mut Option<ShelfEdit>,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
-    if bank.root.is_empty() && bank.shelves.is_empty() {
-        let _empty = ui.label("none");
-    }
+    local_favorites_row(
+        ui,
+        *selection == FilterSelection::LocalFavorites,
+        &mut actions,
+    );
+    let active = selection.saved();
     for filter in &bank.root {
-        filter_row(ui, active, filter, &mut actions);
+        filter_row(ui, water, active, filter, &mut actions);
     }
     for (slot, shelf) in bank.shelves.iter().enumerate() {
-        shelf_rows(ui, slot, shelf, active, shelf_edit, &mut actions);
+        shelf_rows(ui, water, slot, shelf, active, shelf_edit, &mut actions);
     }
     let _controls = ui.horizontal_wrapped(|ui| {
-        if chrome::icon(ui, "⊞").on_hover_text("new folder").clicked() {
+        if controls::plunger(ui, water, '⊞')
+            .on_hover_text("new folder")
+            .clicked()
+        {
             actions.push(Action::NewShelf);
         }
     });
@@ -131,8 +168,27 @@ pub fn library(
     actions
 }
 
+fn local_favorites_row(ui: &mut egui::Ui, selected: bool, actions: &mut Vec<Action>) {
+    let text = if selected {
+        "● ♥ favorites"
+    } else {
+        "♥ favorites"
+    };
+    let response = ui
+        .selectable_label(selected, text)
+        .on_hover_text("built-in: show every locally favorited image");
+    crate::probe_anchor!(ui, "filter:local-favorites", response.interact_rect);
+    if chrome::hover_started(ui, &response) {
+        actions.push(Action::Pulse(response.rect));
+    }
+    if response.clicked() {
+        actions.push(Action::LoadLocalFavorites);
+    }
+}
+
 fn filter_row(
     ui: &mut egui::Ui,
+    water: &mut water::Surface,
     active: Option<&FilterName>,
     filter: &SavedFilter,
     actions: &mut Vec<Action>,
@@ -141,29 +197,50 @@ fn filter_row(
         // The truncating name label must come last, so every control stays
         // inside the panel no matter how long the name runs.
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-        let drag_id = egui::Id::new(("filter-drag", filter.name.as_str()));
-        let _handle = ui.dnd_drag_source(drag_id, filter.name.clone(), |ui| {
-            let _grip = ui
-                .label(
-                    egui::RichText::new("⠿")
-                        .size(17.0)
-                        .color(chrome::EDGE_STRONG),
+        let assembly = chrome::Coupled::horizontal_with_gap(
+            ui,
+            chrome::CouplingGap::MINIMUM,
+            |ui| {
+                ui.push_id(("filter-drag", filter.name.as_str()), |ui| {
+                    chrome::DragHandle::friction_pad()
+                        .size(chrome::MechanismSize::Small)
+                        .show(ui)
+                        .on_hover_text("drag to rearrange")
+                })
+                .inner
+            },
+            |ui| {
+                chrome::Coupled::horizontal_with_gap(
+                    ui,
+                    chrome::CouplingGap::MINIMUM,
+                    |ui| {
+                        chrome::Monoglyph::new('×')
+                            .size(chrome::MechanismSize::Small)
+                            .show(ui)
+                            .on_hover_text("delete filter")
+                    },
+                    |ui| {
+                        chrome::Monoglyph::new('⧉')
+                            .size(chrome::MechanismSize::Small)
+                            .show(ui)
+                            .on_hover_text("clone")
+                    },
                 )
-                .on_hover_text("drag to rearrange");
-        });
-        if chrome::icon(ui, "×")
-            .on_hover_text("delete filter")
-            .clicked()
-        {
+            },
+        );
+        water.drag_handle(&assembly.left);
+        water.monoglyph(&assembly.right.left);
+        water.monoglyph(&assembly.right.right);
+        assembly.left.dnd_set_drag_payload(filter.name.clone());
+        if assembly.right.left.clicked() {
             actions.push(Action::Delete(filter.name.clone()));
         }
-        let clone = chrome::icon(ui, "⧉").on_hover_text("clone");
         crate::probe_anchor!(
             ui,
             format!("copy:{}", filter.name.as_str()),
-            clone.interact_rect
+            assembly.right.right.interact_rect
         );
-        if clone.clicked() {
+        if assembly.right.right.clicked() {
             actions.push(Action::Clone(filter.name.clone()));
         }
         let selected = active == Some(&filter.name);
@@ -227,6 +304,7 @@ fn filter_row(
 
 fn shelf_rows(
     ui: &mut egui::Ui,
+    water: &mut water::Surface,
     slot: usize,
     shelf: &Shelf,
     active: Option<&FilterName>,
@@ -236,22 +314,43 @@ fn shelf_rows(
     let id = ui.make_persistent_id(("filter-shelf", slot));
     let header = ui.horizontal(|ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-        let glyph = if shelf.open { "▾" } else { "▸" };
-        let toggle = chrome::glyph(ui, glyph, false);
-        crate::probe_anchor!(ui, format!("shelf:{}", shelf.name), toggle.interact_rect);
-        if toggle.clicked() {
+        let glyph = if shelf.open { '▾' } else { '▸' };
+        let assembly = chrome::Coupled::horizontal_with_gap(
+            ui,
+            chrome::CouplingGap::MINIMUM,
+            |ui| chrome::Monoglyph::new(glyph).show(ui),
+            |ui| {
+                chrome::Coupled::horizontal_with_gap(
+                    ui,
+                    chrome::CouplingGap::MINIMUM,
+                    |ui| {
+                        chrome::Monoglyph::new('✎')
+                            .show(ui)
+                            .on_hover_text("rename folder")
+                    },
+                    |ui| {
+                        chrome::Monoglyph::new('×')
+                            .show(ui)
+                            .on_hover_text("delete folder (filters spill out)")
+                    },
+                )
+            },
+        );
+        water.monoglyph(&assembly.left);
+        water.monoglyph(&assembly.right.left);
+        water.monoglyph(&assembly.right.right);
+        crate::probe_anchor!(
+            ui,
+            format!("shelf:{}", shelf.name),
+            assembly.left.interact_rect
+        );
+        if assembly.left.clicked() {
             actions.push(Action::ToggleShelf(slot));
         }
-        if chrome::icon(ui, "✎")
-            .on_hover_text("rename folder")
-            .clicked()
-        {
+        if assembly.right.left.clicked() {
             actions.push(Action::BeginShelfRename(slot));
         }
-        if chrome::icon(ui, "×")
-            .on_hover_text("delete folder (filters spill out)")
-            .clicked()
-        {
+        if assembly.right.right.clicked() {
             actions.push(Action::ScuttleShelf(slot));
         }
         match shelf_edit {
@@ -300,7 +399,7 @@ fn shelf_rows(
                 let _empty = ui.label(chrome::muted("empty"));
             }
             for filter in &shelf.filters {
-                filter_row(ui, active, filter, actions);
+                filter_row(ui, water, active, filter, actions);
             }
         });
     }

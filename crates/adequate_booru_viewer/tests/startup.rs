@@ -25,6 +25,7 @@ fn first_egui_frame_within_250ms() -> Result<()> {
             .env("XDG_CONFIG_HOME", &case.config)
             .env("XDG_DATA_HOME", &case.data)
             .env("XDG_CACHE_HOME", &case.cache)
+            .env("XDG_STATE_HOME", &case.state)
             .env("ADEQUATE_BOORU_VIEWER_STARTUP_PROBE", &probe)
             .env("ADEQUATE_BOORU_VIEWER_STARTUP_PROBE_HEADLESS", "1")
             .stdout(Stdio::null())
@@ -112,6 +113,7 @@ struct TempCase {
     config: PathBuf,
     data: PathBuf,
     cache: PathBuf,
+    state: PathBuf,
 }
 
 impl TempCase {
@@ -124,14 +126,17 @@ impl TempCase {
         let config = root.join("config");
         let data = root.join("data");
         let cache = root.join("cache");
+        let state = root.join("state");
         fs::create_dir_all(&config).context("create config tempdir")?;
         fs::create_dir_all(&data).context("create data tempdir")?;
         fs::create_dir_all(&cache).context("create cache tempdir")?;
+        fs::create_dir_all(&state).context("create state tempdir")?;
         Ok(Self {
             root,
             config,
             data,
             cache,
+            state,
         })
     }
 }

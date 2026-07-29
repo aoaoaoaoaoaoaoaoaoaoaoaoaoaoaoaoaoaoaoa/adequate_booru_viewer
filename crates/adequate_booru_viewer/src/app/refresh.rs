@@ -66,6 +66,8 @@ impl Bayonet {
         let send = self.worker.send(Command::Refresh {
             serial,
             query: self.query.clone(),
+            local_favorites: self.local_favorites.snapshot(),
+            corpus: self.filter_selection.corpus(),
             sort: self.sort,
             dates: self.date_range.normalized(),
             topology: self.gallery,
@@ -115,7 +117,13 @@ impl Bayonet {
         let tail = hit.tail;
         self.horizon_pending = hit.horizon < self.retrieval_horizon;
         self.hit_cache.put(
-            HitKey::new(&self.query, self.sort, self.date_range, self.gallery),
+            HitKey::new(
+                &self.query,
+                self.filter_selection.corpus(),
+                self.sort,
+                self.date_range,
+                self.gallery,
+            ),
             hit.clone(),
         );
         self.install_hit(hit);

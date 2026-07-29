@@ -10,17 +10,24 @@ use adequate_booru_viewer::{
     xdg::Lair,
 };
 use anyhow::{Context as _, Result, bail};
+use roaring::RoaringBitmap;
 use std::fmt::Write as _;
 use std::{
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
+    sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 
 const DEFAULT_ROUNDS: usize = 31;
 const DEFAULT_WARMUPS: usize = 3;
 const DEFAULT_LIMIT: usize = 200;
+
+fn no_local_favorites() -> &'static Arc<RoaringBitmap> {
+    static EMPTY: LazyLock<Arc<RoaringBitmap>> = LazyLock::new(|| Arc::new(RoaringBitmap::new()));
+    &EMPTY
+}
 
 fn main() -> Result<()> {
     let args = Args::parse()?;
@@ -47,6 +54,7 @@ fn main() -> Result<()> {
         for _ in 0..args.warmups {
             let hit = index.search_topology(
                 &case.query,
+                no_local_favorites(),
                 case.sort,
                 DateRange::default(),
                 case.topology,
@@ -73,6 +81,7 @@ fn main() -> Result<()> {
             let start = Instant::now();
             let hit = index.search_topology(
                 &case.query,
+                no_local_favorites(),
                 case.sort,
                 DateRange::default(),
                 case.topology,
@@ -104,6 +113,7 @@ fn main() -> Result<()> {
         medians.push(median.as_secs_f64());
         let hit = index.search_topology(
             &case.query,
+            no_local_favorites(),
             case.sort,
             DateRange::default(),
             case.topology,
@@ -306,6 +316,7 @@ fn small_candidate(index: &Index, limit: usize) -> Result<Case> {
         if index
             .search_topology(
                 &case.query,
+                no_local_favorites(),
                 case.sort,
                 DateRange::default(),
                 case.topology,
@@ -377,6 +388,7 @@ impl Oracle {
         for case in cases {
             let hit = index.search_topology(
                 &case.query,
+                no_local_favorites(),
                 case.sort,
                 DateRange::default(),
                 case.topology,

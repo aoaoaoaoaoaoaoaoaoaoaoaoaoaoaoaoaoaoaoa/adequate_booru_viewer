@@ -40,6 +40,7 @@ pub(super) enum FullWait {
 pub(super) enum ViewerAction {
     Copy,
     Save,
+    Favorite,
     Tags,
     Kin(KinStep),
     Close,
@@ -68,7 +69,9 @@ impl KinNav {
 
 pub(super) fn viewer_title_bar(
     ui: &mut egui::Ui,
+    water: &mut dwemer_poolrooms::water::Surface,
     post: &PostRecord,
+    favorite: bool,
     tags_open: bool,
     surface: ViewerSurface,
     kin: KinNav,
@@ -112,19 +115,32 @@ pub(super) fn viewer_title_bar(
                 }
                 let _actions =
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if chrome::icon(ui, "×").on_hover_text("close").clicked() {
+                        if controls::plunger(ui, water, '×')
+                            .on_hover_text("close")
+                            .clicked()
+                        {
                             actions.push(ViewerAction::Close);
                         }
-                        if chrome::glyph_enabled(ui, post.full_url().is_some(), "save", false)
+                        if controls::plate(ui, if favorite { "♥" } else { "♡" }, favorite)
+                            .on_hover_text(if favorite {
+                                "remove local favorite"
+                            } else {
+                                "add local favorite"
+                            })
+                            .clicked()
+                        {
+                            actions.push(ViewerAction::Favorite);
+                        }
+                        if controls::plate_enabled(ui, post.full_url().is_some(), "save", false)
                             .clicked()
                         {
                             actions.push(ViewerAction::Save);
                         }
-                        if chrome::glyph(ui, "copy", false).clicked() {
+                        if controls::plate(ui, "copy", false).clicked() {
                             actions.push(ViewerAction::Copy);
                         }
                         if surface == ViewerSurface::Image
-                            && chrome::glyph(ui, "tags", tags_open)
+                            && controls::plate(ui, "tags", tags_open)
                                 .on_hover_text("toggle tags (Tab)")
                                 .clicked()
                         {
@@ -536,10 +552,19 @@ impl Bayonet {
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                for action in viewer_title_bar(ui, &post, self.viewer_tags_open, surface, kin_nav) {
+                for action in viewer_title_bar(
+                    ui,
+                    &mut self.water,
+                    &post,
+                    self.local_favorites.contains(post.id),
+                    self.viewer_tags_open,
+                    surface,
+                    kin_nav,
+                ) {
                     match action {
                         ViewerAction::Copy => self.copy_full(post.id),
                         ViewerAction::Save => self.save_full(&post),
+                        ViewerAction::Favorite => self.toggle_local_favorite(post.id),
                         ViewerAction::Tags => self.toggle_viewer_tags(),
                         ViewerAction::Kin(step) => self.navigate_kin(step),
                         ViewerAction::Close => close = true,
@@ -734,6 +759,9 @@ impl Bayonet {
                     Some(ThumbLoad::Loading) => paint_tile_text(ui, plate.rect, "loading"),
                     Some(ThumbLoad::Fault) => paint_tile_text(ui, plate.rect, "fault"),
                     None => paint_tile_text(ui, plate.rect, "no image"),
+                }
+                if self.local_favorites.contains(post.id) {
+                    paint_favorite_badge(ui, plate.rect);
                 }
                 if response.hovered() {
                     self.family_water.hover(("family", post.id), plate.rect);

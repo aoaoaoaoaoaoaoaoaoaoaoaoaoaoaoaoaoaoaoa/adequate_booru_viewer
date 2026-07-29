@@ -1,20 +1,22 @@
 use anyhow::{Context as _, Result};
 use crossbeam_channel::{Receiver, SendTimeoutError, Sender, TryIter, bounded, unbounded};
+use roaring::RoaringBitmap;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex, PoisonError},
     thread,
     time::{Duration, Instant},
 };
 
 use crate::{
-    booru::{Booru as _, Danbooru},
+    booru::{Booru as _, Danbooru, TagDefinition},
+    config::MirrorPolicy,
     date::DateRange,
     index::{CacheStats, FactMergeBudget, Index, TagSuggestion},
     kin::Backfill,
     media::{MediaCache, RgbaBlade, required_url},
-    model::{FamilyTree, GalleryTopology, PostId, PostRecord, Query, SearchHit, Sort},
+    model::{Corpus, FamilyTree, GalleryTopology, PostId, PostRecord, Query, SearchHit, Sort, Tag},
 };
 
 const DANBOORU_READ_GAP: Duration = Duration::from_millis(150);
@@ -51,6 +53,8 @@ pub enum Command {
     Refresh {
         serial: u64,
         query: Query,
+        local_favorites: Arc<RoaringBitmap>,
+        corpus: Corpus,
         sort: Sort,
         dates: DateRange,
         topology: GalleryTopology,
@@ -66,6 +70,10 @@ pub enum Command {
     Family {
         serial: u64,
         id: PostId,
+    },
+    TagDefinition {
+        serial: u64,
+        tag: Tag,
     },
     Blade {
         epoch: BladeEpoch,
@@ -149,6 +157,12 @@ pub enum Event {
         serial: u64,
         fault: String,
     },
+    TagDefinition {
+        serial: u64,
+        tag: Tag,
+        result: std::result::Result<Option<TagDefinition>, String>,
+    },
+    TagDefinitionsCancelled(Vec<(u64, Tag)>),
     Refetched {
         post: Option<Box<PostRecord>>,
     },
@@ -217,13 +231,20 @@ pub struct Worker {
     refresh_tx: Sender<RefreshCommand>,
     warm_tx: Sender<WarmCommand>,
     family_tx: Sender<FamilyCommand>,
+    definition_tx: Option<Sender<DefinitionCommand>>,
     media_tx: Sender<MediaCommand>,
+    mirror: MirrorValve,
     crier: Klaxon,
     rx: Receiver<Event>,
 }
 
 impl Worker {
-    pub fn spawn(index: Index, media: MediaCache, ctx: egui::Context) -> Self {
+    pub fn spawn(
+        index: Index,
+        media: MediaCache,
+        ctx: egui::Context,
+        mirror_policy: MirrorPolicy,
+    ) -> Self {
         let (refresh_tx, refresh_rx) = unbounded();
         let (warm_tx, warm_rx) = unbounded();
         let (family_tx, family_rx) = unbounded();
@@ -257,6 +278,21 @@ impl Worker {
                 family_events,
             );
         });
+        let definition_tx = booru.tag_definitions().map(|_| {
+            let (definition_tx, definition_rx) = unbounded();
+            let definition_booru = booru.clone();
+            let definition_gate = read_gate.clone();
+            let definition_events = event_tx.clone();
+            let _definitions = thread::spawn(move || {
+                definition_loop(
+                    definition_booru,
+                    definition_gate,
+                    definition_rx,
+                    definition_events,
+                );
+            });
+            definition_tx
+        });
         // One dispatcher keeps epoch culling and full-blade priority coherent;
         // a small fetcher pool overlaps network latency so thumbnails land in
         // parallel instead of one per round trip.
@@ -272,20 +308,28 @@ impl Worker {
         let crawl_index = index.clone();
         let crawl_events = event_tx.clone();
         let crawl_gate = read_gate.clone();
+        let mirror = MirrorValve::new(mirror_policy);
         let kin_booru = booru.clone();
         let kin_index = index.clone();
         let kin_gate = read_gate.clone();
         let kin_events = event_tx.clone();
-        let _kin = thread::spawn(move || kin_loop(kin_booru, kin_index, kin_gate, kin_events));
-        let _crawl =
-            thread::spawn(move || crawl_loop(booru, crawl_index, crawl_gate, crawl_events));
+        let kin_mirror = mirror.clone();
+        let _kin = thread::spawn(move || {
+            kin_loop(kin_booru, kin_index, kin_gate, kin_mirror, kin_events);
+        });
+        let crawl_mirror = mirror.clone();
+        let _crawl = thread::spawn(move || {
+            crawl_loop(booru, crawl_index, crawl_gate, crawl_mirror, crawl_events);
+        });
         let merge_events = event_tx.clone();
         let _merge = thread::spawn(move || merge_loop(index, merge_events));
         Self {
             refresh_tx,
             warm_tx,
             family_tx,
+            definition_tx,
             media_tx,
+            mirror,
             crier,
             rx: event_rx,
         }
@@ -301,6 +345,8 @@ impl Worker {
             Command::Refresh {
                 serial,
                 query,
+                local_favorites,
+                corpus,
                 sort,
                 dates,
                 topology,
@@ -310,6 +356,8 @@ impl Worker {
                 .send(RefreshCommand::Search {
                     serial,
                     query,
+                    local_favorites,
+                    corpus,
                     sort,
                     dates,
                     topology,
@@ -328,6 +376,12 @@ impl Worker {
                 .family_tx
                 .send(FamilyCommand { serial, id })
                 .context("send family worker command"),
+            Command::TagDefinition { serial, tag } => self
+                .definition_tx
+                .as_ref()
+                .context("provider has no tag-definition source")?
+                .send(DefinitionCommand { serial, tag })
+                .context("send tag-definition worker command"),
             Command::Warm {
                 query,
                 sort,
@@ -382,6 +436,37 @@ impl Worker {
     pub fn drain(&self) -> TryIter<'_, Event> {
         self.rx.try_iter()
     }
+
+    pub fn has_tag_definitions(&self) -> bool {
+        self.definition_tx.is_some()
+    }
+
+    pub fn set_mirror_policy(&self, policy: MirrorPolicy) {
+        self.mirror.set(policy);
+    }
+}
+
+#[derive(Clone)]
+struct MirrorValve(Arc<(Mutex<MirrorPolicy>, Condvar)>);
+
+impl MirrorValve {
+    fn new(policy: MirrorPolicy) -> Self {
+        Self(Arc::new((Mutex::new(policy), Condvar::new())))
+    }
+
+    fn set(&self, policy: MirrorPolicy) {
+        let (state, changed) = &*self.0;
+        *state.lock().unwrap_or_else(PoisonError::into_inner) = policy;
+        changed.notify_all();
+    }
+
+    fn await_flow(&self) {
+        let (state, changed) = &*self.0;
+        let mut policy = state.lock().unwrap_or_else(PoisonError::into_inner);
+        while !policy.active() {
+            policy = changed.wait(policy).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -389,6 +474,8 @@ enum RefreshCommand {
     Search {
         serial: u64,
         query: Query,
+        local_favorites: Arc<RoaringBitmap>,
+        corpus: Corpus,
         sort: Sort,
         dates: DateRange,
         topology: GalleryTopology,
@@ -407,6 +494,12 @@ enum RefreshCommand {
 struct FamilyCommand {
     serial: u64,
     id: PostId,
+}
+
+#[derive(Debug)]
+struct DefinitionCommand {
+    serial: u64,
+    tag: Tag,
 }
 
 #[derive(Debug)]
@@ -462,8 +555,17 @@ fn refresh_loop(index: Index, commands: Receiver<RefreshCommand>, events: Klaxon
             };
             events.send(event);
         }
-        if let Some((serial, query, sort, dates, topology, limit)) = search {
-            let event = match index.search_topology(&query, sort, dates, topology, limit) {
+        if let Some((serial, query, local_favorites, corpus, sort, dates, topology, limit)) = search
+        {
+            let event = match index.search_corpus(
+                &query,
+                &local_favorites,
+                corpus,
+                sort,
+                dates,
+                topology,
+                limit,
+            ) {
                 Ok(hit) => Event::Refreshed { serial, hit },
                 Err(err) => Event::RefreshFault {
                     serial,
@@ -485,7 +587,16 @@ fn refresh_loop(index: Index, commands: Receiver<RefreshCommand>, events: Klaxon
     }
 }
 
-type PendingSearch = Option<(u64, Query, Sort, DateRange, GalleryTopology, usize)>;
+type PendingSearch = Option<(
+    u64,
+    Query,
+    Arc<RoaringBitmap>,
+    Corpus,
+    Sort,
+    DateRange,
+    GalleryTopology,
+    usize,
+)>;
 
 fn collect_refresh(
     command: RefreshCommand,
@@ -497,11 +608,24 @@ fn collect_refresh(
         RefreshCommand::Search {
             serial,
             query,
+            local_favorites,
+            corpus,
             sort,
             dates,
             topology,
             limit,
-        } => *search = Some((serial, query, sort, dates, topology, limit)),
+        } => {
+            *search = Some((
+                serial,
+                query,
+                local_favorites,
+                corpus,
+                sort,
+                dates,
+                topology,
+                limit,
+            ));
+        }
         RefreshCommand::Stats { serial } => *stats = Some(serial),
         RefreshCommand::Suggest { serial, prefix } => *suggest = Some((serial, prefix)),
     }
@@ -548,6 +672,35 @@ fn family_loop(
                 fault: format!("{err:#}"),
             }),
         }
+    }
+}
+
+fn definition_loop(
+    booru: Danbooru,
+    gate: RateGate,
+    commands: Receiver<DefinitionCommand>,
+    events: Klaxon,
+) {
+    while let Ok(mut command) = commands.recv() {
+        let mut cancelled = Vec::new();
+        for newer in commands.try_iter() {
+            cancelled.push((command.serial, command.tag));
+            command = newer;
+        }
+        if !cancelled.is_empty() {
+            events.send(Event::TagDefinitionsCancelled(cancelled));
+        }
+        gate.wait();
+        let result = booru
+            .tag_definitions()
+            .context("provider withdrew tag-definition capability")
+            .and_then(|source| source.tag_definition(&command.tag))
+            .map_err(|err| format!("{err:#}"));
+        events.send(Event::TagDefinition {
+            serial: command.serial,
+            tag: command.tag,
+            result,
+        });
     }
 }
 
@@ -760,8 +913,9 @@ impl MediaCommand {
     }
 }
 
-fn crawl_loop(booru: Danbooru, index: Index, gate: RateGate, events: Klaxon) {
+fn crawl_loop(booru: Danbooru, index: Index, gate: RateGate, mirror: MirrorValve, events: Klaxon) {
     loop {
+        mirror.await_flow();
         let gap = match crawl_once(&booru, &index, &gate) {
             Ok(event @ Event::Crawled { posts, .. }) => {
                 events.murmur(event);
@@ -868,8 +1022,9 @@ fn crawl_once(booru: &Danbooru, index: &Index, gate: &RateGate) -> Result<Event>
     })
 }
 
-fn kin_loop(booru: Danbooru, index: Index, gate: RateGate, events: Klaxon) {
+fn kin_loop(booru: Danbooru, index: Index, gate: RateGate, mirror: MirrorValve, events: Klaxon) {
     loop {
+        mirror.await_flow();
         let gap = match kin_once(&booru, &index, &gate) {
             Ok(event @ Event::KinCrawled { complete, .. }) => {
                 events.murmur(event);
@@ -943,6 +1098,25 @@ impl RateGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mirror_valve_blocks_and_releases_backfill() -> Result<()> {
+        let valve = MirrorValve::new(MirrorPolicy::Paused);
+        let witness = valve.clone();
+        let (tx, rx) = bounded(1);
+        let _waiter = thread::spawn(move || {
+            witness.await_flow();
+            let _sent = tx.send(());
+        });
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_millis(20)),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout)
+        ));
+        valve.set(MirrorPolicy::Active);
+        rx.recv_timeout(Duration::from_secs(1))
+            .context("mirror valve did not release")?;
+        Ok(())
+    }
 
     #[test]
     fn media_queue_culls_stale_thumbnail_epochs() -> Result<()> {

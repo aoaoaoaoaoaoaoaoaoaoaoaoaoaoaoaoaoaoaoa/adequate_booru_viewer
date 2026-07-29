@@ -10,15 +10,21 @@ use std::{
 };
 
 use crate::{
+    booru::TagDefinition,
     chrome,
-    config::{Config, FilterConfig, FilterName, QueryConfig, SavedFilter, Slate, WaterMode},
+    config::{
+        Config, FilterConfig, FilterName, FilterSelection, MirrorConfig, MirrorPolicy, QueryConfig,
+        SavedFilter, Slate, WaterMode,
+    },
+    controls,
     date::{CreatedDay, DateRange},
+    favorites::LocalFavorites,
     filter_bank::Bank,
     index::{CacheStats, Index, TagSuggestion},
     media::{MediaCache, RgbaBlade, extension},
     model::{
-        BoolOp, FamilyBadge, FamilyTree, GalleryTopology, GroupCycle, PostId, PostRecord, Query,
-        QueryAtom, SearchHit, SearchTail, Sort, Tag, TagKind, TagPolarity,
+        BoolOp, Corpus, FamilyBadge, FamilyTree, GalleryTopology, GroupCycle, PostId, PostRecord,
+        Query, QueryAtom, SearchHit, SearchTail, Sort, Tag, TagKind, TagPolarity,
     },
     query_ui::{QueryAction, render_query_tree},
     saved_filter_ui::{self, Action as SavedFilterAction, NameEdit, ShelfEdit},
@@ -35,7 +41,6 @@ use crate::{
 };
 
 mod bench;
-mod date_spool;
 mod debug;
 mod loading;
 mod palette;
@@ -68,10 +73,19 @@ const PREFETCH_DWELL: Duration = Duration::from_millis(120);
 const THUMB_PREFETCH_BUDGET: usize = 48;
 const CONFIG_SETTLE: Duration = Duration::from_millis(400);
 const VEIL_RADIUS: f32 = 2.0;
+const TOOLTIP_VEIL_MARGIN: f32 = 2.0;
 const VEIL_RISE: f32 = 0.12;
 const VEIL_FALL: f32 = 0.06;
 const ZOOM_DIM: f32 = 0.78;
 const MENU_DIM: f32 = 0.62;
+const TAG_DEFINITION_RETRY: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Debug)]
+enum TagDefinitionMemo {
+    Pending(u64),
+    Ready(Option<TagDefinition>),
+    Fault { message: String, born: Instant },
+}
 
 #[expect(
     clippy::struct_excessive_bools,
@@ -82,11 +96,12 @@ pub struct Bayonet {
     index: Index,
     worker: Worker,
     query: Query,
+    local_favorites: LocalFavorites,
     active_group: Vec<usize>,
     tag_entry: String,
     filter_name_entry: String,
     name_edit: NameEdit,
-    active_filter: Option<FilterName>,
+    filter_selection: FilterSelection,
     filters: Bank,
     shelf_edit: Option<ShelfEdit>,
     sort: Sort,
@@ -134,6 +149,8 @@ pub struct Bayonet {
     viewer_tree_fresh: bool,
     viewer_tags_open: bool,
     viewer_tag_groups: Option<(PostId, TagGroups)>,
+    tag_definitions: HashMap<Tag, TagDefinitionMemo>,
+    tag_definition_serial: u64,
     images_per_row: u16,
     /// Left-rail recess fold state, the running truth written back to the
     /// slate; keyed by section id, `true` ⇒ open. Seeded from the slate and
@@ -153,6 +170,7 @@ pub struct Bayonet {
     suggest_serial: u64,
     refetch_inflight: HashSet<PostId>,
     prefetch_on_hover: bool,
+    mirror_policy: MirrorPolicy,
     prefetched: HashSet<PostId>,
     hover_arm: Option<(PostId, Instant)>,
     empty_since: Option<Instant>,
@@ -182,51 +200,95 @@ impl Bayonet {
         let first_run = !lair.config_path().exists();
         let config = Config::load(&lair.config_path())?;
         startup("app.config.loaded");
+        let local_favorites = LocalFavorites::load(lair.favorites_path())?;
+        startup("app.favorites.loaded");
         let index = Index::open(&lair.index_path())?;
         startup("app.index.opened");
         let media = MediaCache::new(lair.media_dir())?;
         startup("app.media.opened");
-        let worker = Worker::spawn(index.clone(), media, ctx.clone());
+        let worker = Worker::spawn(index.clone(), media, ctx.clone(), config.mirror.policy);
         startup("app.worker.spawned");
         let mut filters = Bank::forge(config.filters.saved.clone(), config.filters.shelves.clone());
-        let slate = Slate::load(&lair.slate_path());
+        let mut slate = Slate::load(&lair.slate_path());
+        if first_run {
+            let _prior = slate.shutters.insert("index-status".to_owned(), true);
+        }
         for shelf in &mut filters.shelves {
             shelf.open = !slate.closed_folders.contains(&shelf.name);
         }
-        let active_filter = filters.active(slate.active_filter.clone().or_else(|| {
-            first_run
-                .then(|| FilterName::forge(crate::config::SAFE_DEFAULT_FILTER))
-                .flatten()
-        }));
-        let mut query = active_filter
-            .as_ref()
+        let mut filter_selection = match slate.filter.clone() {
+            FilterSelection::Saved { name } if filters.taken(&name) => {
+                FilterSelection::Saved { name }
+            }
+            FilterSelection::LocalFavorites => FilterSelection::LocalFavorites,
+            FilterSelection::Scratch | FilterSelection::Saved { .. } => FilterSelection::Scratch,
+        };
+        if first_run
+            && filter_selection == FilterSelection::Scratch
+            && let Some(name) = FilterName::forge(crate::config::SAFE_DEFAULT_FILTER)
+            && filters.taken(&name)
+        {
+            filter_selection = FilterSelection::Saved { name };
+        }
+        let mut query = filter_selection
+            .saved()
             .and_then(|active| filters.get(active))
-            .map_or_else(|| slate.query.tree.clone(), |filter| filter.tree.clone());
+            .map_or_else(
+                || match filter_selection {
+                    FilterSelection::Scratch => slate.query.tree.clone(),
+                    FilterSelection::LocalFavorites | FilterSelection::Saved { .. } => {
+                        Query::default()
+                    }
+                },
+                |filter| filter.tree.clone(),
+            );
         query.sort_atoms();
         let sort = slate.sort;
         let date_range = clean_dates(slate.dates);
         let scrubbed_dates = date_range != slate.dates.normalized();
-        let active_group = active_filter
-            .as_ref()
+        let active_group = filter_selection
+            .saved()
             .and_then(|active| filters.get(active))
             .map_or_else(
-                || query.clamp_group_path(&slate.query.active_group),
+                || match filter_selection {
+                    FilterSelection::LocalFavorites => Vec::new(),
+                    FilterSelection::Scratch | FilterSelection::Saved { .. } => {
+                        query.clamp_group_path(&slate.query.active_group)
+                    }
+                },
                 |filter| query.clamp_group_path(&filter.active_group),
             );
-        let hit_key = HitKey::new(&query, sort, date_range, slate.gallery);
+        let hit_key = HitKey::new(
+            &query,
+            filter_selection.corpus(),
+            sort,
+            date_range,
+            slate.gallery,
+        );
         let mut app = Self {
             status: format!("index {}", lair.index_path().display()),
-            crawl_status: "crawl waking".to_owned(),
-            kin_status: "family index waking".to_owned(),
+            crawl_status: if config.mirror.policy.active() {
+                "crawl waking"
+            } else {
+                "paused"
+            }
+            .to_owned(),
+            kin_status: if config.mirror.policy.active() {
+                "family index waking"
+            } else {
+                "paused"
+            }
+            .to_owned(),
             lair,
             index,
             worker,
             query: query.clone(),
+            local_favorites,
             active_group,
             tag_entry: String::new(),
             filter_name_entry: String::new(),
             name_edit: NameEdit::Idle,
-            active_filter,
+            filter_selection,
             filters,
             shelf_edit: None,
             sort,
@@ -270,6 +332,8 @@ impl Bayonet {
             viewer_tree_fresh: true,
             viewer_tags_open: slate.viewer_tags_open,
             viewer_tag_groups: None,
+            tag_definitions: HashMap::new(),
+            tag_definition_serial: 0,
             images_per_row: slate
                 .images_per_row
                 .clamp(MIN_IMAGES_PER_ROW, MAX_IMAGES_PER_ROW),
@@ -296,6 +360,7 @@ impl Bayonet {
             suggest_serial: 0,
             refetch_inflight: HashSet::new(),
             prefetch_on_hover: config.prefetch_on_hover,
+            mirror_policy: config.mirror.policy,
             prefetched: HashSet::new(),
             hover_arm: None,
             empty_since: None,
@@ -428,7 +493,7 @@ impl Bayonet {
     ///
     /// While a veil is fading out its cutouts are dropped, so the blur turns
     /// uniform and recedes evenly instead of leaving sharp negative space.
-    pub fn water_veil(&self, ctx: &egui::Context) -> Option<Veil> {
+    pub fn water_veil(&self, ctx: &egui::Context, tooltip_rects: &[egui::Rect]) -> Option<Veil> {
         let zoom_open = self.zoom.is_some();
         let zoom_strength = veil_strength(ctx, "water-zoom", zoom_open);
         if zoom_strength > 0.0 {
@@ -437,7 +502,12 @@ impl Bayonet {
                     ViewerSurface::Image => Cut::barrier(rect, VEIL_RADIUS),
                     ViewerSurface::Family => Cut::aperture(rect, VEIL_RADIUS),
                 };
-                [cut, Cut::NONE]
+                // Tooltip plates remain shallow water obstacles, but belong to
+                // the modal foreground and therefore escape its optical veil.
+                let tooltip = tooltip_extent(tooltip_rects).map_or(Cut::NONE, |rect| {
+                    Cut::aperture(rect.expand(TOOLTIP_VEIL_MARGIN), VEIL_RADIUS)
+                });
+                [cut, tooltip]
             } else {
                 [Cut::NONE, Cut::NONE]
             };
@@ -497,6 +567,9 @@ impl Bayonet {
     fn install_query_at(&mut self, query: Query, active_group: Vec<usize>) {
         let mut query = query;
         query.sort_atoms();
+        if self.filter_selection == FilterSelection::LocalFavorites && !query.is_empty() {
+            self.filter_selection = FilterSelection::Scratch;
+        }
         self.remember_hit();
         self.active_group = query.clamp_group_path(&active_group);
         self.query = query;
@@ -520,7 +593,13 @@ impl Bayonet {
         // The key just changed, so any result deferred behind an open tag menu
         // was for the old key — drop it lest it commit stale when the menu closes.
         self.parked_hit = None;
-        let key = HitKey::new(&self.query, self.sort, self.date_range, self.gallery);
+        let key = HitKey::new(
+            &self.query,
+            self.filter_selection.corpus(),
+            self.sort,
+            self.date_range,
+            self.gallery,
+        );
         let Some(hit) = self.hit_cache.get(&key) else {
             return false;
         };
@@ -530,7 +609,13 @@ impl Bayonet {
     }
 
     fn install_hit(&mut self, hit: SearchHit) {
-        let key = HitKey::new(&self.query, self.sort, self.date_range, self.gallery);
+        let key = HitKey::new(
+            &self.query,
+            self.filter_selection.corpus(),
+            self.sort,
+            self.date_range,
+            self.gallery,
+        );
         if self.tag_menu.is_open() {
             self.parked_hit = Some((key, hit));
             return;
@@ -585,7 +670,13 @@ impl Bayonet {
     }
 
     fn deepen_results(&mut self) {
-        let key = HitKey::new(&self.query, self.sort, self.date_range, self.gallery);
+        let key = HitKey::new(
+            &self.query,
+            self.filter_selection.corpus(),
+            self.sort,
+            self.date_range,
+            self.gallery,
+        );
         if self.horizon_pending
             || self.tag_menu.is_open()
             || self.hit_key != key
@@ -628,37 +719,42 @@ impl Bayonet {
         self.install_query(query);
     }
 
-    fn tag_kind(&mut self, tag: &Tag) -> TagKind {
-        if let Some(kind) = self.tag_kinds.get(tag) {
-            return *kind;
-        }
-        let kind = match self.index.tag_kind(tag) {
-            Ok(kind) => kind,
-            Err(err) => {
-                self.status = format!("{err:#}");
-                TagKind::General
+    fn toggle_local_favorite(&mut self, id: PostId) {
+        match self.local_favorites.toggle(id) {
+            Ok(favorite) => {
+                self.hit_cache.clear();
+                self.parked_hit = None;
+                if self.filter_selection == FilterSelection::LocalFavorites && !favorite {
+                    self.hit.posts.retain(|post| post.id != id);
+                }
+                self.hit
+                    .posts
+                    .sort_by_key(|post| !self.local_favorites.contains(post.id));
+                self.status = if favorite {
+                    format!("favorited #{id}")
+                } else {
+                    format!("unfavorited #{id}")
+                };
+                self.request_refresh();
             }
-        };
-        let _old = self.tag_kinds.insert(tag.clone(), kind);
-        kind
-    }
-
-    fn atom_kind(&mut self, atom: &QueryAtom) -> TagKind {
-        match atom {
-            QueryAtom::Tag(tag) => self.tag_kind(tag),
-            QueryAtom::Rating(_) => TagKind::Meta,
+            Err(err) => self.status = format!("{err:#}"),
         }
     }
 
     fn save_current_filter(&mut self) {
+        if self.filter_selection == FilterSelection::LocalFavorites {
+            "the built-in favorites filter is immutable".clone_into(&mut self.status);
+            return;
+        }
         let typed = FilterName::forge(&self.filter_name_entry);
         let name = typed.unwrap_or_else(|| {
-            self.active_filter
-                .clone()
+            self.filter_selection
+                .saved()
+                .cloned()
                 .unwrap_or_else(|| self.filters.spare(&self.query))
         });
         self.upsert_filter(name.clone(), self.query.clone(), self.active_group.clone());
-        self.active_filter = Some(name.clone());
+        self.filter_selection = FilterSelection::Saved { name: name.clone() };
         self.filter_name_entry.clear();
         self.name_edit = NameEdit::Idle;
         self.status = format!("saved filter `{name}`");
@@ -666,15 +762,30 @@ impl Bayonet {
     }
 
     fn load_filter(&mut self, filter: SavedFilter) {
-        self.active_filter = Some(filter.name.clone());
+        self.filter_selection = FilterSelection::Saved {
+            name: filter.name.clone(),
+        };
         self.filter_name_entry.clear();
         self.name_edit = NameEdit::Idle;
         self.status = format!("active filter `{}`", filter.name);
         self.install_query_at(filter.tree, filter.active_group);
     }
 
+    fn load_local_favorites(&mut self) {
+        self.filter_selection = FilterSelection::LocalFavorites;
+        self.filter_name_entry.clear();
+        self.name_edit = NameEdit::Idle;
+        "active filter `favorites`".clone_into(&mut self.status);
+        self.install_query_at(Query::default(), Vec::new());
+        // The local bitmap is authoritative and already resident: stale
+        // non-favorites have no excuse to survive until the worker replies.
+        self.hit
+            .posts
+            .retain(|post| self.local_favorites.contains(post.id));
+    }
+
     fn new_filter(&mut self) {
-        self.active_filter = None;
+        self.filter_selection = FilterSelection::Scratch;
         self.filter_name_entry.clear();
         self.name_edit = NameEdit::Idle;
         "new unsaved filter".clone_into(&mut self.status);
@@ -682,7 +793,7 @@ impl Bayonet {
     }
 
     fn rename_filter(&mut self) {
-        let Some(old) = self.active_filter.clone() else {
+        let Some(old) = self.filter_selection.saved().cloned() else {
             "no active filter to rename".clone_into(&mut self.status);
             return;
         };
@@ -701,7 +812,7 @@ impl Bayonet {
         }
         self.filters.rename(&old, new.clone());
         self.upsert_filter(new.clone(), self.query.clone(), self.active_group.clone());
-        self.active_filter = Some(new.clone());
+        self.filter_selection = FilterSelection::Saved { name: new.clone() };
         self.filter_name_entry.clear();
         self.name_edit = NameEdit::Idle;
         self.status = format!("renamed filter `{old}` → `{new}`");
@@ -709,9 +820,13 @@ impl Bayonet {
     }
 
     fn begin_name_edit(&mut self) {
+        if self.filter_selection == FilterSelection::LocalFavorites {
+            "the built-in favorites filter cannot be renamed".clone_into(&mut self.status);
+            return;
+        }
         self.filter_name_entry = self
-            .active_filter
-            .as_ref()
+            .filter_selection
+            .saved()
             .map(ToString::to_string)
             .unwrap_or_default();
         self.name_edit = NameEdit::Arming;
@@ -731,7 +846,7 @@ impl Bayonet {
                 filter.active_group.clone(),
             ),
         );
-        self.active_filter = Some(name.clone());
+        self.filter_selection = FilterSelection::Saved { name: name.clone() };
         self.filter_name_entry.clear();
         self.status = format!("cloned filter `{name}`");
         self.install_query_at(filter.tree, filter.active_group);
@@ -741,15 +856,15 @@ impl Bayonet {
         let Some(removed) = self.filters.remove(name) else {
             return;
         };
-        if self.active_filter.as_ref() == Some(&removed.name) {
-            self.active_filter = None;
+        if self.filter_selection.saved() == Some(&removed.name) {
+            self.filter_selection = FilterSelection::Scratch;
         }
         self.status = format!("deleted filter `{}`", removed.name);
         self.save_config();
     }
 
     fn sync_active_filter(&mut self) {
-        let Some(name) = self.active_filter.clone() else {
+        let Some(name) = self.filter_selection.saved().cloned() else {
             return;
         };
         self.upsert_filter(name, self.query.clone(), self.active_group.clone());
@@ -766,6 +881,10 @@ impl Bayonet {
     }
 
     fn dispatch_warm(&mut self, query: Query, pages: u32) -> Result<()> {
+        if self.filter_selection.corpus() == Corpus::LocalFavorites {
+            "local favorites; upstream warm suspended".clone_into(&mut self.warm_status);
+            return Ok(());
+        }
         if self.date_range.active() {
             "date range active; upstream warm suspended".clone_into(&mut self.warm_status);
             return Ok(());
@@ -964,6 +1083,36 @@ impl Bayonet {
                         self.status = format!("family lookup failed: {fault}");
                     }
                 }
+                Event::TagDefinition {
+                    serial,
+                    tag,
+                    result,
+                } => {
+                    if self
+                        .tag_definitions
+                        .get(&tag)
+                        .is_some_and(|memo| matches!(memo, TagDefinitionMemo::Pending(found) if *found == serial))
+                    {
+                        let memo = match result {
+                            Ok(definition) => TagDefinitionMemo::Ready(definition),
+                            Err(message) => TagDefinitionMemo::Fault {
+                                message,
+                                born: Instant::now(),
+                            },
+                        };
+                        let _old = self.tag_definitions.insert(tag, memo);
+                        ctx.request_repaint();
+                    }
+                }
+                Event::TagDefinitionsCancelled(cancelled) => {
+                    for (serial, tag) in cancelled {
+                        if self.tag_definitions.get(&tag).is_some_and(
+                            |memo| matches!(memo, TagDefinitionMemo::Pending(found) if *found == serial),
+                        ) {
+                            let _cancelled = self.tag_definitions.remove(&tag);
+                        }
+                    }
+                }
                 Event::Suggested { serial, hits } => {
                     if serial == self.suggest_serial
                         && let Some((_, memo)) = &mut self.suggest_memo
@@ -1154,6 +1303,9 @@ impl Bayonet {
             Some(ThumbLoad::Loading) => paint_tile_text(ui, rect, "loading"),
             Some(ThumbLoad::Fault) => paint_tile_text(ui, rect, "fault"),
             None => paint_tile_text(ui, rect, "no image"),
+        }
+        if self.local_favorites.contains(post.id) {
+            paint_favorite_badge(ui, rect);
         }
         if let Some(family) = family {
             crate::probe_anchor!(ui, format!("family-tile:{}", post.id.0), rect);
@@ -1423,6 +1575,9 @@ impl Bayonet {
     fn write_config(&mut self) {
         let config = Config {
             prefetch_on_hover: self.prefetch_on_hover,
+            mirror: MirrorConfig {
+                policy: self.mirror_policy,
+            },
             filters: FilterConfig {
                 saved: self.filters.root.clone(),
                 shelves: self.filters.shelves.clone(),
@@ -1437,7 +1592,7 @@ impl Bayonet {
                 .map(|shelf| shelf.name.clone())
                 .collect(),
             shutters: self.shutters.clone(),
-            active_filter: self.active_filter.clone(),
+            filter: self.filter_selection.clone(),
             query: QueryConfig {
                 tree: self.query.clone(),
                 active_group: self.active_group.clone(),
@@ -1604,15 +1759,23 @@ impl WarmKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct HitKey {
     query: String,
+    corpus: Corpus,
     sort: Sort,
     dates: DateRange,
     gallery: GalleryTopology,
 }
 
 impl HitKey {
-    fn new(query: &Query, sort: Sort, dates: DateRange, gallery: GalleryTopology) -> Self {
+    fn new(
+        query: &Query,
+        corpus: Corpus,
+        sort: Sort,
+        dates: DateRange,
+        gallery: GalleryTopology,
+    ) -> Self {
         Self {
             query: query.to_text(),
+            corpus,
             sort,
             dates: dates.normalized(),
             gallery,
@@ -1647,6 +1810,10 @@ impl HitCache {
         }
         self.slots.insert(0, (key, hit));
         self.slots.truncate(HIT_CACHE_LIMIT);
+    }
+
+    fn clear(&mut self) {
+        self.slots.clear();
     }
 }
 
@@ -1712,6 +1879,10 @@ fn veil_strength(ctx: &egui::Context, id: &'static str, open: bool) -> f32 {
         open,
         if open { VEIL_RISE } else { VEIL_FALL },
     )
+}
+
+fn tooltip_extent(rects: &[egui::Rect]) -> Option<egui::Rect> {
+    rects.iter().copied().reduce(egui::Rect::union)
 }
 
 fn posts_changed(old: &[PostRecord], new: &[PostRecord]) -> bool {
@@ -1814,18 +1985,50 @@ fn paint_family_badge(ui: &egui::Ui, tile: egui::Rect, family: FamilyBadge) {
         family.posts,
         if family.incomplete { "+" } else { "" }
     );
+    paint_tile_badge(ui, tile, text, chrome::TEXT, BadgeCorner::Right);
+}
+
+fn paint_favorite_badge(ui: &egui::Ui, tile: egui::Rect) {
+    paint_tile_badge(ui, tile, "♥".to_owned(), chrome::HOT, BadgeCorner::Left);
+}
+
+#[derive(Clone, Copy)]
+enum BadgeCorner {
+    Left,
+    Right,
+}
+
+fn paint_tile_badge(
+    ui: &egui::Ui,
+    tile: egui::Rect,
+    text: String,
+    color: egui::Color32,
+    corner: BadgeCorner,
+) {
     let font = egui::FontId::new(13.0, egui::FontFamily::Monospace);
-    let galley = ui.painter().layout_no_wrap(text, font, chrome::TEXT);
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(tile.right() - galley.size().x - 12.0, tile.top()),
-        galley.size() + egui::vec2(12.0, 6.0),
-    );
-    let radius = egui::CornerRadius {
-        nw: 0,
-        ne: TILE_RADIUS,
-        sw: 0,
-        se: 0,
+    let galley = ui.painter().layout_no_wrap(text, font, color);
+    let size = galley.size() + egui::vec2(12.0, 6.0);
+    let (min, radius) = match corner {
+        BadgeCorner::Left => (
+            tile.left_top(),
+            egui::CornerRadius {
+                nw: TILE_RADIUS,
+                ne: 0,
+                sw: 0,
+                se: 0,
+            },
+        ),
+        BadgeCorner::Right => (
+            egui::pos2(tile.right() - size.x, tile.top()),
+            egui::CornerRadius {
+                nw: 0,
+                ne: TILE_RADIUS,
+                sw: 0,
+                se: 0,
+            },
+        ),
     };
+    let rect = egui::Rect::from_min_size(min, size);
     let _fill = ui.painter().rect_filled(rect, radius, chrome::RAISED);
     let _edge = ui.painter().rect_stroke(
         rect,
@@ -1834,7 +2037,7 @@ fn paint_family_badge(ui: &egui::Ui, tile: egui::Rect, family: FamilyBadge) {
         egui::StrokeKind::Inside,
     );
     ui.painter()
-        .galley(rect.center() - galley.size() * 0.5, galley, chrome::TEXT);
+        .galley(rect.center() - galley.size() * 0.5, galley, color);
 }
 
 fn contain(image: egui::Vec2, bounds: egui::Vec2) -> egui::Vec2 {
@@ -1892,6 +2095,29 @@ fn clean_dates(dates: DateRange) -> DateRange {
     dates.normalized().scrub_before(CreatedDay::booru_floor())
 }
 
+fn atom_kind(
+    index: &Index,
+    kinds: &mut HashMap<Tag, TagKind>,
+    status: &mut String,
+    atom: &QueryAtom,
+) -> TagKind {
+    let QueryAtom::Tag(tag) = atom else {
+        return TagKind::Meta;
+    };
+    if let Some(kind) = kinds.get(tag) {
+        return *kind;
+    }
+    let kind = match index.tag_kind(tag) {
+        Ok(kind) => kind,
+        Err(err) => {
+            *status = format!("{err:#}");
+            TagKind::General
+        }
+    };
+    let _old = kinds.insert(tag.clone(), kind);
+    kind
+}
+
 impl Drop for Bayonet {
     fn drop(&mut self) {
         if self.config_dirty.is_some() {
@@ -1917,7 +2143,7 @@ impl Bayonet {
                         ui.add_space(ui.spacing().item_spacing.x);
                         self.left_panel(ui);
                     });
-                if date_spool::take_wheel_claim(&ctx) {
+                if chrome::take_control_wheel(&ctx) {
                     scroll_before.unwrap_or_default().store(&ctx, scroll.id);
                     ctx.request_repaint();
                 }
@@ -1964,6 +2190,20 @@ mod geometry_tests {
     }
 
     #[test]
+    fn tooltip_extent_covers_every_modal_foreground_plate() {
+        let a = egui::Rect::from_min_max(egui::pos2(2.0, 3.0), egui::pos2(8.0, 11.0));
+        let b = egui::Rect::from_min_max(egui::pos2(7.0, 1.0), egui::pos2(12.0, 9.0));
+        assert_eq!(
+            tooltip_extent(&[a, b]),
+            Some(egui::Rect::from_min_max(
+                egui::pos2(2.0, 1.0),
+                egui::pos2(12.0, 11.0)
+            ))
+        );
+        assert_eq!(tooltip_extent(&[]), None);
+    }
+
+    #[test]
     fn warm_frontiers_survive_sort_switches() {
         let score = WarmKey {
             query: "solo".to_owned(),
@@ -1996,6 +2236,7 @@ mod geometry_tests {
     fn hit_cache_never_replaces_a_deep_horizon_with_a_shallow_one() {
         let key = HitKey::new(
             &Query::parse("solo"),
+            Corpus::All,
             Sort::Score,
             DateRange::default(),
             GalleryTopology::Ungrouped,

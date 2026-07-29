@@ -58,11 +58,6 @@ impl Bank {
         self.get(name).is_some()
     }
 
-    /// Validates a remembered active-filter name against the bank.
-    pub fn active(&self, active: Option<FilterName>) -> Option<FilterName> {
-        active.filter(|name| self.taken(name))
-    }
-
     /// Replaces in place; new names land at the end of the root list.
     pub fn upsert(&mut self, filter: SavedFilter) {
         match self.find_mut(&filter.name) {
@@ -236,19 +231,6 @@ mod tests {
     use anyhow::{Context as _, Result};
 
     use super::*;
-
-    #[test]
-    fn active_filter_must_exist() -> Result<()> {
-        let bank = Bank::forge(vec![filter("pose")?], Vec::new());
-        assert_eq!(
-            bank.active(FilterName::forge("pose"))
-                .as_ref()
-                .map(FilterName::as_str),
-            Some("pose")
-        );
-        assert!(bank.active(FilterName::forge("lost")).is_none());
-        Ok(())
-    }
 
     #[test]
     fn clone_names_take_the_next_free_suffix() -> Result<()> {

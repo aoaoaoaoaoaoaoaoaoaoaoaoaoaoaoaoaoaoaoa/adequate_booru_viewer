@@ -21,9 +21,62 @@ const X264_PRESET: &str = "slow";
 
 fn main() -> Result<()> {
     match env::args().nth(1).as_deref() {
+        Some("release-build") => release_build(),
         Some("wet-demo") => WetDemo::parse()?.run(),
-        Some(other) => bail!("unknown xtask `{other}`; try `cargo xtask wet-demo`"),
-        None => bail!("missing xtask; try `cargo xtask wet-demo`"),
+        Some(other) => {
+            bail!("unknown xtask `{other}`; try `cargo release-build` or `cargo xtask wet-demo`")
+        }
+        None => bail!("missing xtask; try `cargo release-build` or `cargo xtask wet-demo`"),
+    }
+}
+
+/// Verify the checkout, then atomically replace the user's installed `abv`
+/// with a release build from this exact source tree. `cargo install` only
+/// touches the destination after a successful compile, so a broken checkout
+/// cannot dislodge the previous known-good binary.
+fn release_build() -> Result<()> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest_dir
+        .parent()
+        .context("resolve workspace root from xtask manifest")?;
+    run("./check.py", ["verify"], &[], root)?;
+    run("cargo", ["audit"], &[], root)?;
+    let mut install = [
+        "install",
+        "--path",
+        "crates/adequate_booru_viewer",
+        "--locked",
+        "--offline",
+        "--force",
+        "--bin",
+        "abv",
+    ]
+    .map(OsString::from)
+    .to_vec();
+    if let Some(prefix) = developer_install_prefix()? {
+        install.extend([OsString::from("--root"), prefix.into_os_string()]);
+    }
+    run("cargo", install, &[], root)
+}
+
+/// Linux user executables canonically live in `~/.local/bin`. Other hosts
+/// retain Cargo's native install prefix unless explicitly overridden.
+fn developer_install_prefix() -> Result<Option<PathBuf>> {
+    if let Some(prefix) = env::var_os("ABV_INSTALL_ROOT") {
+        let prefix = PathBuf::from(prefix);
+        if !prefix.is_absolute() {
+            bail!("ABV_INSTALL_ROOT must be absolute");
+        }
+        return Ok(Some(prefix));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let home = env::var_os("HOME").context("HOME is required for the local abv install")?;
+        Ok(Some(PathBuf::from(home).join(".local")))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(None)
     }
 }
 
@@ -1140,9 +1193,9 @@ fn wait_probe(child: &mut Child, path: &Path, timeout: Duration) -> Result<()> {
     bail!("timed out waiting for {}", path.display())
 }
 
-fn run<const N: usize>(
+fn run(
     program: &str,
-    args: [&str; N],
+    args: impl IntoIterator<Item = impl AsRef<OsStr>>,
     envs: &[(&str, &OsStr)],
     cwd: &Path,
 ) -> Result<()> {

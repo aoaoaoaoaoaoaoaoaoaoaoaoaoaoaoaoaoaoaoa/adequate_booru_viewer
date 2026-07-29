@@ -256,6 +256,7 @@ fn family_projection_keeps_the_strongest_matching_member() -> Result<()> {
     let solo = Query::parse("solo");
     let grouped = index.search_topology(
         &solo,
+        &Arc::new(RoaringBitmap::new()),
         Sort::Score,
         DateRange::default(),
         GalleryTopology::Grouped,
@@ -269,6 +270,7 @@ fn family_projection_keeps_the_strongest_matching_member() -> Result<()> {
     assert_eq!(
         ids(index.search_topology(
             &solo,
+            &Arc::new(RoaringBitmap::new()),
             Sort::Newest,
             DateRange::default(),
             GalleryTopology::Grouped,
@@ -280,6 +282,7 @@ fn family_projection_keeps_the_strongest_matching_member() -> Result<()> {
         index
             .search_topology(
                 &solo,
+                &Arc::new(RoaringBitmap::new()),
                 Sort::Newest,
                 DateRange::default(),
                 GalleryTopology::Grouped,
@@ -370,6 +373,92 @@ fn reparenting_amends_both_reverse_edges_and_the_atlas() -> Result<()> {
 }
 
 #[test]
+fn local_favorites_prefix_every_sort_without_escaping_the_query() -> Result<()> {
+    let path = std::env::temp_dir().join(format!(
+        "adequate-booru-local-favorites-{}.redb",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ));
+    let index = Index::open(&path)?;
+    let mut root = post(1, 1, Rating::General, &["solo"])?;
+    root.favs = 1;
+    let mut child = post(2, 100, Rating::General, &["solo"])?;
+    child.favs = 100;
+    let mut peer = post(3, 50, Rating::General, &["solo"])?;
+    peer.favs = 50;
+    let outsider = post(4, 200, Rating::General, &["landscape"])?;
+    index.absorb_harvest(&[
+        harvest(root, None, true),
+        harvest(child, Some(1), false),
+        harvest(peer, None, false),
+        harvest(outsider, None, false),
+    ])?;
+    let favorites = Arc::new([1_u32, 4, 999].into_iter().collect());
+    let solo = Query::parse("solo");
+
+    assert_eq!(
+        ids(index.search_topology(
+            &Query::default(),
+            &favorites,
+            Sort::Score,
+            DateRange::default(),
+            GalleryTopology::Ungrouped,
+            10,
+        )?),
+        [4, 1, 2, 3]
+    );
+    assert!(
+        lock(&index.sort_keys).get(Sort::Score).is_none(),
+        "favorite ordering must not materialize the dense id→rank projection"
+    );
+
+    for (sort, expected) in [
+        (Sort::Newest, [1, 3, 2]),
+        (Sort::Score, [1, 2, 3]),
+        (Sort::FavCount, [1, 2, 3]),
+    ] {
+        assert_eq!(
+            ids(index.search_topology(
+                &solo,
+                &favorites,
+                sort,
+                DateRange::default(),
+                GalleryTopology::Ungrouped,
+                10,
+            )?),
+            expected
+        );
+    }
+
+    let hit = index.search_corpus(
+        &Query::default(),
+        &favorites,
+        Corpus::LocalFavorites,
+        Sort::Score,
+        DateRange::default(),
+        GalleryTopology::Ungrouped,
+        10,
+    )?;
+    assert_eq!(ids(hit.clone()), [4, 1]);
+    assert_eq!(hit.candidates, 2);
+
+    assert_eq!(
+        ids(index.search_topology(
+            &solo,
+            &favorites,
+            Sort::Score,
+            DateRange::default(),
+            GalleryTopology::Grouped,
+            10,
+        )?),
+        [1, 3]
+    );
+
+    drop(index);
+    remove_index(&path);
+    Ok(())
+}
+
+#[test]
 fn rejected_parent_still_binds_visible_children() -> Result<()> {
     let path = std::env::temp_dir().join(format!(
         "adequate-booru-hidden-family-{}.redb",
@@ -383,6 +472,7 @@ fn rejected_parent_still_binds_visible_children() -> Result<()> {
     ])?;
     let grouped = index.search_topology(
         &Query::parse("solo"),
+        &Arc::new(RoaringBitmap::new()),
         Sort::Score,
         DateRange::default(),
         GalleryTopology::Grouped,

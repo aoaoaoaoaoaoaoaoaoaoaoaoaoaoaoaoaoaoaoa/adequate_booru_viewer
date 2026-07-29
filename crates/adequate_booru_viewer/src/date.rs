@@ -99,6 +99,17 @@ impl From<CreatedDay> for String {
     }
 }
 
+impl dwemer_poolrooms::chrome::GregorianDay for CreatedDay {
+    fn ymd(self) -> (i32, u32, u32) {
+        CreatedDay::ymd(self)
+    }
+
+    fn from_ymd(year: i32, month: u32, day: u32) -> Self {
+        // DateSpool's GregorianDay contract guarantees a valid civil date.
+        Self(days_from_civil(year, month, day) as u32)
+    }
+}
+
 impl DateRange {
     pub fn normalized(self) -> Self {
         match (self.first, self.last) {

@@ -1,7 +1,7 @@
 use crate::{
-    chrome,
+    chrome, controls,
     model::{BoolGroup, BoolOp, QueryAtom, QueryExpr, TagKind},
-    tag_chroma,
+    tag_chroma, water,
 };
 
 #[derive(Clone, Debug)]
@@ -30,7 +30,6 @@ pub enum QueryAction {
     AddGroup {
         op: BoolOp,
     },
-    Pulse(egui::Rect),
 }
 
 #[derive(Clone, Debug)]
@@ -41,17 +40,21 @@ struct AtomDrag {
 
 pub fn render_query_tree(
     ui: &mut egui::Ui,
+    water: &mut water::Surface,
     root: &QueryExpr,
     active: &[usize],
     actions: &mut Vec<QueryAction>,
     tag_kind: &mut impl FnMut(&QueryAtom) -> TagKind,
 ) {
     let mut path = Vec::new();
-    render_query_expr(ui, root, &mut path, None, active, 0, actions, tag_kind);
+    render_query_expr(
+        ui, water, root, &mut path, None, active, 0, actions, tag_kind,
+    );
 }
 
 fn render_query_expr(
     ui: &mut egui::Ui,
+    water: &mut water::Surface,
     expr: &QueryExpr,
     path: &mut Vec<usize>,
     parent: Option<(Vec<usize>, usize)>,
@@ -62,20 +65,25 @@ fn render_query_expr(
 ) {
     let (negated, core) = expr.denote();
     match core {
-        QueryExpr::Atom { atom } => render_atom(ui, atom, negated, parent, actions, tag_kind),
+        QueryExpr::Atom { atom } => {
+            render_atom(ui, water, atom, negated, parent, actions, tag_kind);
+        }
         QueryExpr::Group { group } => {
             render_group(
-                ui, group, negated, path, parent, active, depth, actions, tag_kind,
+                ui, water, group, negated, path, parent, active, depth, actions, tag_kind,
             );
         }
         QueryExpr::Not { child } => {
-            render_query_expr(ui, child, path, parent, active, depth, actions, tag_kind);
+            render_query_expr(
+                ui, water, child, path, parent, active, depth, actions, tag_kind,
+            );
         }
     }
 }
 
 fn render_group(
     ui: &mut egui::Ui,
+    water: &mut water::Surface,
     group: &BoolGroup,
     negated: bool,
     path: &mut Vec<usize>,
@@ -106,7 +114,7 @@ fn render_group(
         ui.set_min_width(ui.available_width());
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
         let _header = ui.horizontal_wrapped(|ui| {
-            let group_btn = chrome::glyph(ui, group_label(path, active_here), active_here)
+            let group_btn = controls::plate(ui, group_label(path, active_here), active_here)
                 .on_hover_text("click to select this group for new tags");
             crate::probe_anchor!(
                 ui,
@@ -121,10 +129,7 @@ fn render_group(
             // land on the next line — never an orphaned ×.
             if let Some((parent, child)) = parent.as_ref()
                 && {
-                    let button = chrome::small_still(ui, "×").on_hover_text("remove group");
-                    if chrome::hover_started(ui, &button) {
-                        actions.push(QueryAction::Pulse(button.rect));
-                    }
+                    let button = controls::plunger(ui, water, '×').on_hover_text("remove group");
                     button.clicked()
                 }
             {
@@ -133,7 +138,7 @@ fn render_group(
                     child: *child,
                 });
             }
-            if chrome::glyph(ui, "¬", negated)
+            if controls::plate(ui, "¬", negated)
                 .on_hover_text("negate this group")
                 .clicked()
             {
@@ -141,7 +146,7 @@ fn render_group(
             }
             for op in BoolOp::ALL {
                 let op_btn =
-                    chrome::glyph(ui, op.label(), group.op == op).on_hover_text(op_blurb(op));
+                    controls::plate(ui, op.label(), group.op == op).on_hover_text(op_blurb(op));
                 crate::probe_anchor!(
                     ui,
                     format!("group-op:{}:{}", probe_path(path), op.label()),
@@ -167,6 +172,7 @@ fn render_group(
             path.push(child);
             render_query_expr(
                 ui,
+                water,
                 &group.children[child],
                 path,
                 Some((parent_path, child)),
@@ -218,6 +224,7 @@ fn primary_click_inside(ui: &egui::Ui, rect: egui::Rect) -> bool {
 
 fn render_atom(
     ui: &mut egui::Ui,
+    water: &mut water::Surface,
     atom: &QueryAtom,
     negated: bool,
     parent: Option<(Vec<usize>, usize)>,
@@ -235,35 +242,43 @@ fn render_atom(
         parent: parent.clone(),
         child,
     };
-    let id = ui.make_persistent_id(("query-atom-drag", &parent, child));
     let _row = ui.horizontal(|ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-        if remove_atom_button(ui, parent.clone(), child, actions) {
-            return;
+        let assembly = chrome::Coupled::horizontal_with_gap(
+            ui,
+            chrome::CouplingGap::MINIMUM,
+            |ui| {
+                ui.push_id(("query-atom-drag", &parent, child), |ui| {
+                    chrome::DragHandle::friction_pad()
+                        .size(chrome::MechanismSize::Small)
+                        .show(ui)
+                        .on_hover_text("drag to another group")
+                })
+                .inner
+            },
+            |ui| {
+                chrome::Monoglyph::new('×')
+                    .size(chrome::MechanismSize::Small)
+                    .show(ui)
+                    .on_hover_text("remove from query")
+            },
+        );
+        water.drag_handle(&assembly.left);
+        water.monoglyph(&assembly.right);
+        assembly.left.dnd_set_drag_payload(drag);
+        if assembly.right.clicked() {
+            actions.push(QueryAction::RemoveChild {
+                parent: parent.clone(),
+                child,
+            });
         }
-        let _dragged = ui.dnd_drag_source(id, drag, |ui| {
-            atom_label(ui, atom, negated, tag_kind);
-        });
-        crate::probe_anchor!(ui, format!("atom:{}", atom.term()), _dragged.response.rect);
+        atom_label(ui, atom, negated, tag_kind);
+        crate::probe_anchor!(
+            ui,
+            format!("atom:{}", atom.term()),
+            assembly.left.interact_rect
+        );
     });
-}
-
-fn remove_atom_button(
-    ui: &mut egui::Ui,
-    parent: Vec<usize>,
-    child: usize,
-    actions: &mut Vec<QueryAction>,
-) -> bool {
-    let button = chrome::small_still(ui, "×").on_hover_text("remove from query");
-    if chrome::hover_started(ui, &button) {
-        actions.push(QueryAction::Pulse(button.rect));
-    }
-    if button.clicked() {
-        actions.push(QueryAction::RemoveChild { parent, child });
-        true
-    } else {
-        false
-    }
 }
 
 fn atom_label(
