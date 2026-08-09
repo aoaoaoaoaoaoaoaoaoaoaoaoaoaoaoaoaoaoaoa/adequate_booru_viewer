@@ -3,21 +3,22 @@
     reason = "the GUI binary is module-owned; the sibling retrieval library exists for benchmark tooling"
 )]
 
-/// Register a widget's hit-test rect under a semantic name for the `devtools`
-/// anchor probe. Expands to nothing without the feature; even the name
-/// expression is left unevaluated, so the call site is free in shipped builds.
 #[macro_export]
 macro_rules! probe_anchor {
     ($ui:expr, $name:expr, $rect:expr) => {{
-        #[cfg(feature = "devtools")]
-        if $crate::probe::probing() {
-            $crate::probe::record($ui, $name, $rect);
+        #[cfg(any(feature = "devtools", feature = "egui-test"))]
+        {
+            let name = $name;
+            #[cfg(feature = "egui-test")]
+            $crate::witness::anchor($ui, &name, $rect);
+            #[cfg(feature = "devtools")]
+            if $crate::probe::probing() {
+                $crate::probe::record($ui, name.to_string(), $rect);
+            }
         }
     }};
 }
 
-/// Clear the anchor accumulator at the start of an egui pass (the final pass of
-/// the frame wins). No-op without `devtools`.
 #[macro_export]
 macro_rules! probe_reset {
     ($ctx:expr) => {{
@@ -32,13 +33,13 @@ macro_rules! probe_reset {
 mod probe;
 
 mod app;
-mod boiler;
 mod booru;
 mod config;
 mod controls;
 mod date;
 mod favorites;
 mod filter_bank;
+mod host;
 mod index;
 mod kin;
 mod media;
@@ -51,6 +52,7 @@ mod tag_menu;
 mod tag_palette;
 mod trace;
 mod wire;
+mod witness;
 mod worker;
 mod xdg;
 
@@ -58,22 +60,19 @@ pub(crate) use dwemer_poolrooms::{chrome, water};
 
 use anyhow::Result;
 
-use app::Bayonet;
-use trace::startup;
-
 fn main() -> Result<()> {
-    startup("main.enter");
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "--version" || argument == "-V")
+    {
+        println!("abv {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    trace::startup("main.enter");
     let ctx = egui::Context::default();
     chrome::install(&ctx);
-    startup("main.chrome.installed");
-    let mut app = Bayonet::open(&ctx)?;
-    startup("main.app.opened");
-
-    if std::env::var_os("ADEQUATE_BOORU_VIEWER_STARTUP_PROBE_HEADLESS").is_some() {
-        app.draw_startup_probe_frame(&ctx);
-        startup("main.headless.exit");
-        std::process::exit(0);
-    }
-
-    boiler::run(ctx, app)
+    let trace = eternalist_apps::TraceGuard::arm()?;
+    let result = host::run(ctx);
+    trace.flush();
+    result
 }

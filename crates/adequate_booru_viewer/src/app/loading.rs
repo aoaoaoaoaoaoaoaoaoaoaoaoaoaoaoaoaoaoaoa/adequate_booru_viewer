@@ -35,7 +35,6 @@ impl Bayonet {
         let empty_since = *self.empty_since.get_or_insert(now);
         let age = now.saturating_duration_since(empty_since);
         if age < DWELL {
-            self.water.hide_loading();
             self.water.set_floor(None);
             ui.ctx().request_repaint_after(DWELL.saturating_sub(age));
             return;
@@ -61,10 +60,10 @@ impl Bayonet {
         let rect = egui::Rect::from_center_size(arena.center(), size);
         self.water
             .set_floor(Some(crate::water::Floor::shallow(arena)));
-        if state.raised() && self.water_mode.wet() {
-            self.water.show_loading(ui.ctx(), rect);
-        } else {
-            self.water.hide_loading();
+        if state.raised() {
+            self.water.hide_drain();
+            let _rect = self.living_wait.bouncer_with(ui, arena, state.label());
+            return;
         }
         if state.draining() && self.water_mode.wet() {
             self.water.show_drain(ui.ctx(), rect);

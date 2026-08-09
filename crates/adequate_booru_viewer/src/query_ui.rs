@@ -129,7 +129,8 @@ fn render_group(
             // land on the next line — never an orphaned ×.
             if let Some((parent, child)) = parent.as_ref()
                 && {
-                    let button = controls::plunger(ui, water, '×').on_hover_text("remove group");
+                    let button = controls::symbol(ui, water, chrome::Symbol::Remove)
+                        .on_hover_text("remove group");
                     button.clicked()
                 }
             {
@@ -257,7 +258,7 @@ fn render_atom(
                 .inner
             },
             |ui| {
-                chrome::Monoglyph::new('×')
+                chrome::Monoglyph::symbol(chrome::Symbol::Remove)
                     .size(chrome::MechanismSize::Small)
                     .show(ui)
                     .on_hover_text("remove from query")
@@ -356,7 +357,7 @@ fn group_stroke(depth: usize, active: bool) -> egui::Stroke {
 }
 
 /// Dotted group path for probe anchor names (`[0,1]` -> `"0.1"`).
-#[cfg(feature = "devtools")]
+#[cfg(any(feature = "devtools", feature = "egui-test"))]
 fn probe_path(path: &[usize]) -> String {
     path.iter()
         .map(|step| step.to_string())

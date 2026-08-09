@@ -4,8 +4,6 @@ use egui::{ColorImage, TextureHandle, TextureOptions};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
-    env, fs,
-    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -13,13 +11,13 @@ use crate::{
     booru::TagDefinition,
     chrome,
     config::{
-        Config, FilterConfig, FilterName, FilterSelection, MirrorConfig, MirrorPolicy, QueryConfig,
-        SavedFilter, Slate, WaterMode,
+        Config, FilterName, FilterSelection, MirrorConfig, MirrorPolicy, QueryConfig, SavedFilter,
+        Slate, WaterMode,
     },
     controls,
     date::{CreatedDay, DateRange},
     favorites::LocalFavorites,
-    filter_bank::Bank,
+    filter_bank::{self, Bank},
     index::{CacheStats, Index, TagSuggestion},
     media::{MediaCache, RgbaBlade, extension},
     model::{
@@ -27,7 +25,7 @@ use crate::{
         Query, QueryAtom, SearchHit, SearchTail, Sort, Tag, TagKind, TagPolarity,
     },
     query_ui::{QueryAction, render_query_tree},
-    saved_filter_ui::{self, Action as SavedFilterAction, NameEdit, ShelfEdit},
+    saved_filter_ui::{self, Action as SavedFilterAction, EntryEdit, NameEdit, ShelfEdit},
     tag_chroma,
     tag_menu::{
         HEIGHT as TAG_MENU_HEIGHT, TagGroups, TagMenu, WIDTH as TAG_MENU_WIDTH,
@@ -41,7 +39,6 @@ use crate::{
 };
 
 mod bench;
-mod debug;
 mod loading;
 mod palette;
 mod panels;
@@ -104,6 +101,7 @@ pub struct Bayonet {
     filter_selection: FilterSelection,
     filters: Bank,
     shelf_edit: Option<ShelfEdit>,
+    entry_edit: Option<EntryEdit>,
     sort: Sort,
     gallery: GalleryTopology,
     date_range: DateRange,
@@ -180,7 +178,7 @@ pub struct Bayonet {
     crawl_status: String,
     kin_status: String,
     status: String,
-    startup_probe: Option<StartupProbe>,
+    living_wait: eternalist_apps::LivingWait,
     #[cfg(feature = "devtools")]
     probe_grid_rows: usize,
     #[cfg(feature = "devtools")]
@@ -190,6 +188,28 @@ pub struct Bayonet {
 }
 
 impl Bayonet {
+    #[cfg(feature = "egui-test")]
+    pub fn witness_state(&self, text_edit_focused: bool) -> crate::witness::State {
+        let water = match self.water_mode {
+            WaterMode::Dry => "dry",
+            WaterMode::Wet => "wet",
+            WaterMode::ReallyWet => "really_wet",
+        };
+        let filter = match &self.filter_selection {
+            FilterSelection::Scratch => "scratch".to_owned(),
+            FilterSelection::Saved { name } => name.to_string(),
+            FilterSelection::LocalFavorites => "local_favorites".to_owned(),
+        };
+        crate::witness::State {
+            contract: abv_contract::UI_FINGERPRINT,
+            water,
+            filter,
+            result_posts: self.hit.posts.len(),
+            text_edit_focused,
+            ui_open: self.shutters.get("ui-controls").copied().unwrap_or(false),
+        }
+    }
+
     pub fn open(ctx: &egui::Context) -> Result<Self> {
         startup("app.open.enter");
         let lair = Lair::claim()?;
@@ -208,7 +228,7 @@ impl Bayonet {
         startup("app.media.opened");
         let worker = Worker::spawn(index.clone(), media, ctx.clone(), config.mirror.policy);
         startup("app.worker.spawned");
-        let mut filters = Bank::forge(config.filters.saved.clone(), config.filters.shelves.clone());
+        let mut filters = filter_bank::forge(&config.filters);
         let mut slate = Slate::load(&lair.slate_path());
         if first_run {
             let _prior = slate.shutters.insert("index-status".to_owned(), true);
@@ -291,6 +311,7 @@ impl Bayonet {
             filter_selection,
             filters,
             shelf_edit: None,
+            entry_edit: None,
             sort,
             gallery: slate.gallery,
             date_range,
@@ -367,7 +388,7 @@ impl Bayonet {
             config_dirty: None,
             cache_status: "cache measuring".to_owned(),
             warm_status: "query warm idle".to_owned(),
-            startup_probe: StartupProbe::from_env(),
+            living_wait: eternalist_apps::LivingWait::default(),
             #[cfg(feature = "devtools")]
             probe_grid_rows: 0,
             #[cfg(feature = "devtools")]
@@ -427,24 +448,6 @@ impl Bayonet {
         );
     }
 
-    pub fn draw_startup_probe_frame(&mut self, ctx: &egui::Context) {
-        startup("app.draw.enter");
-        let output = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1440.0, 920.0),
-                )),
-                ..Default::default()
-            },
-            |ui| self.pulse(ui),
-        );
-        startup("app.draw.ui.done");
-        let _primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
-        startup("app.draw.tessellated");
-        startup("app.draw.probe.reported");
-    }
-
     /// One full application frame: drain workers, settle gates, paint.
     pub fn pulse(&mut self, ui: &mut egui::Ui) {
         crate::probe_reset!(ui.ctx());
@@ -456,7 +459,6 @@ impl Bayonet {
         self.cycle_query_group(&ctx);
         self.paint(ui);
         self.bench(&ctx);
-        self.report_startup_probe();
     }
 
     fn cycle_query_group(&mut self, ctx: &egui::Context) {
@@ -751,7 +753,7 @@ impl Bayonet {
             self.filter_selection
                 .saved()
                 .cloned()
-                .unwrap_or_else(|| self.filters.spare(&self.query))
+                .unwrap_or_else(|| filter_bank::spare(&self.filters, &self.query))
         });
         self.upsert_filter(name.clone(), self.query.clone(), self.active_group.clone());
         self.filter_selection = FilterSelection::Saved { name: name.clone() };
@@ -801,22 +803,30 @@ impl Bayonet {
             "rename needs a nonempty filter name".clone_into(&mut self.status);
             return;
         };
-        if old == new {
+        if self.rename_filter_to(&old, new) {
             self.filter_name_entry.clear();
             self.name_edit = NameEdit::Idle;
-            return;
+        }
+    }
+
+    fn rename_filter_to(&mut self, old: &FilterName, new: FilterName) -> bool {
+        if old == &new {
+            return true;
         }
         if self.filters.taken(&new) {
             self.status = format!("filter `{new}` already exists");
-            return;
+            return false;
         }
-        self.filters.rename(&old, new.clone());
-        self.upsert_filter(new.clone(), self.query.clone(), self.active_group.clone());
-        self.filter_selection = FilterSelection::Saved { name: new.clone() };
-        self.filter_name_entry.clear();
-        self.name_edit = NameEdit::Idle;
+        if !self.filters.rename(old, new.clone()) {
+            return false;
+        }
+        if self.filter_selection.saved() == Some(old) {
+            self.upsert_filter(new.clone(), self.query.clone(), self.active_group.clone());
+            self.filter_selection = FilterSelection::Saved { name: new.clone() };
+        }
         self.status = format!("renamed filter `{old}` → `{new}`");
         self.save_config();
+        true
     }
 
     fn begin_name_edit(&mut self) {
@@ -1578,10 +1588,7 @@ impl Bayonet {
             mirror: MirrorConfig {
                 policy: self.mirror_policy,
             },
-            filters: FilterConfig {
-                saved: self.filters.root.clone(),
-                shelves: self.filters.shelves.clone(),
-            },
+            filters: filter_bank::project(&self.filters),
         };
         let slate = Slate {
             closed_folders: self
@@ -1609,19 +1616,6 @@ impl Bayonet {
             .and_then(|()| slate.save(&self.lair.slate_path()));
         if let Err(err) = written {
             self.status = format!("{err:#}");
-        }
-    }
-
-    fn report_startup_probe(&mut self) {
-        let Some(probe) = &mut self.startup_probe else {
-            return;
-        };
-        if probe.reported {
-            return;
-        }
-        match probe.report() {
-            Ok(()) => {}
-            Err(err) => self.status = format!("{err:#}"),
         }
     }
 }
@@ -1820,30 +1814,6 @@ impl HitCache {
 struct ActivePrefix {
     body: String,
     negative: bool,
-}
-
-struct StartupProbe {
-    path: PathBuf,
-    reported: bool,
-}
-
-impl StartupProbe {
-    fn from_env() -> Option<Self> {
-        env::var_os("ADEQUATE_BOORU_VIEWER_STARTUP_PROBE").map(|path| Self {
-            path: PathBuf::from(path),
-            reported: false,
-        })
-    }
-
-    fn report(&mut self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        }
-        fs::write(&self.path, b"gui-ready\n")
-            .with_context(|| format!("write {}", self.path.display()))?;
-        self.reported = true;
-        Ok(())
-    }
 }
 
 fn active_prefix(text: &str) -> Option<ActivePrefix> {
@@ -2129,25 +2099,10 @@ impl Drop for Bayonet {
 impl Bayonet {
     fn paint(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        let _left = egui::Panel::left("filter")
-            .resizable(false)
-            .exact_size(chrome::INSPECTOR_WIDTH)
-            .show_inside(ui, |ui| {
-                let scroll_id = ui.make_persistent_id(egui::Id::new("filter-scroll"));
-                let scroll_before = egui::scroll_area::State::load(ui.ctx(), scroll_id);
-                let scroll = egui::ScrollArea::vertical()
-                    .id_salt("filter-scroll")
-                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.add_space(ui.spacing().item_spacing.x);
-                        self.left_panel(ui);
-                    });
-                if chrome::take_control_wheel(&ctx) {
-                    scroll_before.unwrap_or_default().store(&ctx, scroll.id);
-                    ctx.request_repaint();
-                }
-            });
+        let inspector = eternalist_apps::Inspector::new("filter")
+            .scroll_id("filter-scroll")
+            .show(ui, |ui| self.left_panel(ui));
+        self.water.heave(&ctx, inspector.scroll_offset);
         let prior = self.tag_menu.post_id();
         self.tag_menu_rect = None;
         self.tag_palette_overlay(&ctx);

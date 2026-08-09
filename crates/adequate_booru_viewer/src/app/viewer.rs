@@ -115,7 +115,7 @@ pub(super) fn viewer_title_bar(
                 }
                 let _actions =
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if controls::plunger(ui, water, '×')
+                        if controls::symbol(ui, water, chrome::Symbol::Remove)
                             .on_hover_text("close")
                             .clicked()
                         {

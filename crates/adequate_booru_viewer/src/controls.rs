@@ -32,13 +32,13 @@ pub fn plate_enabled(
     response
 }
 
-/// Sink one single-glyph foundry plunger into the active water surface.
-pub fn plunger(
+/// Sink one armory-standard foundry symbol into the active water surface.
+pub fn symbol(
     ui: &mut egui::Ui,
     water: &mut water::Surface,
-    glyph: char,
+    symbol: chrome::Symbol,
 ) -> chrome::MonoglyphResponse {
-    let response = chrome::Monoglyph::new(glyph).show(ui);
+    let response = chrome::Monoglyph::symbol(symbol).show(ui);
     water.monoglyph(&response);
     response
 }

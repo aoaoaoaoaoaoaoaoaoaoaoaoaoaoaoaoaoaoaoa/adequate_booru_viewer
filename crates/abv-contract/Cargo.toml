@@ -1,0 +1,11 @@
+[package]
+name = "abv-contract"
+version = "0.1.0"
+description = "Stable UI identity shared by ABV and its native acceptance stories"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository = "https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/adequate_booru_viewer"
+
+[lints]
+workspace = true

@@ -600,18 +600,17 @@ struct App {
 
 impl App {
     fn raise(binary: &Path, display: &str, camp: &Camp) -> Result<Self> {
-        let probe = camp.root.join("gui-ready");
         let mut command = Command::new(binary);
         let _command = command
             .env("DISPLAY", display)
             .env("WINIT_UNIX_BACKEND", "x11")
-            .env("ADEQUATE_BOORU_VIEWER_STARTUP_PROBE", &probe)
             .env("ABV_ANCHOR_PROBE", camp.probe_path())
             .envs(camp.env())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
         let mut child = command.spawn().context("spawn abv")?;
-        wait_probe(&mut child, &probe, Duration::from_secs(20)).context("wait for abv GUI")?;
+        wait_probe(&mut child, &camp.probe_path(), Duration::from_secs(20))
+            .context("wait for abv GUI")?;
         let app = Self { child };
         Ok(app)
     }

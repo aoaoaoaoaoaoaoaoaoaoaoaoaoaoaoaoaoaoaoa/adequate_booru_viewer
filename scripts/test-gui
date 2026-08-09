@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+cargo build --release --bin abv
+cargo build --release --package abv-acceptance
+cargo run --release --package abv-acceptance -- --smoke
+cargo build --release --bin abv --features egui-test
+cargo run --release --package abv-acceptance -- \
+    --artifacts "${ABV_ACCEPTANCE_ARTIFACTS:-/tmp/abv-acceptance-artifacts}"

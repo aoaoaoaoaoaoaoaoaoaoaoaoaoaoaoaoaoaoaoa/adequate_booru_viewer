@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+sandbox=$(mktemp -d "${TMPDIR:-/tmp}/abv-install.XXXXXX")
+prefix=$sandbox/prefix
+binary=$prefix/bin/abv
+cleanup() {
+    rm -rf "$sandbox"
+}
+trap cleanup EXIT HUP INT TERM
+
+cargo install \
+    --path "$root/crates/adequate_booru_viewer" \
+    --root "$prefix" \
+    --locked \
+    --force
+"$binary" --version >/dev/null
+
+cd "$root"
+cargo build --release --package abv-acceptance
+ABV_ACCEPTANCE_BINARY=$binary \
+ABV_ACCEPTANCE_ARTIFACTS=${ABV_INSTALL_ARTIFACTS:-/tmp/abv-install-artifacts} \
+    cargo run --release --package abv-acceptance -- --smoke
+
+cargo uninstall --root "$prefix" adequate_booru_viewer
+if [ -e "$binary" ]; then
+    printf 'uninstall left executable at %s\n' "$binary" >&2
+    exit 1
+fi
+printf 'install lifecycle verified under %s\n' "$sandbox"

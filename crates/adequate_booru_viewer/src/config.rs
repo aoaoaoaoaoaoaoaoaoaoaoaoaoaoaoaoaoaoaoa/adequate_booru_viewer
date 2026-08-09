@@ -317,6 +317,28 @@ impl From<FilterName> for String {
     }
 }
 
+impl eternalist_apps::CabinetKey for FilterName {
+    fn forge(raw: &str) -> Option<Self> {
+        Self::forge(raw)
+    }
+
+    fn as_str(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl eternalist_apps::CabinetEntry for SavedFilter {
+    type Key = FilterName;
+
+    fn key(&self) -> &FilterName {
+        &self.name
+    }
+
+    fn rename(&mut self, name: FilterName) {
+        self.name = name;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

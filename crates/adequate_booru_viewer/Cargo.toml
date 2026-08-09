@@ -26,25 +26,28 @@ path = "examples/retrieval_bench.rs"
 # (src/probe.rs) the demo xtask drives. Never in the default set, so shipped
 # builds pay nothing.
 devtools = ["dep:serde_json", "dwemer_poolrooms/instrumentation"]
+egui-test = ["dep:egui-tester-witness", "eternalist-apps/egui-test"]
 
 [dependencies]
 anyhow = "1.0.104"
 arboard = "3.6.1"
 crossbeam-channel = "0.5.16"
 directories = "6.0.0"
-dwemer_poolrooms = "0.8.0"
+dwemer_poolrooms = "0.9.0"
+abv-contract = { path = "../abv-contract", version = "0.1.0" }
 egui = "0.34.3"
 egui-wgpu = "0.34.3"
-egui-winit = "0.34.3"
+egui-tester-witness = { version = "0.6.0", optional = true, features = ["egui"] }
+eternalist-apps = "0.3.0"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 memmap2 = "0.9.11"
-pollster = "1.0.1"
 redb = "4.1.0"
 rfd = "0.17.2"
 roaring = "0.11.4"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", optional = true }
 toml = "1.1.4"
+tracing = "0.1.44"
 ureq = { version = "3.3.0", features = ["json"] }
 zune-core = "0.5.1"
 zune-jpeg = "0.5.15"

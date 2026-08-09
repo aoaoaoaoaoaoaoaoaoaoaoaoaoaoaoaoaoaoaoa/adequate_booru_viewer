@@ -194,7 +194,7 @@ fn palette_body(
                         if let Some(remove) = tag_action(
                             ui,
                             water,
-                            active.is_some().then_some('×'),
+                            active.is_some().then_some(chrome::Symbol::Remove),
                             "remove from query",
                         ) {
                             crate::probe_anchor!(
@@ -206,7 +206,8 @@ fn palette_body(
                                 strikes.push(TagStrike::Remove(tag.clone()));
                             }
                         }
-                        let require = tag_action(ui, water, Some('+'), "require tag");
+                        let require =
+                            tag_action(ui, water, Some(chrome::Symbol::Add), "require tag");
                         if require.as_ref().is_some_and(|response| {
                             crate::probe_anchor!(
                                 ui,
@@ -217,7 +218,8 @@ fn palette_body(
                         }) {
                             strikes.push(TagStrike::Require(tag.clone()));
                         }
-                        let exclude = tag_action(ui, water, Some('−'), "exclude tag");
+                        let exclude =
+                            tag_action(ui, water, Some(chrome::Symbol::Decrement), "exclude tag");
                         if exclude.as_ref().is_some_and(|response| {
                             crate::probe_anchor!(
                                 ui,
@@ -326,15 +328,15 @@ fn definition_tooltip(
 fn tag_action(
     ui: &mut egui::Ui,
     water: &mut crate::water::Surface,
-    glyph: Option<char>,
+    symbol: Option<chrome::Symbol>,
     hover: &'static str,
 ) -> Option<chrome::MonoglyphResponse> {
     let size = egui::Vec2::splat(chrome::MechanismSize::Small.side());
-    let Some(glyph) = glyph else {
+    let Some(symbol) = symbol else {
         let _blank = ui.allocate_space(size);
         return None;
     };
-    let response = chrome::Monoglyph::new(glyph)
+    let response = chrome::Monoglyph::symbol(symbol)
         .size(chrome::MechanismSize::Small)
         .show(ui)
         .on_hover_text(hover);

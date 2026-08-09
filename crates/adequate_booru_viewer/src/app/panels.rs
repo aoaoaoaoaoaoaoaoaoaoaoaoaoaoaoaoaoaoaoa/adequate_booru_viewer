@@ -219,7 +219,8 @@ impl Bayonet {
         );
         ui.add_space(5.0);
         let _active = ui.horizontal_wrapped(|ui| {
-            let add = controls::plunger(ui, &mut self.water, '+').on_hover_text("add group");
+            let add = controls::symbol(ui, &mut self.water, chrome::Symbol::Add)
+                .on_hover_text("add group");
             if add.clicked() {
                 actions.push(QueryAction::AddGroup { op: BoolOp::And });
             }
@@ -342,12 +343,12 @@ impl Bayonet {
                 next = Some(day);
             }
 
-            let (glyph, hint) = if armed {
-                ('×', "clear date bound")
+            let (symbol, hint) = if armed {
+                (chrome::Symbol::Remove, "clear date bound")
             } else {
-                ('+', "arm date bound at today")
+                (chrome::Symbol::Add, "arm date bound at today")
             };
-            let lever = controls::plunger(ui, &mut self.water, glyph).on_hover_text(hint);
+            let lever = controls::symbol(ui, &mut self.water, symbol).on_hover_text(hint);
             crate::probe_anchor!(
                 ui,
                 format!("date:{}:lever", id.trim_start_matches("date-")),
@@ -362,14 +363,17 @@ impl Bayonet {
 
     fn filter_library_panel(&mut self, ui: &mut egui::Ui) {
         let mut shelf_edit = self.shelf_edit.take();
+        let mut entry_edit = self.entry_edit.take();
         let actions = saved_filter_ui::library(
             ui,
             &mut self.water,
             &self.filter_selection,
             &self.filters,
             &mut shelf_edit,
+            &mut entry_edit,
         );
         self.shelf_edit = shelf_edit;
+        self.entry_edit = entry_edit;
         self.apply_saved_filter_actions(actions);
     }
 
@@ -476,8 +480,6 @@ impl Bayonet {
             "viewer esc / click outside: close",
             "viewer copy / save: export full image",
             "ctrl-wheel gallery: images per row",
-            "f10: dump water debug state",
-            "shift-f10: purge water debug dumps",
             "f12: water physics bench",
         ] {
             let _line = chrome::note(ui, line);
@@ -495,8 +497,16 @@ impl Bayonet {
                 SavedFilterAction::LoadLocalFavorites => self.load_local_favorites(),
                 SavedFilterAction::Clone(name) => self.clone_filter(&name),
                 SavedFilterAction::Delete(name) => self.delete_filter(&name),
+                SavedFilterAction::RenameEntry { from, to } => {
+                    let _renamed = self.rename_filter_to(&from, to);
+                }
                 SavedFilterAction::Moor { name, berth } => {
                     self.filters.moor(&name, &berth);
+                    self.save_config();
+                }
+                SavedFilterAction::MoorShelf { shelf, berth } => {
+                    self.filters.moor_shelf(shelf, berth);
+                    self.shelf_edit = None;
                     self.save_config();
                 }
                 SavedFilterAction::NewShelf => {
@@ -507,8 +517,6 @@ impl Bayonet {
                     self.filters.toggle_shelf(shelf);
                     self.save_config();
                 }
-                SavedFilterAction::TypeWake(wake) => self.water.text(wake),
-                SavedFilterAction::Pulse(rect) => self.water.bump(rect),
                 SavedFilterAction::ScuttleShelf(shelf) => {
                     self.filters.scuttle_shelf(shelf);
                     self.shelf_edit = None;
@@ -529,8 +537,11 @@ impl Bayonet {
                 }
                 SavedFilterAction::CommitShelfRename => {
                     if let Some(edit) = self.shelf_edit.take() {
-                        self.filters.rename_shelf(edit.shelf, &edit.name);
-                        self.save_config();
+                        if self.filters.rename_shelf(edit.shelf, &edit.name) {
+                            self.save_config();
+                        } else {
+                            self.status = format!("folder `{}` already exists", edit.name.trim());
+                        }
                     }
                 }
             }

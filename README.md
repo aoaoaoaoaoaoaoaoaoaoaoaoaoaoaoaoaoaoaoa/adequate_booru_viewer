@@ -17,21 +17,47 @@ and no, it's not an organizer.
 
 ### install
 
-linux & macos (rust 1.96+):
+linux/X11 (rust 1.96+):
 
 ```sh
 cargo install adequate_booru_viewer   # gives you the `abv` binary
 ```
 
-linux also wants a vulkan driver + X11/Wayland libs (your distro's mesa-vulkan /
-vulkan-icd and libxkbcommon). macos uses metal, nothing extra.
+you also want a Vulkan driver and X11 libraries (your distro's Mesa/Vulkan ICD
+and libxkbcommon).
 
 first launch starts an anonymous, read-only, persistent danbooru mirror which may
 grow to tens of gibibytes. pause it under `INDEX STATUS`; closing `abv` stops it.
 media bytes remain disposable cache.
 
-linux/X11 is the release-tested coordinate. wayland and macos are carried by the
-same winit/wgpu/rfd stack and platform-neutral owned code, but not release-tested.
+linux/X11 is the sole current native-host coordinate. Wayland, macOS, and
+Windows require proved Eternalist host projections before they can be claimed.
+
+### architecture
+
+ABV owns booru semantics, indexing, workers, configuration, and its gallery and
+viewer. `eternalist-apps` supplies the one-window native lifecycle and the
+logical Inspector, Cabinet, and LivingWait assemblies. Dwemer Poolrooms owns
+the physical controls, material language, and living water. The saved-filter
+active card and immutable local-favorites row remain product-specific; the
+reorderable, one-level shelved filter collection uses the shared Cabinet law.
+
+Native acceptance lives here because its fixtures, semantic targets, and
+verdicts are product behavior. `scripts/test-gui` first proves an ordinary
+uninstrumented launch, then drives the optimized witnessed binary in private
+X11, XDG, process, network, and software-graphics namespaces. It proves the
+seeded filter, rendered dry-to-wet transition, durable slate update, restart
+restoration, and return to dry.
+
+For local release-candidate work:
+
+```sh
+scripts/check
+scripts/audit
+scripts/verify-install
+scripts/test-gui
+scripts/package
+```
 
 anyway, check out how wet it is:
 

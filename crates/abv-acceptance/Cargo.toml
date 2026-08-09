@@ -1,0 +1,16 @@
+[package]
+name = "abv-acceptance"
+version = "0.1.0"
+description = "Hermetic native acceptance stories for ABV"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+abv-contract = { path = "../abv-contract", version = "0.1.0" }
+egui-tester = "0.6.0"
+serde = { version = "1.0.229", features = ["derive"] }
+
+[lints]
+workspace = true
