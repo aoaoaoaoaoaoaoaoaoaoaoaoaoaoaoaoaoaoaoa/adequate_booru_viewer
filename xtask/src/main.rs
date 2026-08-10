@@ -35,12 +35,9 @@ fn main() -> Result<()> {
 /// touches the destination after a successful compile, so a broken checkout
 /// cannot dislodge the previous known-good binary.
 fn release_build() -> Result<()> {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let root = manifest_dir
-        .parent()
-        .context("resolve workspace root from xtask manifest")?;
-    run("./check.py", ["verify"], &[], root)?;
-    run("cargo", ["audit"], &[], root)?;
+    let root = workspace_root()?;
+    run("./check.py", ["verify"], &[], &root)?;
+    run("cargo", ["audit"], &[], &root)?;
     let mut install = [
         "install",
         "--path",
@@ -56,7 +53,26 @@ fn release_build() -> Result<()> {
     if let Some(prefix) = developer_install_prefix()? {
         install.extend([OsString::from("--root"), prefix.into_os_string()]);
     }
-    run("cargo", install, &[], root)
+    run("cargo", install, &[], &root)
+}
+
+fn workspace_root() -> Result<PathBuf> {
+    let output = Command::new("cargo")
+        .args(["locate-project", "--workspace", "--message-format", "plain"])
+        .output()
+        .context("locate Cargo workspace")?;
+    if !output.status.success() {
+        bail!(
+            "cargo locate-project exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let manifest = String::from_utf8(output.stdout).context("workspace path is not UTF-8")?;
+    PathBuf::from(manifest.trim())
+        .parent()
+        .map(Path::to_path_buf)
+        .context("Cargo workspace manifest has no parent")
 }
 
 /// Linux user executables canonically live in `~/.local/bin`. Other hosts
@@ -137,7 +153,7 @@ enum Mode {
 impl WetDemo {
     fn parse() -> Result<Self> {
         let mut args = env::args().skip(2);
-        let root = env::current_dir().context("resolve workspace root")?;
+        let root = workspace_root()?;
         let mut out = None;
         let mut display = None;
         let mut width = DEFAULT_W;

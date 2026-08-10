@@ -382,14 +382,13 @@ mod tests {
         Ok(())
     }
 
-    /// The pinned demo fixture must deserialize through the real loaders and
+    /// The pinned demo fixture must deserialize through the product types and
     /// keep the nested `harmless screenshot` shape the take's choreography
-    /// depends on. Guards the fixture against silent drift.
+    /// depends on. Compile-time inclusion guards both content and location
+    /// against silent drift without binding the test binary to its checkout.
     #[test]
     fn demo_fixture_is_loadable() -> Result<()> {
-        let demo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../demo/wet");
-        // Config must fail loud, so its loader is the strict path.
-        let config = Config::load(&demo.join("config.toml"))?;
+        let config: Config = toml::from_str(include_str!("../../../demo/wet/config.toml"))?;
         let names = config
             .filters
             .shelves
@@ -400,8 +399,7 @@ mod tests {
         let screenshot = &config.filters.shelves[0].filters[0];
         assert_eq!(screenshot.name.as_str(), "harmless screenshot");
         assert_eq!(screenshot.active_group, vec![0_usize, 1]);
-        // Slate decays to defaults on error, which would mask a typo; parse strict.
-        let slate: Slate = toml::from_str(&std::fs::read_to_string(demo.join("slate.toml"))?)?;
+        let slate: Slate = toml::from_str(include_str!("../../../demo/wet/slate.toml"))?;
         assert_eq!(
             slate.filter.saved().map(FilterName::as_str),
             Some("harmless screenshot")

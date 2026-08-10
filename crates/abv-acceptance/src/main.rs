@@ -12,15 +12,14 @@ use serde::Deserialize;
 
 const TITLE: &str = "adequate booru viewer";
 const SLATE: &str = "xdg/state/adequate_booru_viewer/slate.toml";
+const DEMO_CONFIG: &[u8] = include_bytes!("../../../demo/wet/config.toml");
+const DEMO_SLATE: &[u8] = include_bytes!("../../../demo/wet/slate.toml");
 
 fn main() -> Result<()> {
     let cli = Cli::parse()?;
     let binary = env::var_os("ABV_ACCEPTANCE_BINARY")
         .map(PathBuf::from)
         .map_or_else(sibling_binary, Ok)?;
-    let root = env::var_os("ABV_CHECKOUT")
-        .map(PathBuf::from)
-        .map_or_else(checkout_root, Ok)?;
     let artifacts = cli
         .artifacts
         .or_else(|| env::var_os("ABV_ACCEPTANCE_ARTIFACTS").map(PathBuf::from));
@@ -29,7 +28,7 @@ fn main() -> Result<()> {
         builder = builder.failure_artifacts(artifacts);
     }
     builder.run(|testbed| {
-        seed(testbed, &root)?;
+        seed(testbed)?;
         let harness = Harness {
             testbed,
             binary: &binary,
@@ -197,17 +196,11 @@ fn visible(frame: &Frame) -> bool {
     painted > total / 4
 }
 
-fn seed(testbed: &Testbed, root: &Path) -> Result<()> {
-    let demo = root.join("demo/wet");
-    let mut config =
-        std::fs::read(demo.join("config.toml")).map_err(|source| egui_tester::Error::Io {
-            operation: "read ABV acceptance config",
-            path: demo.join("config.toml"),
-            source,
-        })?;
+fn seed(testbed: &Testbed) -> Result<()> {
+    let mut config = DEMO_CONFIG.to_vec();
     config.extend_from_slice(b"\n[mirror]\npolicy = \"paused\"\n");
     let _config = testbed.write_private("xdg/config/adequate_booru_viewer/config.toml", &config)?;
-    let _slate = testbed.copy_private(SLATE, demo.join("slate.toml"))?;
+    let _slate = testbed.write_private(SLATE, DEMO_SLATE)?;
     Ok(())
 }
 
@@ -222,16 +215,6 @@ fn sibling_binary() -> Result<PathBuf> {
         .map(|parent| parent.join("abv"))
         .ok_or_else(|| egui_tester::Error::Verdict {
             detail: "acceptance executable has no sibling directory".to_owned(),
-        })
-}
-
-fn checkout_root() -> Result<PathBuf> {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .ok_or_else(|| egui_tester::Error::Verdict {
-            detail: "ABV acceptance manifest is outside a workspace".to_owned(),
         })
 }
 
