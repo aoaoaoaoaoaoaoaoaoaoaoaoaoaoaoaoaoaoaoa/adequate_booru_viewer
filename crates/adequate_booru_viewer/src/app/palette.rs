@@ -144,7 +144,10 @@ impl Bayonet {
     }
 
     pub(super) fn retain_tag_menu(&mut self, ctx: &egui::Context, menu_opened: bool) {
-        if matches!(self.tag_menu, TagMenu::Closed) {
+        if matches!(self.tag_menu, TagMenu::Closed)
+            || self.guide.is_open()
+            || ctx.memory(|memory| memory.top_modal_layer().is_some())
+        {
             return;
         }
         let escaped = ctx.input(|input| input.key_pressed(egui::Key::Escape));

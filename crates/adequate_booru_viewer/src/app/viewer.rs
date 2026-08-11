@@ -84,14 +84,14 @@ pub(super) fn viewer_title_bar(
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             let _row = ui.horizontal(|ui| {
-                let _link = ui
-                    .hyperlink_to(
-                        egui::RichText::new(viewer_id_date(post))
-                            .size(13.0)
-                            .strong(),
-                        crate::booru::post_url(post.id),
-                    )
-                    .on_hover_text("open on Danbooru");
+                let link = ui.hyperlink_to(
+                    egui::RichText::new(viewer_id_date(post))
+                        .size(13.0)
+                        .strong(),
+                    crate::booru::post_url(post.id),
+                );
+                crate::probe_anchor!(ui, format!("danbooru:{}", post.id.0), link.interact_rect);
+                let _link = link.on_hover_text("open on Danbooru");
                 let _meta = ui.label(
                     egui::RichText::new(format!("score {}  fav {}", post.score, post.favs))
                         .size(13.0)
@@ -139,12 +139,22 @@ pub(super) fn viewer_title_bar(
                         if controls::plate(ui, "copy", false).clicked() {
                             actions.push(ViewerAction::Copy);
                         }
-                        if surface == ViewerSurface::Image
-                            && controls::plate(ui, "tags", tags_open)
-                                .on_hover_text("toggle tags (Tab)")
-                                .clicked()
-                        {
-                            actions.push(ViewerAction::Tags);
+                        if surface == ViewerSurface::Image {
+                            let spec = commands::canon().spec(Edict::ToggleViewerTags);
+                            let response = ui.add(
+                                egui::Button::new(spec.widget_text(ui))
+                                    .selected(tags_open)
+                                    .min_size(egui::vec2(24.0, 20.0)),
+                            );
+                            chrome::tension(ui, &response);
+                            let response = response.on_hover_text(format!(
+                                "toggle tags ({})",
+                                commands::canon().shortcuts(Edict::ToggleViewerTags)[0]
+                                    .label(ui.ctx())
+                            ));
+                            if chrome::exact_activation(ui, &response) {
+                                actions.push(ViewerAction::Tags);
+                            }
                         }
                     });
             });
@@ -480,10 +490,9 @@ impl Bayonet {
     pub(super) fn full_frame(&mut self, ctx: &egui::Context) {
         self.water
             .begin_pond(self.zoom.is_some() && self.viewer_surface == ViewerSurface::Image);
-        if self.zoom.is_some() && self.viewer_surface == ViewerSurface::Image && tab_pressed(ctx) {
-            self.toggle_viewer_tags();
-        }
-        if self.zoom.is_some() && !ctx.text_edit_focused() {
+        let inputs_blocked =
+            self.guide.is_open() || ctx.memory(|memory| memory.top_modal_layer().is_some());
+        if !inputs_blocked && self.zoom.is_some() && !ctx.text_edit_focused() {
             let key = ctx.input(|input| {
                 [
                     (egui::Key::ArrowLeft, KinStep::Previous),
@@ -565,7 +574,7 @@ impl Bayonet {
                         ViewerAction::Copy => self.copy_full(post.id),
                         ViewerAction::Save => self.save_full(&post),
                         ViewerAction::Favorite => self.toggle_local_favorite(post.id),
-                        ViewerAction::Tags => self.toggle_viewer_tags(),
+                        ViewerAction::Tags => self.toggle_viewer_tags(ctx),
                         ViewerAction::Kin(step) => self.navigate_kin(step),
                         ViewerAction::Close => close = true,
                     }
@@ -613,10 +622,16 @@ impl Bayonet {
                                     {
                                         self.water.touch(pos);
                                     }
-                                    if response.secondary_clicked() && !self.open_family_tree() {
+                                    if !inputs_blocked
+                                        && response.secondary_clicked()
+                                        && !self.open_family_tree()
+                                    {
                                         self.rebuff_family_pullback(ctx, response.rect);
                                     }
-                                    if response.hovered() && !response.dragged() && wheel(ctx) < 0.0
+                                    if !inputs_blocked
+                                        && response.hovered()
+                                        && !response.dragged()
+                                        && wheel(ctx) < 0.0
                                     {
                                         let _opened = self.open_family_tree();
                                     }
@@ -646,11 +661,13 @@ impl Bayonet {
         if let Some(window) = &window {
             self.zoom_rect = Some(window.response.rect);
         }
-        let clicked_outside = window
-            .as_ref()
-            .is_some_and(|window| outside_click(ctx, window.response.rect));
-        close |=
-            !self.tag_menu.is_open() && ctx.input(|input| input.key_pressed(egui::Key::Escape));
+        let clicked_outside = !inputs_blocked
+            && window
+                .as_ref()
+                .is_some_and(|window| outside_click(ctx, window.response.rect));
+        close |= !inputs_blocked
+            && !self.tag_menu.is_open()
+            && ctx.input(|input| input.key_pressed(egui::Key::Escape));
         if close || (self.zoom_gate == ZoomGate::Armed && clicked_outside) {
             self.zoom = None;
             self.viewer_gallery_anchor = None;
@@ -695,7 +712,10 @@ impl Bayonet {
         self.family_water.begin(crate::water::Domain::basin(pond));
         self.family_water
             .set_floor(Some(crate::water::Floor::deep(pond)));
-        let wheel = if pond.contains(ui.ctx().pointer_latest_pos().unwrap_or_default()) {
+        let wheel = if !self.guide.is_open()
+            && ui.ctx().memory(|memory| memory.top_modal_layer().is_none())
+            && pond.contains(ui.ctx().pointer_latest_pos().unwrap_or_default())
+        {
             take_wheel(ui.ctx())
         } else {
             0.0
@@ -856,9 +876,10 @@ impl Bayonet {
         });
     }
 
-    fn toggle_viewer_tags(&mut self) {
+    pub(super) fn toggle_viewer_tags(&mut self, ctx: &egui::Context) {
         self.viewer_tags_open = !self.viewer_tags_open;
         self.save_config();
+        ctx.request_repaint();
     }
 }
 
@@ -889,22 +910,6 @@ fn full_image_box(
         (screen.y * 0.9 - VIEWER_CHROME).max(64.0),
     );
     contain_native(image, bounds)
-}
-
-fn tab_pressed(ctx: &egui::Context) -> bool {
-    ctx.input(|input| {
-        input.events.iter().any(|event| {
-            matches!(
-                event,
-                egui::Event::Key {
-                    key: egui::Key::Tab,
-                    pressed: true,
-                    repeat: false,
-                    ..
-                }
-            )
-        })
-    })
 }
 
 fn save_filename(post: &PostRecord, url: &str) -> String {

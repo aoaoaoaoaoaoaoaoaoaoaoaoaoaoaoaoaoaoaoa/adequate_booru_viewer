@@ -65,12 +65,21 @@ scripts/audit
 scripts/verify-install
 scripts/test-gui
 scripts/test-wayland
+
+# Cargo verifies a packaged path dependency through its registry declaration.
+# A new contract must therefore cross the registry boundary before the app
+# tarball can be judged in the same isolated manner.
+cargo package --locked --package abv-contract
+if [ "$mode" = publish ]; then
+    publish_once abv-contract "$contract_version"
+elif ! is_published abv-contract "$contract_version"; then
+    die "abv-contract@$contract_version must be published before the app package can be verified"
+fi
 scripts/package
 
 if [ "$mode" = publish ]; then
-    publish_once abv-contract "$contract_version"
     publish_once adequate_booru_viewer "$version"
     scripts/package
 else
-    printf 'release candidate v%s passed; publication was not requested\n' "$version"
+    printf 'release candidate v%s is clean and packaged; publication was not requested\n' "$version"
 fi

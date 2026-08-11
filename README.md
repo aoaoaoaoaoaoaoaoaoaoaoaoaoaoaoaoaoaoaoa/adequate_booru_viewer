@@ -38,22 +38,39 @@ the release-tested native coordinates are Linux/X11, Linux/Wayland, macOS on
 Apple and Intel silicon, and 64-bit Windows. `abv --pause-mirror` starts with
 the mirror valve closed for deterministic or disconnected work.
 
+### keyboard
+
+press `F1` or `?` for the generated command guide. `Tab` and `Shift+Tab` move
+within the active inspector panel; physical `Control+Tab` and
+`Control+Shift+Tab` cross panels. `Alt+F` focuses the tag entry, `Alt+G` selects
+the next Boolean group, and `Alt+Shift+G` selects the previous one. Completion
+suggestions retain local `Tab` and `Shift+Tab` while the tag entry owns them.
+
+the full viewer uses `T` for its tag drawer, arrows for family navigation,
+`Shift+Left` and `Shift+Right` for global results, and `Escape` to return to the
+gallery. The guide is modal: application commands and panel traversal remain
+dormant until it closes, then the prior focus target is restored.
+
 ### architecture
 
-ABV owns booru semantics, indexing, workers, configuration, and its gallery and
-viewer. `eternalist-apps` supplies the one-window native lifecycle and the
-logical Inspector, Cabinet, and LivingWait assemblies. Dwemer Poolrooms owns
-the physical controls, material language, and living water. The saved-filter
-active card and immutable local-favorites row remain product-specific; the
-reorderable, one-level shelved filter collection uses the shared Cabinet law.
+ABV owns booru semantics, indexing, workers, configuration, typed command
+consequences, and its gallery and viewer. `eternalist-apps` supplies the
+one-window native lifecycle and the logical Inspector, Cabinet, LivingWait,
+CommandGuide, CommandCanon, and PanelNavigator assemblies. Dwemer Poolrooms
+owns the physical controls, material language, and living water. The
+saved-filter active card and immutable local-favorites row remain
+product-specific; the reorderable, one-level shelved filter collection uses
+the shared Cabinet law.
 
 Native acceptance lives here because its fixtures, semantic targets, and
 verdicts are product behavior. `scripts/test-gui` first proves an ordinary
 uninstrumented launch, then drives the optimized witnessed binary in private
 X11, XDG, process, network, and software-graphics namespaces. It proves the
-seeded filter, rendered dry-to-wet transition, durable slate update, restart
-restoration, and return to dry. `scripts/test-wayland` owns the narrower native
-launch, first-present, typed-witness, and nonblack compositor-capture gate.
+seeded filter, generated help pixels, modal containment, keyboard-only panel
+and query movement, focused rail adjustment, rendered dry-to-wet transition,
+durable slate update, restart restoration, native clipboard copy, and browser
+dispatch. `scripts/test-wayland` owns the narrower native launch,
+first-present, typed-witness, and nonblack compositor-capture gate.
 
 For local release-candidate work:
 

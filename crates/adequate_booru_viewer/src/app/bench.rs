@@ -5,7 +5,10 @@ use std::f32::consts::TAU;
 
 impl super::Bayonet {
     pub(super) fn bench(&mut self, ctx: &egui::Context) {
-        if ctx.input(|input| input.key_pressed(egui::Key::F12)) {
+        if !self.guide.is_open()
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && ctx.input(|input| input.key_pressed(egui::Key::F12))
+        {
             self.bench_open = !self.bench_open;
         }
         if !self.bench_open {

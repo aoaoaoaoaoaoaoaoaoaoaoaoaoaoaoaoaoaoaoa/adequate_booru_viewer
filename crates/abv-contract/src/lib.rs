@@ -2,7 +2,7 @@
 
 use std::{borrow::Cow, fmt};
 
-pub const UI_FINGERPRINT: &str = "abv.ui/1";
+pub const UI_FINGERPRINT: &str = "abv.ui/2";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Water {
@@ -24,6 +24,11 @@ impl Water {
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Target {
+    CommandGuide,
+    Help,
+    ImagesPerRow,
+    Panel(&'static str),
+    TagEntry,
     UiRecess,
     Water(Water),
     Filter(Cow<'static, str>),
@@ -34,6 +39,11 @@ impl Target {
     #[must_use]
     pub fn wire(&self) -> Cow<'static, str> {
         match self {
+            Self::CommandGuide => Cow::Borrowed("application.command-guide"),
+            Self::Help => Cow::Borrowed("application.help"),
+            Self::ImagesPerRow => Cow::Borrowed("gallery.images-per-row"),
+            Self::Panel(name) => Cow::Owned(format!("panel/{name}")),
+            Self::TagEntry => Cow::Borrowed("query.tag-entry"),
             Self::UiRecess => Cow::Borrowed("recess:ui"),
             Self::Water(mode) => Cow::Owned(format!("water:{}", mode.wire())),
             Self::Filter(name) => Cow::Owned(format!("cabinet.filters.entry/{name}")),
@@ -56,5 +66,20 @@ mod tests {
     fn water_targets_have_disjoint_identity() {
         assert_ne!(Target::Water(Water::Dry), Target::Water(Water::Wet));
         assert_eq!(Target::UiRecess.wire(), "recess:ui");
+    }
+
+    #[test]
+    fn command_chrome_has_stable_identity() {
+        assert_eq!(Target::Help.wire(), "application.help");
+        assert_eq!(Target::CommandGuide.wire(), "application.command-guide");
+        assert_eq!(
+            Target::Panel("reference-query").wire(),
+            "panel/reference-query"
+        );
+        assert_ne!(Target::Help.wire(), Target::CommandGuide.wire());
+        assert_ne!(
+            Target::TagEntry.wire(),
+            Target::Panel("reference-query").wire()
+        );
     }
 }

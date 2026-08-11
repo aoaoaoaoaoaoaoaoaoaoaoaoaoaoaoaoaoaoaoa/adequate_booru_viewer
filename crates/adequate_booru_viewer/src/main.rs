@@ -8,12 +8,15 @@ macro_rules! probe_anchor {
     ($ui:expr, $name:expr, $rect:expr) => {{
         #[cfg(any(feature = "devtools", feature = "egui-test"))]
         {
-            let name = $name;
-            #[cfg(feature = "egui-test")]
-            $crate::witness::anchor($ui, &name, $rect);
-            #[cfg(feature = "devtools")]
-            if $crate::probe::probing() {
-                $crate::probe::record($ui, name.to_string(), $rect);
+            let rect = $rect;
+            if rect.is_positive() {
+                let name = $name;
+                #[cfg(feature = "egui-test")]
+                $crate::witness::anchor($ui, &name, rect);
+                #[cfg(feature = "devtools")]
+                if $crate::probe::probing() {
+                    $crate::probe::record($ui, name.to_string(), rect);
+                }
             }
         }
     }};
@@ -34,6 +37,7 @@ mod probe;
 
 mod app;
 mod booru;
+mod commands;
 mod config;
 mod controls;
 mod date;

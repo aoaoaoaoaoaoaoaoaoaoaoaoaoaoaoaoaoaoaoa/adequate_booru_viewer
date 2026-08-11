@@ -10,6 +10,7 @@ use std::{
 use crate::{
     booru::TagDefinition,
     chrome,
+    commands::{self, Edict},
     config::{
         Config, FilterName, FilterSelection, MirrorConfig, MirrorPolicy, QueryConfig, SavedFilter,
         Slate, WaterMode,
@@ -50,6 +51,12 @@ mod water;
 use refresh::{AsyncPulse, PulseGate};
 use scroll::ThumbCruise;
 use viewer::{FullWait, ViewerSurface, ZoomGate};
+
+use eternalist_apps::{
+    command_guide::CommandGuide,
+    commands::{CommandDispatch, CommandStatus},
+    panel_navigation::PanelNavigator,
+};
 
 const INITIAL_RESULT_HORIZON: usize = 360;
 const RESULT_HORIZON_GROWTH: usize = 2;
@@ -154,6 +161,9 @@ pub struct Bayonet {
     /// slate; keyed by section id, `true` ⇒ open. Seeded from the slate and
     /// updated whenever a recess is thrown.
     shutters: BTreeMap<String, bool>,
+    panels: PanelNavigator,
+    guide: CommandGuide,
+    focus_tag_entry: bool,
     tag_menu: TagMenu,
     tag_menu_rect: Option<egui::Rect>,
     menu_cuts: Option<(egui::Rect, egui::Rect)>,
@@ -207,6 +217,15 @@ impl Bayonet {
             result_posts: self.hit.posts.len(),
             text_edit_focused,
             ui_open: self.shutters.get("ui-controls").copied().unwrap_or(false),
+            query_open: self
+                .shutters
+                .get("reference-query")
+                .copied()
+                .unwrap_or(true),
+            active_group: self.active_group.clone(),
+            images_per_row: self.images_per_row,
+            guide_open: self.guide.is_open(),
+            viewer_tags_open: self.viewer_tags_open,
         }
     }
 
@@ -364,6 +383,9 @@ impl Bayonet {
                 .images_per_row
                 .clamp(MIN_IMAGES_PER_ROW, MAX_IMAGES_PER_ROW),
             shutters: slate.shutters,
+            panels: PanelNavigator::default(),
+            guide: CommandGuide::default(),
+            focus_tag_entry: false,
             tag_menu: TagMenu::Closed,
             tag_menu_rect: None,
             menu_cuts: None,
@@ -457,41 +479,85 @@ impl Bayonet {
     pub fn pulse(&mut self, ui: &mut egui::Ui) {
         crate::probe_reset!(ui.ctx());
         let ctx = ui.ctx().clone();
+        let guide_invoked = self.guide.take_shortcuts(&ctx);
+        if !guide_invoked && !self.guide.is_open() && !self.tag_menu.is_open() && !self.bench_open {
+            let context = if self.zoom.is_some() {
+                commands::Context::Viewer
+            } else {
+                commands::Context::Workbench
+            };
+            if let Some(dispatch) =
+                commands::canon().route(&ctx, &[context], |edict| self.edict_status(edict))
+            {
+                self.apply_edict(&ctx, dispatch);
+            }
+        }
         self.zoom_tiles(&ctx);
         self.drain(&ctx);
         self.flush_pulse_gates(&ctx);
         self.flush_config(&ctx);
-        self.cycle_query_group(&ctx);
         self.paint(ui);
         self.bench(&ctx);
+        self.command_guide(ui);
     }
 
-    fn cycle_query_group(&mut self, ctx: &egui::Context) {
-        if self.zoom.is_some()
-            || self.tag_menu.is_open()
-            || ctx.text_edit_focused()
-            || self.tag_entry_arms_completion()
-        {
-            return;
+    fn edict_status(&self, edict: Edict) -> CommandStatus<'static> {
+        match edict {
+            Edict::NextQueryGroup
+                if self
+                    .query
+                    .cycle_group_path(&self.active_group, GroupCycle::Forward)
+                    == self.active_group =>
+            {
+                CommandStatus::Disabled("the query has only one group")
+            }
+            Edict::PreviousQueryGroup
+                if self
+                    .query
+                    .cycle_group_path(&self.active_group, GroupCycle::Backward)
+                    == self.active_group =>
+            {
+                CommandStatus::Disabled("the query has only one group")
+            }
+            Edict::ToggleViewerTags
+                if self.zoom.is_some() && self.viewer_surface == ViewerSurface::Family =>
+            {
+                CommandStatus::Hidden
+            }
+            Edict::FocusTagEntry
+            | Edict::NextQueryGroup
+            | Edict::PreviousQueryGroup
+            | Edict::ToggleViewerTags => CommandStatus::Enabled,
         }
-        let cycle = ctx.input_mut(take_tab_cycle);
-        let Some(cycle) = cycle else {
-            return;
+    }
+
+    fn apply_edict(&mut self, ctx: &egui::Context, dispatch: CommandDispatch<'_, Edict>) {
+        let edict = match dispatch {
+            CommandDispatch::Invoke(edict) => edict,
+            CommandDispatch::Refused { reason, .. } => {
+                self.status = format!("unavailable: {reason}");
+                return;
+            }
         };
-        if let Some(focus) = ctx.memory(|mem| mem.focused()) {
-            ctx.memory_mut(|mem| mem.surrender_focus(focus));
+        match edict {
+            Edict::FocusTagEntry => {
+                let _prior = self.shutters.insert("reference-query".to_owned(), true);
+                self.focus_tag_entry = true;
+                self.save_config();
+            }
+            Edict::NextQueryGroup => self.cycle_query_group(GroupCycle::Forward),
+            Edict::PreviousQueryGroup => self.cycle_query_group(GroupCycle::Backward),
+            Edict::ToggleViewerTags => self.toggle_viewer_tags(ctx),
         }
+    }
+
+    fn cycle_query_group(&mut self, cycle: GroupCycle) {
         let active = self.query.cycle_group_path(&self.active_group, cycle);
         if self.active_group != active {
             self.active_group = active;
             self.sync_active_filter();
             self.save_config();
-            ctx.request_repaint();
         }
-    }
-
-    fn tag_entry_arms_completion(&self) -> bool {
-        active_prefix(&self.tag_entry).is_some()
     }
 
     /// Optical veil for the boiler's water pass, in logical points. The active
@@ -1531,7 +1597,10 @@ impl Bayonet {
     }
 
     fn zoom_tiles(&mut self, ctx: &egui::Context) {
-        if self.tag_menu.is_open() {
+        if self.guide.is_open()
+            || self.tag_menu.is_open()
+            || ctx.memory(|memory| memory.top_modal_layer().is_some())
+        {
             return;
         }
         let steps = ctx.input(|input| {
@@ -1837,7 +1906,7 @@ fn active_prefix(text: &str) -> Option<ActivePrefix> {
     })
 }
 
-fn take_tab_cycle(input: &mut egui::InputState) -> Option<GroupCycle> {
+fn take_completion_cycle(input: &mut egui::InputState) -> Option<GroupCycle> {
     if input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab) {
         Some(GroupCycle::Backward)
     } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
@@ -2104,9 +2173,11 @@ impl Drop for Bayonet {
 impl Bayonet {
     fn paint(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        let mut panels = std::mem::take(&mut self.panels);
         let inspector = eternalist_apps::Inspector::new("filter")
             .scroll_id("filter-scroll")
-            .show(ui, |ui| self.left_panel(ui));
+            .show(ui, |ui| self.left_panel(ui, &mut panels));
+        self.panels = panels;
         self.water.heave(&ctx, inspector.scroll_offset);
         let prior = self.tag_menu.post_id();
         self.tag_menu_rect = None;
@@ -2123,6 +2194,35 @@ impl Bayonet {
         }
         self.retain_tag_menu(&ctx, menu_opened);
         self.full_frame(&ctx);
+    }
+
+    fn command_guide(&mut self, ui: &egui::Ui) {
+        let context = if self.zoom.is_some() {
+            commands::Context::Viewer
+        } else {
+            commands::Context::Workbench
+        };
+        let idioms = if context == commands::Context::Viewer {
+            &commands::VIEWER_CONTEXT_IDIOMS[..]
+        } else {
+            &commands::WORKBENCH_IDIOMS[..]
+        };
+        let mut guide = std::mem::take(&mut self.guide);
+        guide.show(
+            ui.ctx(),
+            commands::canon(),
+            &[context],
+            |scope| match scope {
+                commands::Context::Workbench => "REFERENCE WORKBENCH",
+                commands::Context::Viewer => "IMAGE VIEWER",
+            },
+            |edict| self.edict_status(edict),
+            idioms,
+        );
+        if let Some(rect) = guide.rect() {
+            crate::witness::rect(ui.ctx(), abv_contract::Target::CommandGuide, rect);
+        }
+        self.guide = guide;
     }
 }
 

@@ -32,8 +32,12 @@ impl Bayonet {
                 self.status = format!("{err:#}");
             }
         }
-        let owns_keys = focused || !ui.ctx().text_edit_focused();
-        let picked_by_key = owns_keys.then(|| ui.input_mut(take_tab_cycle)).flatten();
+        let owns_keys = !self.guide.is_open()
+            && ui.ctx().memory(|memory| memory.top_modal_layer().is_none())
+            && (focused || !ui.ctx().text_edit_focused());
+        let picked_by_key = owns_keys
+            .then(|| ui.input_mut(take_completion_cycle))
+            .flatten();
         let Some((_, suggestions)) = &self.suggest_memo else {
             return false;
         };
@@ -97,15 +101,38 @@ impl Bayonet {
         self.tag_entry.clear();
     }
 
-    pub(super) fn left_panel(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn left_panel(&mut self, ui: &mut egui::Ui, navigator: &mut PanelNavigator) {
         ui.set_width(ui.available_width());
-        self.panel_section(ui, "filter-library", "filter library", true, |this, ui| {
-            this.filter_library_panel(ui);
-        });
-        self.panel_section(ui, "active-filter", "active filter", true, |this, ui| {
-            this.active_filter_panel(ui);
-        });
+        let mut panels = navigator.frame(ui.ctx());
+        if self.focus_tag_entry {
+            let id = ui.make_persistent_id("reference-query");
+            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                id,
+                true,
+            );
+            state.set_open(true);
+            state.store(ui.ctx());
+            panels.activate(ui, "reference-query");
+        }
         self.panel_section(
+            &mut panels,
+            ui,
+            "filter-library",
+            "filter library",
+            true,
+            |this, ui| this.filter_library_panel(ui),
+        );
+        self.panel_section(
+            &mut panels,
+            ui,
+            "active-filter",
+            "active filter",
+            true,
+            |this, ui| this.active_filter_panel(ui),
+        );
+        self.panel_section(
+            &mut panels,
             ui,
             "reference-query",
             "reference query",
@@ -114,22 +141,41 @@ impl Bayonet {
                 this.query_panel(ui);
             },
         );
-        self.panel_section(ui, "gallery-controls", "gallery", false, |this, ui| {
-            this.gallery_panel(ui);
-        });
-        self.panel_section(ui, "ui-controls", "ui", false, |this, ui| {
+        self.panel_section(
+            &mut panels,
+            ui,
+            "gallery-controls",
+            "gallery",
+            false,
+            |this, ui| this.gallery_panel(ui),
+        );
+        self.panel_section(&mut panels, ui, "ui-controls", "ui", false, |this, ui| {
             this.ui_panel(ui);
         });
-        self.panel_section(ui, "help", "help", false, |_, ui| {
-            Self::help_panel(ui);
-        });
-        self.panel_section(ui, "index-status", "index status", false, |this, ui| {
-            this.index_status_panel(ui);
-        });
+        self.panel_section(
+            &mut panels,
+            ui,
+            "application",
+            "application",
+            true,
+            |this, ui| {
+                let help = this.guide.activator(ui);
+                crate::witness::response(ui, abv_contract::Target::Help, &help);
+            },
+        );
+        self.panel_section(
+            &mut panels,
+            ui,
+            "index-status",
+            "index status",
+            false,
+            |this, ui| this.index_status_panel(ui),
+        );
     }
 
     fn panel_section(
         &mut self,
+        panels: &mut eternalist_apps::panel_navigation::PanelFrame<'_>,
         ui: &mut egui::Ui,
         id: &'static str,
         title: &'static str,
@@ -137,14 +183,15 @@ impl Bayonet {
         add: impl FnOnce(&mut Self, &mut egui::Ui),
     ) {
         let open = self.shutters.get(id).copied().unwrap_or(default_open);
-        let wake = chrome::section(ui, id, title, open, |ui| add(self, ui));
-        if let Some(wake) = wake.as_ref() {
+        let section = panels.section(ui, id, title, open, |ui| add(self, ui));
+        crate::witness::response(ui, abv_contract::Target::Panel(id), &section.header);
+        if let Some(wake) = section.wake.as_ref() {
             let _prior = self
                 .shutters
                 .insert(id.to_owned(), matches!(wake.flux, chrome::FoldFlux::Open));
             self.save_config();
         }
-        self.water.fold(wake);
+        self.water.fold(section.wake);
     }
 
     fn active_filter_panel(&mut self, ui: &mut egui::Ui) {
@@ -165,10 +212,14 @@ impl Bayonet {
         let active_group = self.active_group.clone();
         let mut actions = Vec::new();
         let before = self.tag_entry.clone();
-        let focus_entry = !ui.ctx().text_edit_focused()
+        let commanded_focus = std::mem::take(&mut self.focus_tag_entry);
+        let slash_focus = !self.guide.is_open()
+            && ui.ctx().memory(|memory| memory.top_modal_layer().is_none())
+            && !ui.ctx().text_edit_focused()
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Slash));
+        let focus_entry = commanded_focus || slash_focus;
         let entry_id = ui.make_persistent_id("tag-entry");
-        if focus_entry {
+        if slash_focus {
             discard_text(ui, "/");
         }
         let seeded_entry = !focus_entry && self.seed_tag_entry(ui);
@@ -184,6 +235,7 @@ impl Bayonet {
             text.show(ui)
         });
         let entry = output.inner.response.clone();
+        crate::witness::response(ui, abv_contract::Target::TagEntry, &entry);
         crate::probe_anchor!(ui, "field:tag-entry", entry.interact_rect);
         if seeded_entry {
             let tail = egui::text::CCursor::new(self.tag_entry.chars().count());
@@ -198,7 +250,9 @@ impl Bayonet {
             self.water.text(wake);
         }
         let accepted_completion = self.autocomplete(ui, entry.has_focus());
-        let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
+        let enter = !self.guide.is_open()
+            && ui.ctx().memory(|memory| memory.top_modal_layer().is_none())
+            && ui.input(|input| input.key_pressed(egui::Key::Enter));
         if !accepted_completion && enter && (entry.has_focus() || entry.lost_focus()) {
             self.commit_tag_entry();
         }
@@ -229,7 +283,12 @@ impl Bayonet {
     }
 
     fn seed_tag_entry(&mut self, ui: &mut egui::Ui) -> bool {
-        if self.zoom.is_some() || self.tag_menu.is_open() || ui.ctx().text_edit_focused() {
+        if self.guide.is_open()
+            || self.zoom.is_some()
+            || self.tag_menu.is_open()
+            || ui.ctx().text_edit_focused()
+            || ui.ctx().memory(|memory| memory.top_modal_layer().is_some())
+        {
             return false;
         }
         let seed = ui.input_mut(|input| {
@@ -296,6 +355,7 @@ impl Bayonet {
             &mut self.images_per_row,
             MIN_IMAGES_PER_ROW..=MAX_IMAGES_PER_ROW,
         );
+        crate::witness::response(ui, abv_contract::Target::ImagesPerRow, &rail);
         self.water.rail(&rail);
         if rail.changed() {
             self.advance_thumb_epoch();
@@ -454,35 +514,6 @@ impl Bayonet {
         if changed {
             self.save_config();
             ui.ctx().request_repaint();
-        }
-    }
-
-    fn help_panel(ui: &mut egui::Ui) {
-        for line in [
-            "enter: add typed tag(s) to highlighted group",
-            "/: focus tag field",
-            "tag field tab / shift-tab: cycle completions",
-            "global tab / shift-tab: cycle reference-query groups",
-            "-tag: add a negative tag atom",
-            "gallery dates: restrict by upload chronology",
-            "right-click thumbnail: inspect tags",
-            "thumbnail tag menu: + require, - exclude, × remove",
-            "click thumbnail: open full viewer",
-            "gallery ungrouped / grouped: separate or collapse parent trees",
-            "viewer tab / tags: toggle image tags",
-            "viewer arrows / drag: navigate parent, level, and first child",
-            "viewer shift-left / shift-right: navigate global results",
-            "viewer right-click / wheel-down: family tree",
-            "tree wheel: zoom",
-            "tree drag: pan camera; arrows: select relative",
-            "tree enter / click: open selected image",
-            "viewer click image: touch water",
-            "viewer esc / click outside: close",
-            "viewer copy / save: export full image",
-            "ctrl-wheel gallery: images per row",
-            "f12: water physics bench",
-        ] {
-            let _line = chrome::note(ui, line);
         }
     }
 
