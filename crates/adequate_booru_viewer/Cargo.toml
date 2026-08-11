@@ -39,7 +39,7 @@ egui = "0.34.3"
 egui-wgpu = { version = "0.34.3", default-features = false }
 egui-winit = { version = "0.34.3", default-features = false, features = ["clipboard", "links"] }
 egui-tester-witness = { version = "0.7.0", optional = true, features = ["egui"] }
-eternalist-apps = "0.4.3"
+eternalist-apps = "0.4.4"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 memmap2 = "0.9.11"
 redb = "4.1.0"

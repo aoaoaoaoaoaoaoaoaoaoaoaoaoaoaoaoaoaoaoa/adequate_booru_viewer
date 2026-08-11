@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "adequate_booru_viewer"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "abv-contract",
  "anyhow",
@@ -770,9 +770,9 @@ checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
 
 [[package]]
 name = "eternalist-apps"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "faa1c226239faef327e117617ce3976f07f5dd05e5afed3771cd95156131d6f5"
+checksum = "09159850ac48b30652ff07062cfbb43f0719ecb396fb6518232e958343797f6a"
 dependencies = [
  "anyhow",
  "dwemer_poolrooms",
@@ -3806,7 +3806,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "serde",
