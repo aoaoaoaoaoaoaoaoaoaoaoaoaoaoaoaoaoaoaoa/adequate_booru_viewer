@@ -210,7 +210,7 @@ impl Bayonet {
         }
     }
 
-    pub fn open(ctx: &egui::Context) -> Result<Self> {
+    pub fn open(ctx: &egui::Context, pause_mirror: bool) -> Result<Self> {
         startup("app.open.enter");
         let lair = Lair::claim()?;
         startup("app.lair.claimed");
@@ -219,6 +219,11 @@ impl Bayonet {
         // persists and deleting the seed never brings it back.
         let first_run = !lair.config_path().exists();
         let config = Config::load(&lair.config_path())?;
+        let mirror_policy = if pause_mirror {
+            MirrorPolicy::Paused
+        } else {
+            config.mirror.policy
+        };
         startup("app.config.loaded");
         let local_favorites = LocalFavorites::load(lair.favorites_path())?;
         startup("app.favorites.loaded");
@@ -226,7 +231,7 @@ impl Bayonet {
         startup("app.index.opened");
         let media = MediaCache::new(lair.media_dir())?;
         startup("app.media.opened");
-        let worker = Worker::spawn(index.clone(), media, ctx.clone(), config.mirror.policy);
+        let worker = Worker::spawn(index.clone(), media, ctx.clone(), mirror_policy);
         startup("app.worker.spawned");
         let mut filters = filter_bank::forge(&config.filters);
         let mut slate = Slate::load(&lair.slate_path());
@@ -287,13 +292,13 @@ impl Bayonet {
         );
         let mut app = Self {
             status: format!("index {}", lair.index_path().display()),
-            crawl_status: if config.mirror.policy.active() {
+            crawl_status: if mirror_policy.active() {
                 "crawl waking"
             } else {
                 "paused"
             }
             .to_owned(),
-            kin_status: if config.mirror.policy.active() {
+            kin_status: if mirror_policy.active() {
                 "family index waking"
             } else {
                 "paused"
@@ -381,7 +386,7 @@ impl Bayonet {
             suggest_serial: 0,
             refetch_inflight: HashSet::new(),
             prefetch_on_hover: config.prefetch_on_hover,
-            mirror_policy: config.mirror.policy,
+            mirror_policy,
             prefetched: HashSet::new(),
             hover_arm: None,
             empty_since: None,

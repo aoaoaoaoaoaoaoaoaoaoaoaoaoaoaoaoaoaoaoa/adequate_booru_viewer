@@ -45,7 +45,7 @@ case "$mode" in
     *) die "invalid mode: $mode" ;;
 esac
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
 [ "$(git branch --show-current)" = main ] || die 'release checkout is not main'
@@ -64,13 +64,13 @@ scripts/check
 scripts/audit
 scripts/verify-install
 scripts/test-gui
+scripts/test-wayland
+scripts/package
 
 if [ "$mode" = publish ]; then
     publish_once abv-contract "$contract_version"
     publish_once adequate_booru_viewer "$version"
     scripts/package
 else
-    cargo package --locked --package abv-contract
-    cargo package --locked --no-verify --package adequate_booru_viewer
     printf 'release candidate v%s passed; publication was not requested\n' "$version"
 fi

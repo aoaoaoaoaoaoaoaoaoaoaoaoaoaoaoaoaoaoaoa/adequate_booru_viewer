@@ -1,0 +1,75 @@
+#!/bin/sh
+set -eu
+
+die() {
+    printf 'macOS package refused: %s\n' "$1" >&2
+    exit 1
+}
+
+[ "$(uname -s)" = Darwin ] || die 'host is not macOS'
+command -v cargo-packager >/dev/null 2>&1 ||
+    die 'cargo-packager 0.11.8 is required'
+[ "$(cargo packager --version)" = 'cargo-packager 0.11.8' ] ||
+    die 'cargo-packager must be exactly 0.11.8'
+command -v lipo >/dev/null 2>&1 || die 'lipo is required'
+
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+target=${CARGO_TARGET_DIR:-$root/target}
+stage=$target/universal-apple-darwin/release
+out=${ABV_PACKAGE_DIR:-${FOUNDRY_ARTIFACT_DIR:-$root/dist}}
+raw=$target/abv-macos-package-$$
+artifact=$out/adequate-booru-viewer-macos-universal.dmg
+
+[ ! -e "$artifact" ] || die "$artifact already exists"
+mkdir -p "$stage" "$out" "$raw"
+
+export MACOSX_DEPLOYMENT_TARGET=13.0
+cd "$root"
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+cargo build --release --locked --package adequate_booru_viewer --bin abv \
+    --features egui-test --target aarch64-apple-darwin
+cargo build --release --locked --package adequate_booru_viewer --bin abv \
+    --features egui-test --target x86_64-apple-darwin
+lipo -create \
+    "$target/aarch64-apple-darwin/release/abv" \
+    "$target/x86_64-apple-darwin/release/abv" \
+    -output "$stage/abv"
+lipo "$stage/abv" -verify_arch arm64 x86_64
+
+cargo packager --release --formats dmg --target universal-apple-darwin \
+    --packages adequate_booru_viewer --out-dir "$raw"
+set -- "$raw"/*.dmg
+[ "$#" -eq 1 ] && [ -f "$1" ] || die 'packager did not emit exactly one DMG'
+mv "$1" "$artifact"
+
+mount=$target/abv-dmg-mount-$$
+mkdir -p "$mount"
+mounted=false
+detach() {
+    if [ "$mounted" = true ]; then
+        hdiutil detach "$mount" >/dev/null
+    fi
+}
+trap detach EXIT HUP INT TERM
+hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$artifact" >/dev/null
+mounted=true
+[ -L "$mount/Applications" ] || die 'DMG contains no Applications drop target'
+[ "$(readlink "$mount/Applications")" = /Applications ] ||
+    die 'DMG Applications drop target is misdirected'
+binary=$mount/Adequate\ Booru\ Viewer.app/Contents/MacOS/abv
+[ -x "$binary" ] || die 'DMG contains no executable Adequate Booru Viewer app'
+[ -f "$mount/Adequate Booru Viewer.app/Contents/Resources/LICENSE-MIT" ] ||
+    die 'DMG omits the MIT license'
+lipo "$binary" -verify_arch arm64 x86_64
+"$binary" --version
+ABV_PORTABILITY_BINARY=$binary \
+ABV_PORTABILITY_ARTIFACTS=${ABV_PORTABILITY_ARTIFACTS:-$target/abv-packaged-portability} \
+    cargo run --release --locked --package abv-portability
+hdiutil detach "$mount" >/dev/null
+mounted=false
+
+(
+    cd "$out"
+    shasum -a 256 "$(basename "$artifact")" >"$(basename "$artifact").sha256"
+)
+printf 'proved %s\n' "$artifact"

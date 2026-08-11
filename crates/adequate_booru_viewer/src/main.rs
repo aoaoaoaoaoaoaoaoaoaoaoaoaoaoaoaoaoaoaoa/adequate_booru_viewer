@@ -61,18 +61,22 @@ pub(crate) use dwemer_poolrooms::{chrome, water};
 use anyhow::Result;
 
 fn main() -> Result<()> {
-    if std::env::args_os()
-        .nth(1)
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if arguments
+        .first()
         .is_some_and(|argument| argument == "--version" || argument == "-V")
     {
         println!("abv {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    let pause_mirror = arguments
+        .iter()
+        .any(|argument| argument == "--pause-mirror");
     trace::startup("main.enter");
     let ctx = egui::Context::default();
     chrome::install(&ctx);
     let trace = eternalist_apps::TraceGuard::arm()?;
-    let result = host::run(ctx);
+    let result = host::run(ctx, pause_mirror);
     trace.flush();
     result
 }

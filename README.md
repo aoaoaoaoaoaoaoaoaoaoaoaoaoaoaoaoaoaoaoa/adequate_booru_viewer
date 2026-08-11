@@ -17,21 +17,26 @@ and no, it's not an organizer.
 
 ### install
 
-linux/X11 (rust 1.96+):
+linux (rust 1.96+):
 
 ```sh
 cargo install adequate_booru_viewer   # gives you the `abv` binary
 ```
 
-you also want a Vulkan driver and X11 libraries (your distro's Mesa/Vulkan ICD
-and libxkbcommon).
+you also want a Vulkan driver and either X11 or Wayland libraries (your
+distro's Mesa/Vulkan ICD and libxkbcommon).
+
+releases also carry an unsigned universal macOS disk image and an unsigned
+64-bit current-user Windows installer. Gatekeeper or SmartScreen may require an
+explicit first-launch override.
 
 first launch starts an anonymous, read-only, persistent danbooru mirror which may
 grow to tens of gibibytes. pause it under `INDEX STATUS`; closing `abv` stops it.
 media bytes remain disposable cache.
 
-linux/X11 is the sole current native-host coordinate. Wayland, macOS, and
-Windows require proved Eternalist host projections before they can be claimed.
+the release-tested native coordinates are Linux/X11, Linux/Wayland, macOS on
+Apple and Intel silicon, and 64-bit Windows. `abv --pause-mirror` starts with
+the mirror valve closed for deterministic or disconnected work.
 
 ### architecture
 
@@ -47,7 +52,8 @@ verdicts are product behavior. `scripts/test-gui` first proves an ordinary
 uninstrumented launch, then drives the optimized witnessed binary in private
 X11, XDG, process, network, and software-graphics namespaces. It proves the
 seeded filter, rendered dry-to-wet transition, durable slate update, restart
-restoration, and return to dry.
+restoration, and return to dry. `scripts/test-wayland` owns the narrower native
+launch, first-present, typed-witness, and nonblack compositor-capture gate.
 
 For local release-candidate work:
 
@@ -56,8 +62,13 @@ scripts/check
 scripts/audit
 scripts/verify-install
 scripts/test-gui
+scripts/test-wayland
 scripts/package
 ```
+
+the pinned Eternalist Foundry workflow proves every declared host, builds and
+tests the unsigned DMG and NSIS installer, and publishes artifacts only after
+judging the complete evidence graph.
 
 anyway, check out how wet it is:
 

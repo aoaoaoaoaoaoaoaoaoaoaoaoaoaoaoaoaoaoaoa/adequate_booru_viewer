@@ -5,8 +5,9 @@ use std::{
 };
 
 use egui_tester::{
-    AppCommand, Application, Button, Condition, Frame, Graphics, Network, ReactionBudget, Result,
-    Story, Testbed, TestbedBuilder, WindowQuery, demand,
+    AppCommand, Application, Backend, Button, Condition, Error, Frame, Graphics, Network,
+    ReactionBudget, Result, Story, Testbed, TestbedBuilder, WaylandConfig, WindowQuery, X11Config,
+    demand,
 };
 use serde::Deserialize;
 
@@ -23,7 +24,7 @@ fn main() -> Result<()> {
     let artifacts = cli
         .artifacts
         .or_else(|| env::var_os("ABV_ACCEPTANCE_ARTIFACTS").map(PathBuf::from));
-    let mut builder = TestbedBuilder::default();
+    let mut builder = TestbedBuilder::default().backend(cli.backend);
     if let Some(artifacts) = &artifacts {
         builder = builder.failure_artifacts(artifacts);
     }
@@ -35,7 +36,7 @@ fn main() -> Result<()> {
             artifacts: artifacts.as_deref(),
         };
         if cli.smoke {
-            smoke(&harness)
+            smoke(&harness, cli.backend)
         } else {
             water_persists(&harness)
         }
@@ -97,7 +98,14 @@ impl<'a> Harness<'a> {
     }
 }
 
-fn smoke(harness: &Harness<'_>) -> Result<()> {
+fn smoke(harness: &Harness<'_>, backend: Backend) -> Result<()> {
+    match backend {
+        Backend::X11(_) => smoke_x11(harness),
+        Backend::Wayland(_) => smoke_wayland(harness),
+    }
+}
+
+fn smoke_x11(harness: &Harness<'_>) -> Result<()> {
     let app = harness.launch(false)?;
     let session = harness.testbed.x11_session(
         &app,
@@ -114,6 +122,26 @@ fn smoke(harness: &Harness<'_>) -> Result<()> {
     demand(
         visible(&frame),
         "uninstrumented ABV rendered only black pixels",
+    )?;
+    app.terminate()
+}
+
+fn smoke_wayland(harness: &Harness<'_>) -> Result<()> {
+    let app = harness.launch(true)?;
+    let mut witness = app.witness()?.typed::<Observation>();
+    let presented = witness.wait_surface_presented(&app, Duration::from_secs(30))?;
+    demand(
+        presented.state.contract == abv_contract::UI_FINGERPRINT,
+        format!(
+            "ABV UI contract mismatch: expected {}, observed {}",
+            abv_contract::UI_FINGERPRINT,
+            presented.state.contract
+        ),
+    )?;
+    app.wait_until(
+        Duration::from_secs(30),
+        "nonblack pixels on the headless Wayland output",
+        || Ok(visible(&harness.testbed.capture_wayland()?)),
     )?;
     app.terminate()
 }
@@ -205,7 +233,7 @@ fn seed(testbed: &Testbed) -> Result<()> {
 }
 
 fn sibling_binary() -> Result<PathBuf> {
-    let executable = env::current_exe().map_err(|source| egui_tester::Error::Io {
+    let executable = env::current_exe().map_err(|source| Error::Io {
         operation: "resolve acceptance executable",
         path: PathBuf::from("<current executable>"),
         source,
@@ -213,7 +241,7 @@ fn sibling_binary() -> Result<PathBuf> {
     executable
         .parent()
         .map(|parent| parent.join("abv"))
-        .ok_or_else(|| egui_tester::Error::Verdict {
+        .ok_or_else(|| Error::Verdict {
             detail: "acceptance executable has no sibling directory".to_owned(),
         })
 }
@@ -221,6 +249,7 @@ fn sibling_binary() -> Result<PathBuf> {
 struct Cli {
     artifacts: Option<PathBuf>,
     smoke: bool,
+    backend: Backend,
 }
 
 impl Cli {
@@ -228,28 +257,60 @@ impl Cli {
         let mut args = env::args_os().skip(1);
         let mut artifacts = None;
         let mut smoke = false;
+        let mut backend = Backend::X11(X11Config::default());
         while let Some(argument) = args.next() {
             match argument.to_str() {
                 Some("--artifacts") => {
                     artifacts = Some(PathBuf::from(args.next().ok_or_else(|| {
-                        egui_tester::Error::Verdict {
+                        Error::Verdict {
                             detail: "--artifacts requires a path".to_owned(),
                         }
                     })?));
                 }
                 Some("--smoke") => smoke = true,
+                Some("--backend") => {
+                    let value = args.next().ok_or_else(|| Error::Verdict {
+                        detail: "--backend requires x11 or wayland".to_owned(),
+                    })?;
+                    backend = match value.to_str() {
+                        Some("x11") => Backend::X11(X11Config::default()),
+                        Some("wayland") => Backend::Wayland(WaylandConfig::default()),
+                        Some(value) => {
+                            return Err(Error::Verdict {
+                                detail: format!(
+                                    "unknown acceptance backend `{value}`; expected x11 or wayland"
+                                ),
+                            });
+                        }
+                        None => {
+                            return Err(Error::Verdict {
+                                detail: "acceptance backend must be valid Unicode".to_owned(),
+                            });
+                        }
+                    };
+                }
                 Some(flag) => {
-                    return Err(egui_tester::Error::Verdict {
+                    return Err(Error::Verdict {
                         detail: format!("unknown acceptance option `{flag}`"),
                     });
                 }
                 None => {
-                    return Err(egui_tester::Error::Verdict {
+                    return Err(Error::Verdict {
                         detail: "acceptance options must be valid Unicode".to_owned(),
                     });
                 }
             }
         }
-        Ok(Self { artifacts, smoke })
+        if matches!(backend, Backend::Wayland(_)) && !smoke {
+            return Err(Error::Verdict {
+                detail: "Wayland admits launch-and-capture smoke only; native stories require X11"
+                    .to_owned(),
+            });
+        }
+        Ok(Self {
+            artifacts,
+            smoke,
+            backend,
+        })
     }
 }

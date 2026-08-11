@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+cargo build --release --locked --bin abv --features egui-test
+cargo build --release --locked --package abv-acceptance
+cargo run --release --locked --package abv-acceptance -- \
+    --smoke --backend wayland \
+    --artifacts "${ABV_ACCEPTANCE_ARTIFACTS:-/tmp/abv-wayland-artifacts}"

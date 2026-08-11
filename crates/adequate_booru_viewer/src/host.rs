@@ -2,8 +2,8 @@ use crate::app::Bayonet;
 use anyhow::Result;
 use eternalist_apps::{NativeApp, WindowSpec};
 
-pub fn run(ctx: egui::Context) -> Result<()> {
-    let app = Bayonet::open(&ctx)?;
+pub fn run(ctx: egui::Context, pause_mirror: bool) -> Result<()> {
+    let app = Bayonet::open(&ctx, pause_mirror)?;
     eternalist_apps::run(ctx, app)
 }
 
