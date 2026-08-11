@@ -29,6 +29,7 @@ pub enum Target {
     ImagesPerRow,
     Panel(&'static str),
     TagEntry,
+    ViewerSurface,
     UiRecess,
     Water(Water),
     Filter(Cow<'static, str>),
@@ -44,6 +45,7 @@ impl Target {
             Self::ImagesPerRow => Cow::Borrowed("gallery.images-per-row"),
             Self::Panel(name) => Cow::Owned(format!("panel/{name}")),
             Self::TagEntry => Cow::Borrowed("query.tag-entry"),
+            Self::ViewerSurface => Cow::Borrowed("viewer.surface"),
             Self::UiRecess => Cow::Borrowed("recess:ui"),
             Self::Water(mode) => Cow::Owned(format!("water:{}", mode.wire())),
             Self::Filter(name) => Cow::Owned(format!("cabinet.filters.entry/{name}")),
@@ -72,6 +74,7 @@ mod tests {
     fn command_chrome_has_stable_identity() {
         assert_eq!(Target::Help.wire(), "application.help");
         assert_eq!(Target::CommandGuide.wire(), "application.command-guide");
+        assert_eq!(Target::ViewerSurface.wire(), "viewer.surface");
         assert_eq!(
             Target::Panel("reference-query").wire(),
             "panel/reference-query"

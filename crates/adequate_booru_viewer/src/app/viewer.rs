@@ -202,6 +202,7 @@ fn viewer_id_date(post: &PostRecord) -> String {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ZoomGate {
     Fresh,
+    Settling,
     Armed,
 }
 
@@ -586,6 +587,11 @@ impl Bayonet {
                             egui::Layout::left_to_right(egui::Align::Min),
                             |ui| {
                                 ui.spacing_mut().item_spacing.x = gutter;
+                                crate::probe_anchor!(
+                                    ui,
+                                    abv_contract::Target::ViewerSurface,
+                                    egui::Rect::from_min_size(ui.cursor().left_top(), image_box)
+                                );
                                 if let Some(texture) = self.full.get(&post.id) {
                                     let texture_id = texture.id();
                                     let alpha = self.full_alpha(ctx, post.id);
@@ -687,7 +693,17 @@ impl Bayonet {
             self.viewer_tree_fresh = true;
             self.water.close_pond();
         } else {
-            self.zoom_gate = ZoomGate::Armed;
+            // A newly materialized fixed-size egui window settles its size and
+            // centered position on successive passes. Drive both passes now;
+            // otherwise its final placement waits for the user's next input.
+            let settling = self.zoom_gate != ZoomGate::Armed;
+            self.zoom_gate = match self.zoom_gate {
+                ZoomGate::Fresh => ZoomGate::Settling,
+                ZoomGate::Settling | ZoomGate::Armed => ZoomGate::Armed,
+            };
+            if settling {
+                ctx.request_repaint();
+            }
         }
     }
 

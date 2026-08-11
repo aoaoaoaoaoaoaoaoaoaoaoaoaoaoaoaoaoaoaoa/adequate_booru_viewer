@@ -403,22 +403,24 @@ fn native_effects(harness: &Harness<'_>) -> Result<()> {
     let tile = story.anchor(format!("tile:{EFFECT_POST}"))?;
     let (x, y) = tile.center();
     let _opened = story.session().click(x, y, Button::Primary)?;
-    let target = format!("danbooru:{EFFECT_POST}");
+    let link_target = format!("danbooru:{EFFECT_POST}");
+    let geometry_target = abv_contract::Target::ViewerSurface.to_string();
+    let geometry_quiet = Duration::from_millis(500);
     let settled = story.wait_stable(
         Duration::from_secs(5),
-        Duration::from_millis(150),
-        "viewer title geometry",
-        |frame| frame.anchor(&target).map(|anchor| anchor.rect),
+        geometry_quiet,
+        "viewer image geometry",
+        |frame| frame.anchor(&geometry_target).map(|anchor| anchor.rect),
     )?;
     demand(
         !settled.state.viewer_tags_open,
         "seeded viewer unexpectedly began with its tag drawer open",
     )?;
     let initial_rect = settled
-        .anchor(&target)
+        .anchor(&geometry_target)
         .map(|anchor| anchor.rect)
         .ok_or_else(|| Error::Verdict {
-            detail: "initial viewer frame omitted its Danbooru link".to_owned(),
+            detail: "initial viewer frame omitted its image surface".to_owned(),
         })?;
     let _tags = story.key(Key::Character('t'))?.until(Condition::new(
         "viewer tag drawer open",
@@ -426,22 +428,22 @@ fn native_effects(harness: &Harness<'_>) -> Result<()> {
     ))?;
     let opened = story.wait_stable(
         Duration::from_secs(5),
-        Duration::from_millis(150),
-        "viewer title geometry with tag drawer",
+        geometry_quiet,
+        "viewer image geometry with tag drawer",
         |frame| {
             frame
                 .state
                 .viewer_tags_open
-                .then(|| frame.anchor(&target).map(|anchor| anchor.rect))
+                .then(|| frame.anchor(&geometry_target).map(|anchor| anchor.rect))
                 .flatten()
                 .filter(|rect| *rect != initial_rect)
         },
     )?;
     let open_rect = opened
-        .anchor(&target)
+        .anchor(&geometry_target)
         .map(|anchor| anchor.rect)
         .ok_or_else(|| Error::Verdict {
-            detail: "open tag drawer frame omitted its Danbooru link".to_owned(),
+            detail: "open tag drawer frame omitted its image surface".to_owned(),
         })?;
     let _tags = story.key(Key::Character('t'))?.until(Condition::new(
         "viewer tag drawer closed",
@@ -449,17 +451,17 @@ fn native_effects(harness: &Harness<'_>) -> Result<()> {
     ))?;
     let settled = story.wait_stable(
         Duration::from_secs(5),
-        Duration::from_millis(150),
-        "viewer title geometry after closing tag drawer",
+        geometry_quiet,
+        "viewer image geometry after closing tag drawer",
         |frame| {
             (!frame.state.viewer_tags_open)
-                .then(|| frame.anchor(&target).map(|anchor| anchor.rect))
+                .then(|| frame.anchor(&geometry_target).map(|anchor| anchor.rect))
                 .flatten()
-                .filter(|rect| *rect != open_rect)
+                .filter(|rect| *rect == initial_rect && *rect != open_rect)
         },
     )?;
     let link = settled
-        .anchor(&target)
+        .anchor(&link_target)
         .cloned()
         .ok_or_else(|| Error::Verdict {
             detail: "settled viewer frame omitted its Danbooru link".to_owned(),
