@@ -25,7 +25,7 @@ path = "examples/retrieval_bench.rs"
 # Debug-only instrumentation umbrella. First tenant: the egui anchor probe
 # (src/probe.rs) the demo xtask drives. Never in the default set, so shipped
 # builds pay nothing.
-devtools = ["dep:serde_json", "dwemer_poolrooms/instrumentation"]
+devtools = ["dep:serde_json", "brass_poolrooms/instrumentation"]
 egui-test = ["dep:egui-tester-witness", "eternalist-apps/egui-test"]
 
 [dependencies]
@@ -33,13 +33,13 @@ anyhow = "1.0.104"
 arboard = "3.6.1"
 crossbeam-channel = "0.5.16"
 directories = "6.0.0"
-dwemer_poolrooms = "0.11.0"
+brass_poolrooms = "0.12.1"
 abv-contract = { path = "../abv-contract", version = "0.2.0" }
-egui = "=0.35.0"
-egui-wgpu = { version = "=0.35.0", default-features = false }
-egui-winit = { version = "=0.35.0", default-features = false, features = ["clipboard", "links"] }
-egui-tester-witness = { version = "0.8.0", optional = true, features = ["egui"] }
-eternalist-apps = "0.5.0"
+egui = "=0.36.1"
+egui-wgpu = { version = "=0.36.1", default-features = false }
+egui-winit = { version = "=0.36.1", default-features = false, features = ["clipboard", "links"] }
+egui-tester-witness = { version = "0.9.1", optional = true, features = ["egui"] }
+eternalist-apps = "0.6.1"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 memmap2 = "0.9.11"
 redb = "4.1.0"

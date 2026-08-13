@@ -1,4 +1,4 @@
-# Dwemer Poolrooms
+# Brass Poolrooms
 
 A design language for native Rust UI. Not yet hatched — adopted piecemeal, one
 widget at a time, until it can stand on its own. Where this document speaks, it
@@ -45,7 +45,7 @@ gone.
    (See `lift_spring` in the date transport.)
 
 5. **One pool; everything displaces it.** There is a single body of water under
-   the whole UI (owned by `dwemer_poolrooms::water`). Any mechanism that moves shoves it —
+   the whole UI (owned by `brass_poolrooms::water`). Any mechanism that moves shoves it —
    a roller drags a wake, a lever throws a basin, a tileset swap thumps the pool
    from beneath. A control that moves and leaves the water flat is a bug.
 
@@ -66,7 +66,7 @@ gone.
 The canonical values live in code; this points at them rather than copying them
 (copies rot).
 
-- **Tilework & ground** — `dwemer_poolrooms::chrome`: `PAGE`, `SURFACE`, `CONTROL` (the dark
+- **Tilework & ground** — `brass_poolrooms::chrome`: `PAGE`, `SURFACE`, `CONTROL` (the dark
   amber wall); `RAISED` (a woken plate); `EDGE` / `EDGE_STRONG` (lit seams).
 - **The brass ramp** — `date_spool.rs`: `BRONZE_LO` → `BRONZE_MD` → `BRONZE_HI`
   (shadowed body → lit edge), sampled by `bronze(t)`. `RECESS_EDGE` borders a

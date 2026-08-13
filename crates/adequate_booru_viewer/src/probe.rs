@@ -116,7 +116,7 @@ pub fn dump(ctx: &Context, ppp: f32, state: State) {
     let anchors = ctx
         .data_mut(|data| data.get_temp::<Anchors>(Id::new(STORE)))
         .unwrap_or_default();
-    let poolroom_anchors = dwemer_poolrooms::instrumentation::take(ctx);
+    let poolroom_anchors = brass_poolrooms::instrumentation::take(ctx);
     let frame = Frame {
         frame: ctx.cumulative_frame_nr(),
         ppp,

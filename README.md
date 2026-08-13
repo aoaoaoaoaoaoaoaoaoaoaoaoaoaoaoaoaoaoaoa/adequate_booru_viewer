@@ -56,7 +56,7 @@ dormant until it closes, then the prior focus target is restored.
 ABV owns booru semantics, indexing, workers, configuration, typed command
 consequences, and its gallery and viewer. `eternalist-apps` supplies the
 one-window native lifecycle and the logical Inspector, Cabinet, LivingWait,
-CommandGuide, CommandCanon, and PanelNavigator assemblies. Dwemer Poolrooms
+CommandGuide, CommandCanon, and PanelNavigator assemblies. Brass Poolrooms
 owns the physical controls, material language, and living water. The
 saved-filter active card and immutable local-favorites row remain
 product-specific; the reorderable, one-level shelved filter collection uses

@@ -99,7 +99,7 @@ impl From<CreatedDay> for String {
     }
 }
 
-impl dwemer_poolrooms::chrome::GregorianDay for CreatedDay {
+impl brass_poolrooms::chrome::GregorianDay for CreatedDay {
     fn ymd(self) -> (i32, u32, u32) {
         CreatedDay::ymd(self)
     }

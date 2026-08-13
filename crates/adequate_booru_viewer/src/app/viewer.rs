@@ -69,7 +69,7 @@ impl KinNav {
 
 pub(super) fn viewer_title_bar(
     ui: &mut egui::Ui,
-    water: &mut dwemer_poolrooms::water::Surface,
+    water: &mut brass_poolrooms::water::Surface,
     post: &PostRecord,
     favorite: bool,
     tags_open: bool,

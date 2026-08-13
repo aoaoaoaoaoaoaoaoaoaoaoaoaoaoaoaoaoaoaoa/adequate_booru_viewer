@@ -54,7 +54,7 @@ mod worker;
 
 pub(crate) use adequate_booru_viewer::{date, index, kin, model, trace, xdg};
 
-pub(crate) use dwemer_poolrooms::{chrome, water};
+pub(crate) use brass_poolrooms::{chrome, water};
 
 use anyhow::Result;
 
