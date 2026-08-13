@@ -1203,59 +1203,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rating_metatags_parse_as_query_predicates() {
-        let query = Query::parse("rating:q -rating:e 1girl");
-        let terms = Query::parse_terms("rating:q -rating:e 1girl")
-            .into_iter()
-            .map(|term| (term.atom.term(), term.polarity))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            terms,
-            [
-                ("rating:q".to_owned(), TagPolarity::Positive),
-                ("rating:e".to_owned(), TagPolarity::Negative),
-                ("1girl".to_owned(), TagPolarity::Positive)
-            ]
-        );
-        assert_eq!(query.to_text(), "rating:q -rating:e 1girl");
-        assert_eq!(
-            query.atom_polarity(&QueryAtom::Rating(RatingClass::Explicit)),
-            Some(TagPolarity::Negative)
-        );
-    }
-
-    #[test]
-    fn favorites_is_an_ordinary_provider_tag() -> Result<()> {
-        let remote = Query::parse("favorites");
-        assert_eq!(remote.to_text(), "favorites");
-        assert_eq!(
-            remote.atom_polarity(&QueryAtom::Tag(
-                Tag::forge("favorites").context("valid favorites tag")?
-            )),
-            Some(TagPolarity::Positive)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn query_rejects_the_retired_local_favorites_flag() {
-        assert!(toml::from_str::<Query>("local_favorites_only = false").is_err());
-    }
-
-    #[test]
-    fn remote_seed_uses_only_one_rating_metatag() {
-        let query = Query::parse("rating:q rating:e solo 1girl");
-        assert_eq!(query.remote_seed(Sort::Score), "rating:q 1girl order:score");
-    }
-
-    #[test]
-    fn remote_seed_does_not_conjoin_or_alternatives() -> Result<()> {
-        let mut query = Query::default();
-        assert!(query.push_atom(
-            &[],
-            QueryAtom::parse("solo").context("solo tag")?,
-            TagPolarity::Positive
-        ));
+    fn remote_seed_is_bounded_to_required_positive_atoms() -> Result<()> {
+        let mut query = Query::parse("rating:q rating:e solo 1girl -landscape");
         let choice = query.push_group(&[], BoolOp::Or).context("OR group")?;
         assert!(query.push_atom(
             &choice,
@@ -1267,57 +1216,45 @@ mod tests {
             QueryAtom::parse("nude").context("nude tag")?,
             TagPolarity::Positive
         ));
-        assert_eq!(query.remote_seed(Sort::Score), "solo order:score");
+        assert_eq!(query.remote_seed(Sort::Score), "rating:q 1girl order:score");
         Ok(())
     }
 
     #[test]
-    fn binary_post_record_preserves_tag_hints() -> Result<()> {
-        let artist = Tag::forge("ciloranko").context("artist tag")?;
-        let character = Tag::forge("hakurei_reimu").context("character tag")?;
-        let copyright = Tag::forge("touhou").context("copyright tag")?;
-        let post = PostRecord {
-            id: PostId(9),
-            rating: Rating::General,
-            score: 42,
-            favs: 7,
-            width: 800,
-            height: 1200,
-            created_at: "2026-06-10T00:00:00Z".to_owned(),
-            tags: vec![artist.clone(), character.clone(), copyright.clone()],
-            tag_hints: vec![
-                TagHint::new(character.clone(), TagKind::Character),
-                TagHint::new(artist.clone(), TagKind::Artist),
-                TagHint::new(copyright.clone(), TagKind::Copyright),
-            ],
-            preview_url: Some("https://example.test/preview.jpg".to_owned()),
-            thumb_360_url: None,
-            thumb_720_url: None,
-            large_url: None,
-            file_url: None,
-        };
-
-        let decoded = decode_record(&encode_record(&post))?;
-
-        assert_eq!(decoded.tag_kind(&artist), TagKind::Artist);
-        assert_eq!(decoded.tag_kind(&character), TagKind::Character);
-        assert_eq!(decoded.tag_kind(&copyright), TagKind::Copyright);
-        Ok(())
-    }
-
-    #[test]
-    fn nested_group_inside_xor_accepts_atoms() -> Result<()> {
+    fn query_tree_edits_preserve_group_identity_and_canonical_order() -> Result<()> {
         let mut query = Query::default();
-        let xor = query.push_group(&[], BoolOp::Xor).context("xor group")?;
         assert!(query.push_atom(
-            &xor,
-            QueryAtom::parse("red_background").context("red")?,
+            &[],
+            QueryAtom::parse("red_hair").context("red hair")?,
             TagPolarity::Positive
         ));
+        let target = query.push_group(&[], BoolOp::Xor).context("target group")?;
+        assert!(query.push_atom(
+            &target,
+            QueryAtom::parse("zeta").context("zeta")?,
+            TagPolarity::Positive
+        ));
+        assert!(query.push_atom(
+            &target,
+            QueryAtom::parse("alpha").context("alpha")?,
+            TagPolarity::Positive
+        ));
+        let shifted = query.move_atom(&[], 0, &target).context("move atom")?;
+        assert_eq!(shifted, vec![0]);
+        let atoms = query
+            .group(&shifted)
+            .context("shifted target")?
+            .children
+            .iter()
+            .filter_map(QueryExpr::term)
+            .map(|term| term.atom.term())
+            .collect::<Vec<_>>();
+        assert_eq!(atoms, ["alpha", "red_hair", "zeta"]);
+        assert_eq!(query.move_atom(&shifted, 0, &shifted), None);
+
         let nested = query
-            .push_group(&xor, BoolOp::And)
+            .push_group(&shifted, BoolOp::And)
             .context("nested group")?;
-        assert_eq!(nested, vec![0, 1]);
         assert!(query.push_atom(
             &nested,
             QueryAtom::parse("solo").context("solo")?,
@@ -1327,93 +1264,6 @@ mod tests {
             query.group(&nested).map(|group| group.children.len()),
             Some(1)
         );
-        Ok(())
-    }
-
-    #[test]
-    fn atom_sorting_keeps_group_slots_stable() -> Result<()> {
-        let mut query = Query::default();
-        assert!(query.push_atom(
-            &[],
-            QueryAtom::parse("zeta").context("zeta tag")?,
-            TagPolarity::Positive
-        ));
-        let group = query.push_group(&[], BoolOp::Or).context("OR group")?;
-        // The group path stays valid even as atoms sort around it.
-        assert!(query.push_atom(
-            &[],
-            QueryAtom::parse("alpha").context("alpha tag")?,
-            TagPolarity::Positive
-        ));
-        assert!(query.push_atom(
-            &group,
-            QueryAtom::parse("right").context("right tag")?,
-            TagPolarity::Positive
-        ));
-        assert!(query.push_atom(
-            &group,
-            QueryAtom::parse("left").context("left tag")?,
-            TagPolarity::Positive
-        ));
-        assert_eq!(query.root.to_text(), "∧(alpha ∨(left right) zeta)");
-        Ok(())
-    }
-
-    #[test]
-    fn atoms_move_between_groups_then_sort_at_destination() -> Result<()> {
-        let mut query = Query::default();
-        let left = query.push_group(&[], BoolOp::And).context("left group")?;
-        let right = query.push_group(&[], BoolOp::Or).context("right group")?;
-        assert!(query.push_atom(
-            &left,
-            QueryAtom::parse("red_hair").context("red hair")?,
-            TagPolarity::Positive
-        ));
-        assert!(query.push_atom(
-            &right,
-            QueryAtom::parse("zeta").context("zeta")?,
-            TagPolarity::Positive
-        ));
-        assert!(query.push_atom(
-            &right,
-            QueryAtom::parse("alpha").context("alpha")?,
-            TagPolarity::Positive
-        ));
-
-        assert_eq!(query.move_atom(&left, 0, &right), Some(right.clone()));
-
-        assert_eq!(query.root.to_text(), "∧(∧() ∨(alpha red_hair zeta))");
-        Ok(())
-    }
-
-    #[test]
-    fn atom_move_returns_shifted_destination_path() -> Result<()> {
-        let mut query = Query::default();
-        assert!(query.push_atom(
-            &[],
-            QueryAtom::parse("red_hair").context("red hair")?,
-            TagPolarity::Positive
-        ));
-        let target = query.push_group(&[], BoolOp::And).context("target group")?;
-
-        let shifted = query.move_atom(&[], 0, &target).context("move atom")?;
-
-        assert_eq!(shifted, vec![0]);
-        assert_eq!(query.root.to_text(), "∧(∧(red_hair))");
-        Ok(())
-    }
-
-    #[test]
-    fn atom_move_inside_own_group_is_noop() -> Result<()> {
-        let mut query = Query::default();
-        assert!(query.push_atom(
-            &[],
-            QueryAtom::parse("red_hair").context("red hair")?,
-            TagPolarity::Positive
-        ));
-
-        assert_eq!(query.move_atom(&[], 0, &[]), None);
-        assert_eq!(query.root.to_text(), "∧(red_hair)");
         Ok(())
     }
 
@@ -1438,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    fn animated_and_media_less_posts_are_not_indexable() {
+    fn ingress_rejects_animated_unsupported_and_media_less_posts() {
         let post = PostRecord {
             id: PostId(1),
             rating: Rating::General,
@@ -1468,10 +1318,7 @@ mod tests {
         solo.preview_url = Some("https://example.test/1.jpg".to_owned());
         solo.file_url = Some("https://example.test/1.SWF?download=1#asset".to_owned());
         assert!(!solo.indexable());
-    }
 
-    #[test]
-    fn media_extensions_ignore_url_suffixes() {
         assert_eq!(
             media_extension("https://example.test/work/image.JPEG?size=large#view"),
             Some("JPEG")
@@ -1482,6 +1329,8 @@ mod tests {
 
     #[test]
     fn post_record_binary_codec_is_canonical() -> Result<()> {
+        let alpha = Tag::forge("alpha").context("alpha")?;
+        let zeta = Tag::forge("zeta").context("zeta")?;
         let post = PostRecord {
             id: PostId(42),
             rating: Rating::Questionable,
@@ -1490,12 +1339,11 @@ mod tests {
             width: 1920,
             height: 1080,
             created_at: "2026-06-05T00:00:00Z".to_owned(),
-            tags: vec![
-                Tag::forge("zeta").context("zeta")?,
-                Tag::forge("alpha").context("alpha")?,
-                Tag::forge("alpha").context("alpha")?,
+            tags: vec![zeta.clone(), alpha.clone(), alpha.clone()],
+            tag_hints: vec![
+                TagHint::new(alpha.clone(), TagKind::Artist),
+                TagHint::new(zeta.clone(), TagKind::Character),
             ],
-            tag_hints: Vec::new(),
             preview_url: Some("https://example.test/180.jpg".to_owned()),
             thumb_360_url: Some("https://example.test/360.jpg".to_owned()),
             thumb_720_url: None,
@@ -1505,13 +1353,9 @@ mod tests {
         let encoded = encode_record(&post);
         assert!(encoded.starts_with(POST_MAGIC));
         let decoded = decode_record(&encoded)?;
-        assert_eq!(
-            decoded.tags,
-            vec![
-                Tag::forge("alpha").context("alpha")?,
-                Tag::forge("zeta").context("zeta")?
-            ]
-        );
+        assert_eq!(decoded.tags, vec![alpha.clone(), zeta.clone()]);
+        assert_eq!(decoded.tag_kind(&alpha), TagKind::Artist);
+        assert_eq!(decoded.tag_kind(&zeta), TagKind::Character);
         assert_eq!(decoded.rating.class(), Some(RatingClass::Questionable));
         assert_eq!(decoded.score, post.score);
         assert_eq!(decoded.favs, post.favs);

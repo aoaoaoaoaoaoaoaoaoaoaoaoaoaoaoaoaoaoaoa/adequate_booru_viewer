@@ -52,7 +52,9 @@ fn main() -> Result<()> {
             smoke(&harness, cli.backend)
         } else {
             keyboard_contract(&harness)?;
+            reset_slate(testbed)?;
             water_persists(&harness)?;
+            reset_slate(testbed)?;
             native_effects(&harness)?;
             println!("abv acceptance passed under {}", harness.testbed.id());
             Ok(())
@@ -516,10 +518,7 @@ fn visible(frame: &Frame) -> bool {
 }
 
 fn seed(testbed: &Testbed) -> Result<()> {
-    let mut config = DEMO_CONFIG.to_vec();
-    config.extend_from_slice(b"\n[mirror]\npolicy = \"paused\"\n");
-    let _config = testbed.write_private("xdg/config/adequate_booru_viewer/config.toml", &config)?;
-    let _slate = testbed.write_private(SLATE, DEMO_SLATE)?;
+    reset_slate(testbed)?;
     let data = testbed.create_private_dir("xdg/data/adequate_booru_viewer")?;
     let index = Index::open(&data.join("index.redb")).map_err(|error| Error::Verdict {
         detail: format!("create acceptance index: {error:#}"),
@@ -553,6 +552,14 @@ fn seed(testbed: &Testbed) -> Result<()> {
             detail: format!("seed acceptance index: {error:#}"),
         })?;
     let _effects = testbed.create_private_dir("effects")?;
+    Ok(())
+}
+
+fn reset_slate(testbed: &Testbed) -> Result<()> {
+    let mut config = DEMO_CONFIG.to_vec();
+    config.extend_from_slice(b"\n[mirror]\npolicy = \"paused\"\n");
+    let _config = testbed.write_private("xdg/config/adequate_booru_viewer/config.toml", &config)?;
+    let _slate = testbed.write_private(SLATE, DEMO_SLATE)?;
     Ok(())
 }
 

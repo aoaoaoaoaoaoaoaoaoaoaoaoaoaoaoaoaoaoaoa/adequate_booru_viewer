@@ -1,5 +1,8 @@
 use anyhow::{Context as _, Result};
-use crossbeam_channel::{Receiver, SendTimeoutError, Sender, TryIter, bounded, unbounded};
+#[cfg(test)]
+use crossbeam_channel::unbounded;
+use crossbeam_channel::{Receiver, SendTimeoutError, Sender, bounded};
+use eternalist_apps::NativeWake;
 use roaring::RoaringBitmap;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
@@ -21,6 +24,13 @@ use crate::{
 
 const DANBOORU_READ_GAP: Duration = Duration::from_millis(150);
 const SUGGESTION_LIMIT: usize = 12;
+const EVENT_CAPACITY: usize = 32;
+const REFRESH_COMMAND_CAPACITY: usize = 64;
+const WARM_COMMAND_CAPACITY: usize = 16;
+const FAMILY_COMMAND_CAPACITY: usize = 4;
+const DEFINITION_COMMAND_CAPACITY: usize = 16;
+const MEDIA_COMMAND_CAPACITY: usize = 512;
+const MEDIA_PENDING_CAPACITY: usize = 512;
 const MEDIA_FETCHERS: usize = 3;
 const MEDIA_OFFER_PATIENCE: Duration = Duration::from_millis(50);
 const CRAWL_GAP: Duration = Duration::ZERO;
@@ -197,12 +207,13 @@ pub enum Event {
     Fault(String),
 }
 
-/// Event sender that also wakes the UI event loop, so worker results paint
-/// immediately instead of waiting for the next input event.
+/// Event sender that also wakes the UI event loop while the window is focused.
+/// The bounded event channel becomes backpressure instead of a repaint clock
+/// while the application is in the background.
 #[derive(Clone)]
 pub struct Klaxon {
     tx: Sender<Event>,
-    ctx: egui::Context,
+    wake: NativeWake,
 }
 
 /// How long status-grade events may pool before a repaint shows them.
@@ -211,14 +222,14 @@ const MURMUR: Duration = Duration::from_millis(350);
 impl Klaxon {
     fn send(&self, event: Event) {
         let _sent = self.tx.send(event);
-        self.ctx.request_repaint();
+        let _woken = self.wake.request_foreground_repaint();
     }
 
-    /// For events that only move status lines: the wake-up coalesces, so a
-    /// background crawl does not force a full repaint per page.
+    /// For events that only move status lines: foreground wakes coalesce, and
+    /// a background crawl cannot force a full repaint per page.
     fn murmur(&self, event: Event) {
         let _sent = self.tx.send(event);
-        self.ctx.request_repaint_after(MURMUR);
+        let _woken = self.wake.request_foreground_repaint_after(MURMUR);
     }
 
     /// User-facing one-liner from any thread.
@@ -245,12 +256,15 @@ impl Worker {
         ctx: egui::Context,
         mirror_policy: MirrorPolicy,
     ) -> Self {
-        let (refresh_tx, refresh_rx) = unbounded();
-        let (warm_tx, warm_rx) = unbounded();
-        let (family_tx, family_rx) = unbounded();
-        let (media_tx, media_rx) = unbounded();
-        let (event_tx, event_rx) = unbounded();
-        let event_tx = Klaxon { tx: event_tx, ctx };
+        let (refresh_tx, refresh_rx) = bounded(REFRESH_COMMAND_CAPACITY);
+        let (warm_tx, warm_rx) = bounded(WARM_COMMAND_CAPACITY);
+        let (family_tx, family_rx) = bounded(FAMILY_COMMAND_CAPACITY);
+        let (media_tx, media_rx) = bounded(MEDIA_COMMAND_CAPACITY);
+        let (event_tx, event_rx) = bounded(EVENT_CAPACITY);
+        let event_tx = Klaxon {
+            tx: event_tx,
+            wake: NativeWake::from_context(&ctx),
+        };
         let crier = event_tx.clone();
         let refresh_events = event_tx.clone();
         let refresh_index = index.clone();
@@ -279,7 +293,7 @@ impl Worker {
             );
         });
         let definition_tx = booru.tag_definitions().map(|_| {
-            let (definition_tx, definition_rx) = unbounded();
+            let (definition_tx, definition_rx) = bounded(DEFINITION_COMMAND_CAPACITY);
             let definition_booru = booru.clone();
             let definition_gate = read_gate.clone();
             let definition_events = event_tx.clone();
@@ -353,7 +367,7 @@ impl Worker {
                 limit,
             } => self
                 .refresh_tx
-                .send(RefreshCommand::Search {
+                .try_send(RefreshCommand::Search {
                     serial,
                     query,
                     local_favorites,
@@ -366,21 +380,21 @@ impl Worker {
                 .context("send refresh worker command"),
             Command::Stats { serial } => self
                 .refresh_tx
-                .send(RefreshCommand::Stats { serial })
+                .try_send(RefreshCommand::Stats { serial })
                 .context("send stats worker command"),
             Command::Suggest { serial, prefix } => self
                 .refresh_tx
-                .send(RefreshCommand::Suggest { serial, prefix })
+                .try_send(RefreshCommand::Suggest { serial, prefix })
                 .context("send suggest worker command"),
             Command::Family { serial, id } => self
                 .family_tx
-                .send(FamilyCommand { serial, id })
+                .try_send(FamilyCommand { serial, id })
                 .context("send family worker command"),
             Command::TagDefinition { serial, tag } => self
                 .definition_tx
                 .as_ref()
                 .context("provider has no tag-definition source")?
-                .send(DefinitionCommand { serial, tag })
+                .try_send(DefinitionCommand { serial, tag })
                 .context("send tag-definition worker command"),
             Command::Warm {
                 query,
@@ -389,7 +403,7 @@ impl Worker {
                 pages,
             } => self
                 .warm_tx
-                .send(WarmCommand::Warm {
+                .try_send(WarmCommand::Warm {
                     query,
                     sort,
                     first_page,
@@ -403,7 +417,7 @@ impl Worker {
                 url,
             } => self
                 .media_tx
-                .send(MediaCommand::Blade {
+                .try_send(MediaCommand::Blade {
                     epoch,
                     id,
                     bucket,
@@ -412,29 +426,33 @@ impl Worker {
                 .context("send media worker command"),
             Command::CullBlades { epoch } => self
                 .media_tx
-                .send(MediaCommand::Cull { epoch })
+                .try_send(MediaCommand::Cull { epoch })
                 .context("send media worker command"),
             Command::FullBlade { id, url } => self
                 .media_tx
-                .send(MediaCommand::FullBlade { id, url })
+                .try_send(MediaCommand::FullBlade { id, url })
                 .context("send media worker command"),
             Command::SaveMedia { id, url, path } => self
                 .media_tx
-                .send(MediaCommand::Save { id, url, path })
+                .try_send(MediaCommand::Save { id, url, path })
                 .context("send media worker command"),
             Command::Refetch { id } => self
                 .warm_tx
-                .send(WarmCommand::Refetch(id))
+                .try_send(WarmCommand::Refetch(id))
                 .context("send refetch worker command"),
             Command::Prefetch { id, url } => self
                 .media_tx
-                .send(MediaCommand::Prefetch { id, url })
+                .try_send(MediaCommand::Prefetch { id, url })
                 .context("send prefetch worker command"),
         }
     }
 
-    pub fn drain(&self) -> TryIter<'_, Event> {
-        self.rx.try_iter()
+    pub fn take_event(&self) -> Option<Event> {
+        self.rx.try_recv().ok()
+    }
+
+    pub fn has_pending_events(&self) -> bool {
+        !self.rx.is_empty()
     }
 
     pub fn has_tag_definitions(&self) -> bool {
@@ -869,7 +887,11 @@ fn next_media_command(
         if pending.is_empty() {
             pending.push_back(commands.recv().ok()?);
         }
-        pending.extend(commands.try_iter());
+        pending.extend(
+            commands
+                .try_iter()
+                .take(MEDIA_PENDING_CAPACITY.saturating_sub(pending.len())),
+        );
         *epoch = pending
             .iter()
             .filter_map(MediaCommand::blade_epoch)
@@ -1119,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn media_queue_culls_stale_thumbnail_epochs() -> Result<()> {
+    fn media_queue_prioritizes_full_blades_and_culls_stale_epochs() -> Result<()> {
         let (tx, rx) = unbounded();
         let stale = BladeEpoch::ROOT.advance();
         let live = stale.advance();
@@ -1139,27 +1161,6 @@ mod tests {
             url: None,
         })
         .context("send live blade")?;
-        let mut pending = VecDeque::new();
-        let mut epoch = BladeEpoch::ROOT;
-        let command = next_media_command(&rx, &mut pending, &mut epoch).context("media command")?;
-        let MediaCommand::Blade { id, .. } = command else {
-            anyhow::bail!("expected live blade after cull");
-        };
-        assert_eq!(id, PostId(2));
-        Ok(())
-    }
-
-    #[test]
-    fn media_queue_prioritizes_full_blades() -> Result<()> {
-        let (tx, rx) = unbounded();
-        let epoch = BladeEpoch::ROOT.advance();
-        tx.send(MediaCommand::Blade {
-            epoch,
-            id: PostId(1),
-            bucket: 1,
-            url: None,
-        })
-        .context("send blade")?;
         tx.send(MediaCommand::FullBlade {
             id: PostId(9),
             url: None,
@@ -1172,6 +1173,13 @@ mod tests {
             anyhow::bail!("expected full blade priority");
         };
         assert_eq!(id, PostId(9));
+
+        let command = next_media_command(&rx, &mut pending, &mut epoch).context("media command")?;
+        let MediaCommand::Blade { id, .. } = command else {
+            anyhow::bail!("expected live blade after full blade");
+        };
+        assert_eq!(id, PostId(2));
+        assert!(pending.is_empty(), "stale blade survived epoch culling");
         Ok(())
     }
 }

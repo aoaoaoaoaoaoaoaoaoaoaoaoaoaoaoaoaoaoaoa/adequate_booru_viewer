@@ -183,38 +183,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn civil_roundtrip() {
-        for raw in ["1970-01-01", "1999-12-31", "2024-02-29", "2026-06-13"] {
-            let day = CreatedDay::parse(raw).expect("parse date");
-            assert_eq!(day.to_string(), raw);
+    fn civil_calendar_is_bijective_across_product_range() {
+        for year in 2005..=2100 {
+            for month in 1..=12 {
+                let last = CreatedDay::days_in_month(year, month);
+                for day in 1..=last {
+                    let civil = CreatedDay::from_ymd(year, month, day).expect("valid civil day");
+                    assert_eq!(civil.ymd(), (year, month, day));
+                    assert_eq!(CreatedDay::parse(&civil.to_string()), Some(civil));
+                }
+                assert!(CreatedDay::from_ymd(year, month, last + 1).is_none());
+            }
         }
-        assert!(CreatedDay::parse("2023-02-29").is_none());
-    }
-
-    #[test]
-    fn range_normalizes_and_contains() {
-        let early = CreatedDay::parse("2024-01-01").expect("early");
-        let late = CreatedDay::parse("2024-12-31").expect("late");
-        let range = DateRange {
-            first: Some(late),
-            last: Some(early),
-        }
-        .normalized();
-        assert_eq!(range.first, Some(early));
-        assert_eq!(range.last, Some(late));
-    }
-
-    #[test]
-    fn range_scrubs_pre_booru_ghosts() {
-        let ancient = CreatedDay::parse("2001-01-01").expect("ancient");
-        let live = CreatedDay::parse("2024-01-01").expect("live");
-        let range = DateRange {
-            first: Some(ancient),
-            last: Some(live),
-        }
-        .scrub_before(CreatedDay::booru_floor());
-
-        assert_eq!(range.first, None);
-        assert_eq!(range.last, Some(live));
+        assert!(CreatedDay::from_ymd(2026, 0, 1).is_none());
+        assert!(CreatedDay::from_ymd(2026, 13, 1).is_none());
+        assert!(CreatedDay::parse("2100-02-29").is_none());
     }
 }

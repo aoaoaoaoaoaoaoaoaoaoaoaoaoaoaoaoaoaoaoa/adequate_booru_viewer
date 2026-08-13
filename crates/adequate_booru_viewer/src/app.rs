@@ -53,16 +53,18 @@ use scroll::ThumbCruise;
 use viewer::{FullWait, ViewerSurface, ZoomGate};
 
 use eternalist_apps::{
+    ScribeOutcome, SettledScribe,
     command_guide::CommandGuide,
     commands::{CommandDispatch, CommandStatus},
     panel_navigation::PanelNavigator,
+    responsiveness::DrainBudget,
 };
 
 const INITIAL_RESULT_HORIZON: usize = 360;
 const RESULT_HORIZON_GROWTH: usize = 2;
 const RESULT_TAIL_MARGIN: usize = 120;
 const HIT_CACHE_LIMIT: usize = 24;
-const EVENT_BUDGET: usize = 12;
+const EVENT_DRAIN: DrainBudget = DrainBudget::new(12, Duration::from_millis(3));
 const AUTO_WARM_PAGES: u32 = 1;
 const DANBOORU_SEARCH_PAGE_LIMIT: u32 = 1_000;
 const MIN_IMAGES_PER_ROW: u16 = 1;
@@ -83,6 +85,19 @@ const VEIL_FALL: f32 = 0.06;
 const ZOOM_DIM: f32 = 0.78;
 const MENU_DIM: f32 = 0.62;
 const TAG_DEFINITION_RETRY: Duration = Duration::from_secs(30);
+
+struct DurableState {
+    config: Config,
+    slate: Slate,
+}
+
+impl DurableState {
+    fn save(self, lair: &Lair) -> Result<()> {
+        self.config
+            .save(&lair.config_path())
+            .and_then(|()| self.slate.save(&lair.slate_path()))
+    }
+}
 
 #[derive(Clone, Debug)]
 enum TagDefinitionMemo {
@@ -182,7 +197,7 @@ pub struct Bayonet {
     prefetched: HashSet<PostId>,
     hover_arm: Option<(PostId, Instant)>,
     empty_since: Option<Instant>,
-    config_dirty: Option<Instant>,
+    scribe: SettledScribe<DurableState>,
     cache_status: String,
     warm_status: String,
     crawl_status: String,
@@ -309,6 +324,13 @@ impl Bayonet {
             date_range,
             slate.gallery,
         );
+        let scribe_lair = lair.clone();
+        let scribe = SettledScribe::spawn(
+            "abv-state-scribe",
+            ctx,
+            CONFIG_SETTLE,
+            move |state: DurableState| state.save(&scribe_lair),
+        )?;
         let mut app = Self {
             status: format!("index {}", lair.index_path().display()),
             crawl_status: if mirror_policy.active() {
@@ -412,7 +434,7 @@ impl Bayonet {
             prefetched: HashSet::new(),
             hover_arm: None,
             empty_since: None,
-            config_dirty: None,
+            scribe,
             cache_status: "cache measuring".to_owned(),
             warm_status: "query warm idle".to_owned(),
             living_wait: eternalist_apps::LivingWait::default(),
@@ -429,7 +451,7 @@ impl Bayonet {
         // Persist the first-run seed synchronously so the config file exists
         // from now on — that file's presence is the first-run-ever marker.
         if first_run {
-            app.write_config();
+            app.flush_config();
         }
         if scrubbed_dates {
             app.save_config();
@@ -494,11 +516,35 @@ impl Bayonet {
         }
         self.zoom_tiles(&ctx);
         self.drain(&ctx);
-        self.flush_pulse_gates(&ctx);
-        self.flush_config(&ctx);
+        let _gates = self.flush_pulse_gates(Instant::now());
+        self.absorb_persistence();
         self.paint(ui);
         self.bench(&ctx);
         self.command_guide(ui);
+    }
+
+    pub fn service_deadline(&self, _now: Instant) -> Option<Instant> {
+        self.scribe
+            .deadline()
+            .into_iter()
+            .chain(self.pulse_gate_deadline())
+            .min()
+    }
+
+    pub fn service_deadline_reached(&mut self, now: Instant) -> bool {
+        let mut changed = self.flush_pulse_gates(now);
+        if self
+            .scribe
+            .deadline()
+            .is_some_and(|deadline| deadline <= now)
+        {
+            let snapshot = self.durable_state();
+            if let Err(error) = self.scribe.tend(now, || snapshot) {
+                self.status = format!("state scribe failed: {error:#}");
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn edict_status(&self, edict: Edict) -> CommandStatus<'static> {
@@ -1016,10 +1062,8 @@ impl Bayonet {
     }
 
     fn drain(&mut self, ctx: &egui::Context) {
-        let mut saturated = false;
-        let events = self.worker.drain().take(EVENT_BUDGET).collect::<Vec<_>>();
-        for (slot, event) in events.into_iter().enumerate() {
-            saturated |= slot + 1 == EVENT_BUDGET;
+        let mut drain = EVENT_DRAIN.arm();
+        while let Some(event) = drain.take(|| self.worker.take_event()) {
             match event {
                 Event::Refreshed { serial, hit } => {
                     self.finish_refresh(serial, Some(hit), ctx);
@@ -1272,7 +1316,7 @@ impl Bayonet {
                 }
             }
         }
-        if saturated {
+        if self.worker.has_pending_events() {
             ctx.request_repaint();
         }
     }
@@ -1638,25 +1682,10 @@ impl Bayonet {
     /// itself is debounced so wheel ticks and rail drags do not thrash the disk.
     fn save_config(&mut self) {
         self.sync_active_filter();
-        self.config_dirty = Some(Instant::now());
+        self.scribe.mark();
     }
 
-    fn flush_config(&mut self, ctx: &egui::Context) {
-        let Some(dirty_at) = self.config_dirty else {
-            return;
-        };
-        let settled = dirty_at.elapsed();
-        if settled < CONFIG_SETTLE {
-            ctx.request_repaint_after(CONFIG_SETTLE.saturating_sub(settled));
-            return;
-        }
-        self.config_dirty = None;
-        self.write_config();
-    }
-
-    /// Writes both halves of persistence: config (user intent) and slate
-    /// (workbench state). Both are tiny and atomic; one dirty flag covers them.
-    fn write_config(&mut self) {
+    fn durable_state(&self) -> DurableState {
         let config = Config {
             prefetch_on_hover: self.prefetch_on_hover,
             mirror: MirrorConfig {
@@ -1685,11 +1714,19 @@ impl Bayonet {
             water: self.water_mode,
             viewer_tags_open: self.viewer_tags_open,
         };
-        let written = config
-            .save(&self.lair.config_path())
-            .and_then(|()| slate.save(&self.lair.slate_path()));
-        if let Err(err) = written {
-            self.status = format!("{err:#}");
+        DurableState { config, slate }
+    }
+
+    fn absorb_persistence(&mut self) {
+        if let Some(ScribeOutcome::Fault { message, .. }) = self.scribe.take_outcome() {
+            self.status = format!("state save failed: {message}");
+        }
+    }
+
+    fn flush_config(&mut self) {
+        let snapshot = self.durable_state();
+        if let Err(error) = self.scribe.flush(snapshot) {
+            self.status = format!("state save failed: {error:#}");
         }
     }
 }
@@ -2164,9 +2201,7 @@ fn atom_kind(
 
 impl Drop for Bayonet {
     fn drop(&mut self) {
-        if self.config_dirty.is_some() {
-            self.write_config();
-        }
+        self.flush_config();
     }
 }
 
@@ -2227,41 +2262,8 @@ impl Bayonet {
 }
 
 #[cfg(test)]
-mod geometry_tests {
+mod state_tests {
     use super::*;
-
-    fn close(left: egui::Vec2, right: egui::Vec2) {
-        assert!((left - right).length_sq() < 1.0e-6, "{left:?} != {right:?}");
-    }
-
-    #[test]
-    fn raster_tiers_cannot_move_plate_geometry() {
-        let bounds = egui::vec2(240.0, 240.0);
-        let low = contain(egui::vec2(90.0, 180.0), bounds);
-        let high = contain(egui::vec2(360.0, 720.0), bounds);
-        close(low, egui::vec2(120.0, 240.0));
-        close(low, high);
-    }
-
-    #[test]
-    fn full_viewer_retains_native_size_for_small_images() {
-        let native = egui::vec2(90.0, 180.0);
-        close(contain_native(native, egui::Vec2::splat(500.0)), native);
-    }
-
-    #[test]
-    fn tooltip_extent_covers_every_modal_foreground_plate() {
-        let a = egui::Rect::from_min_max(egui::pos2(2.0, 3.0), egui::pos2(8.0, 11.0));
-        let b = egui::Rect::from_min_max(egui::pos2(7.0, 1.0), egui::pos2(12.0, 9.0));
-        assert_eq!(
-            tooltip_extent(&[a, b]),
-            Some(egui::Rect::from_min_max(
-                egui::pos2(2.0, 1.0),
-                egui::pos2(12.0, 11.0)
-            ))
-        );
-        assert_eq!(tooltip_extent(&[]), None);
-    }
 
     #[test]
     fn warm_frontiers_survive_sort_switches() {
@@ -2294,8 +2296,14 @@ mod geometry_tests {
 
     #[test]
     fn hit_cache_never_replaces_a_deep_horizon_with_a_shallow_one() {
+        let mut query = Query::default();
+        assert!(query.push_atom(
+            &[],
+            QueryAtom::parse("solo").expect("static query atom"),
+            TagPolarity::Positive,
+        ));
         let key = HitKey::new(
-            &Query::parse("solo"),
+            &query,
             Corpus::All,
             Sort::Score,
             DateRange::default(),

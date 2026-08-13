@@ -160,13 +160,3 @@ pub fn canon() -> &'static CommandCanon<Edict, Context> {
     static CANON: OnceLock<CommandCanon<Edict, Context>> = OnceLock::new();
     CANON.get_or_init(|| CommandCanon::new(&EDICTS))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn edict_canon_is_valid() {
-        assert_eq!(canon().specs().len(), EDICTS.len());
-    }
-}

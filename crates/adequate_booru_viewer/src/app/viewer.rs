@@ -1254,7 +1254,7 @@ mod tests {
     }
 
     #[test]
-    fn down_passage_chooses_leftmost_child() {
+    fn viewer_navigation_resolves_family_and_gallery_targets() {
         let root = PostId(1);
         let left = PostId(2);
         let right = PostId(3);
@@ -1298,10 +1298,7 @@ mod tests {
             direct_kin_target(&tree, root, KinStep::Children).map(|post| post.id),
             Some(left)
         );
-    }
 
-    #[test]
-    fn global_navigation_falls_back_to_family_entry_tile() {
         let posts = [post(20), post(30), post(40)];
         assert_eq!(gallery_slot(&posts, PostId(10), Some(PostId(30))), Some(1));
         assert_eq!(gallery_slot(&posts, PostId(40), Some(PostId(30))), Some(2));

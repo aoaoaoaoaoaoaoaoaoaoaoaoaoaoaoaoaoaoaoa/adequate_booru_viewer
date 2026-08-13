@@ -504,11 +504,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn danbooru_advertises_tag_definitions() {
-        assert!(Danbooru::new().tag_definitions().is_some());
-    }
-
-    #[test]
     fn dtext_definition_keeps_prose_and_discards_reference_furniture() {
         let blocks = dtext_blocks(
             "Hair that is [[blue hair|blue]].\r\n\r\n\

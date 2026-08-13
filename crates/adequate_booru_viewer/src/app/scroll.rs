@@ -70,7 +70,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn thumb_cruise_prefetches_in_scroll_direction() {
+    fn thumb_cruise_prefetches_directionally_without_chasing_teleports() {
         let mut cruise = ThumbCruise::default();
         assert!(
             cruise
@@ -85,12 +85,6 @@ mod tests {
             .wake(20.0, 1.0, 1.0 / 60.0, 100.0, 100, 10..15)
             .expect("up band");
         assert!(up.end <= 10, "{up:?}");
-    }
-
-    #[test]
-    fn thumb_cruise_ignores_teleports() {
-        let mut cruise = ThumbCruise::default();
-        let _virgin = cruise.wake(0.0, 1.0, 1.0 / 60.0, 100.0, 100, 10..15);
         assert!(
             cruise
                 .wake(3000.0, 1.0, 1.0 / 60.0, 100.0, 100, 10..15)

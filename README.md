@@ -62,6 +62,11 @@ saved-filter active card and immutable local-favorites row remain
 product-specific; the reorderable, one-level shelved filter collection uses
 the shared Cabinet law.
 
+Persistence settlement and the crawl refresh gates are semantic service
+deadlines, independent of rendering. Config and workbench snapshots cross the
+shared Eternalist background scribe; visual fades, recoils, and hover dwell
+alone retain repaint timing.
+
 Native acceptance lives here because its fixtures, semantic targets, and
 verdicts are product behavior. `scripts/test-gui` first proves an ordinary
 uninstrumented launch, then drives the optimized witnessed binary in private

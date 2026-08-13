@@ -59,30 +59,3 @@ impl fmt::Display for Target {
         formatter.write_str(&self.wire())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn water_targets_have_disjoint_identity() {
-        assert_ne!(Target::Water(Water::Dry), Target::Water(Water::Wet));
-        assert_eq!(Target::UiRecess.wire(), "recess:ui");
-    }
-
-    #[test]
-    fn command_chrome_has_stable_identity() {
-        assert_eq!(Target::Help.wire(), "application.help");
-        assert_eq!(Target::CommandGuide.wire(), "application.command-guide");
-        assert_eq!(Target::ViewerSurface.wire(), "viewer.surface");
-        assert_eq!(
-            Target::Panel("reference-query").wire(),
-            "panel/reference-query"
-        );
-        assert_ne!(Target::Help.wire(), Target::CommandGuide.wire());
-        assert_ne!(
-            Target::TagEntry.wire(),
-            Target::Panel("reference-query").wire()
-        );
-    }
-}

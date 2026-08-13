@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "adequate_booru_viewer"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "abv-contract",
  "anyhow",
@@ -599,9 +599,9 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "dwemer_poolrooms"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "217390668982d3b56ca9087e2f787484a3d20d24d313fb554faff3a521598f2b"
+checksum = "675280fdf26997f8035687d43d61d1c049298b4e50d5b60a3247fc00dbcbb4d8"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -640,9 +640,9 @@ dependencies = [
 
 [[package]]
 name = "egui-tester"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73d0ee1fa088038856cfcf040921ed3291f9e32987d941a9b3893acfa6929ebf"
+checksum = "697da5961e29b1dfda7eb09a9d8ace71dfdc9695ce525fb3e0e277e77edd7bcf"
 dependencies = [
  "bitflags 2.13.1",
  "egui-tester-witness",
@@ -658,9 +658,9 @@ dependencies = [
 
 [[package]]
 name = "egui-tester-witness"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3372d84a09625191caecc3f8d601ca68d80b44125b29a558dfad9ba42cee656"
+checksum = "1cd5ff230f462f7cbe9458312117df419b94f80bcc4807b2d47ac4d2583e9af8"
 dependencies = [
  "egui",
  "rustix 1.1.4",
@@ -770,11 +770,12 @@ checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
 
 [[package]]
 name = "eternalist-apps"
-version = "0.4.4"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09159850ac48b30652ff07062cfbb43f0719ecb396fb6518232e958343797f6a"
+checksum = "94090541e54de06c0da597fb3b32000f36961ee9993fbf40fe2ac44b11214f1d"
 dependencies = [
  "anyhow",
+ "crossbeam-channel",
  "dwemer_poolrooms",
  "egui",
  "egui-tester-witness",
@@ -3806,7 +3807,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "anyhow",
  "serde",

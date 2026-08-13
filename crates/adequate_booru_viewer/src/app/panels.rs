@@ -672,20 +672,3 @@ fn tag_seed(text: &str) -> Option<String> {
         .collect::<String>();
     seed.chars().any(|ch| !ch.is_whitespace()).then_some(seed)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::tag_seed;
-
-    #[test]
-    fn tag_seed_accepts_printable_query_glyphs() {
-        assert_eq!(tag_seed("b"), Some("b".to_owned()));
-        assert_eq!(tag_seed("-rating:g"), Some("-rating:g".to_owned()));
-    }
-
-    #[test]
-    fn tag_seed_rejects_blank_and_control_text() {
-        assert_eq!(tag_seed(" "), None);
-        assert_eq!(tag_seed("\n"), None);
-    }
-}

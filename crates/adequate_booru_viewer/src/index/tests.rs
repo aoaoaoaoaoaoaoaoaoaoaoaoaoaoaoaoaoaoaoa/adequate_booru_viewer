@@ -42,46 +42,43 @@ fn search_tail_proves_exhaustion_without_a_silent_horizon() -> Result<()> {
 }
 
 #[test]
-fn boolean_query_evaluator_cuts_with_roaring_algebra() -> Result<()> {
+fn boolean_query_evaluator_matches_its_truth_algebra() -> Result<()> {
     let path = std::env::temp_dir().join(format!(
         "adequate-booru-bool-{}.redb",
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     ));
     remove_index(&path);
     let index = Index::open(&path)?;
-    index.absorb(&[
-        post(1, 10, Rating::General, &["solo", "bikini"])?,
-        post(2, 20, Rating::Questionable, &["solo", "nude"])?,
-        post(3, 30, Rating::Explicit, &["bikini", "nude"])?,
-        post(4, 40, Rating::Sensitive, &["solo"])?,
-        post(5, 50, Rating::General, &["bikini", "nude", "swimsuit"])?,
-        post(6, 60, Rating::General, &["swimsuit"])?,
-    ])?;
+    let records = (0_u8..8)
+        .map(|mask| {
+            let tags = [("a", 1), ("b", 2), ("c", 4)]
+                .into_iter()
+                .filter_map(|(tag, bit)| (mask & bit != 0).then_some(tag))
+                .collect::<Vec<_>>();
+            post(u32::from(mask) + 1, i32::from(mask), Rating::General, &tags)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    index.absorb(&records)?;
 
-    let mut query = Query::default();
-    assert!(query.push_atom(&[], atom("solo")?, TagPolarity::Positive));
-    let choice = query.push_group(&[], BoolOp::Or).context("push OR")?;
-    assert!(query.push_atom(&choice, atom("bikini")?, TagPolarity::Positive));
-    assert!(query.push_atom(&choice, atom("nude")?, TagPolarity::Positive));
-    assert!(query.push_atom(
-        &[],
-        QueryAtom::Rating(RatingClass::Explicit),
-        TagPolarity::Negative
-    ));
-    assert_eq!(
-        ids(index.search(&query, Sort::Score, DateRange::default(), 10)?),
-        [2, 1]
-    );
+    let and = Query::parse("a b");
+    assert_truth(&index, &and, |mask| mask & 1 != 0 && mask & 2 != 0)?;
+
+    let mut or = Query::default();
+    let choice = or.push_group(&[], BoolOp::Or).context("push OR")?;
+    assert!(or.push_atom(&choice, atom("a")?, TagPolarity::Positive));
+    assert!(or.push_atom(&choice, atom("b")?, TagPolarity::Positive));
+    assert_truth(&index, &or, |mask| mask & 1 != 0 || mask & 2 != 0)?;
 
     let mut xor = Query::default();
     let choice = xor.push_group(&[], BoolOp::Xor).context("push XOR")?;
-    assert!(xor.push_atom(&choice, atom("bikini")?, TagPolarity::Positive));
-    assert!(xor.push_atom(&choice, atom("nude")?, TagPolarity::Positive));
-    assert!(xor.push_atom(&choice, atom("swimsuit")?, TagPolarity::Positive));
-    assert_eq!(
-        ids(index.search(&xor, Sort::Newest, DateRange::default(), 10)?),
-        [6, 2, 1]
-    );
+    assert!(xor.push_atom(&choice, atom("a")?, TagPolarity::Positive));
+    assert!(xor.push_atom(&choice, atom("b")?, TagPolarity::Positive));
+    assert!(xor.push_atom(&choice, atom("c")?, TagPolarity::Positive));
+    assert_truth(&index, &xor, u8::is_power_of_two)?;
+
+    let mut neither = or;
+    assert!(neither.toggle_not(&choice));
+    assert_truth(&index, &neither, |mask| mask.trailing_zeros() >= 2)?;
 
     drop(index);
     remove_index(&path);
@@ -89,7 +86,7 @@ fn boolean_query_evaluator_cuts_with_roaring_algebra() -> Result<()> {
 }
 
 #[test]
-fn posting_facts_are_query_visible_before_and_after_chunk_merge() -> Result<()> {
+fn absorption_is_query_visible_across_merge_replacement_and_retraction() -> Result<()> {
     let path = std::env::temp_dir().join(format!(
         "adequate-booru-facts-{}.redb",
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
@@ -124,6 +121,7 @@ fn posting_facts_are_query_visible_before_and_after_chunk_merge() -> Result<()> 
         ids(index.search(&solo, Sort::Newest, DateRange::default(), 10)?),
         [1]
     );
+
     assert_eq!(
         ids(index.search(
             &Query::parse("bikini"),
@@ -143,29 +141,9 @@ fn posting_facts_are_query_visible_before_and_after_chunk_merge() -> Result<()> 
         [1]
     );
 
-    drop(index);
-    remove_index(&path);
-    Ok(())
-}
-
-#[test]
-fn newly_forbidden_media_retracts_old_postings() -> Result<()> {
-    let path = std::env::temp_dir().join(format!(
-        "adequate-booru-media-gate-{}.redb",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    remove_index(&path);
-    let index = Index::open(&path)?;
-    let mut record = post(7, 10, Rating::General, &["solo"])?;
-    index.absorb(&[record.clone()])?;
-    let solo = Query::parse("solo");
-    assert_eq!(
-        ids(index.search(&solo, Sort::Newest, DateRange::default(), 10)?),
-        [7]
-    );
-
-    record.file_url = Some("https://example.test/7.swf".to_owned());
-    index.absorb(&[record])?;
+    let mut forbidden = post(1, 40, Rating::General, &["solo"])?;
+    forbidden.file_url = Some("https://example.test/1.swf".to_owned());
+    index.absorb(&[forbidden])?;
     assert!(
         index
             .search(&solo, Sort::Newest, DateRange::default(), 10)?
@@ -200,6 +178,16 @@ fn tag_kind_hints_are_durable() -> Result<()> {
     let mut post = post(7, 10, Rating::General, &["idol"])?;
     post.tag_hints = vec![TagHint::new(idol.clone(), TagKind::Character)];
     index.absorb(&[post])?;
+    assert_eq!(index.tag_kind(&idol)?, TagKind::Character);
+    assert_eq!(
+        index
+            .tag_suggestions("id", 1)?
+            .first()
+            .map(|suggestion| suggestion.kind),
+        Some(TagKind::Character)
+    );
+    drop(index);
+    let index = Index::open(&path)?;
     assert_eq!(index.tag_kind(&idol)?, TagKind::Character);
     assert_eq!(
         index
@@ -324,10 +312,41 @@ fn family_projection_keeps_the_strongest_matching_member() -> Result<()> {
     )?;
     assert!(index.family_hydrated(PostId(2))?);
 
+    index.absorb_harvest(&[
+        harvest(post(10, 1, Rating::General, &["animated"])?, None, true),
+        harvest(
+            post(11, 20, Rating::General, &["hidden_child"])?,
+            Some(10),
+            false,
+        ),
+        harvest(
+            post(12, 30, Rating::General, &["hidden_child"])?,
+            Some(10),
+            false,
+        ),
+    ])?;
+    let hidden = index.search_topology(
+        &Query::parse("hidden_child"),
+        &Arc::new(RoaringBitmap::new()),
+        Sort::Score,
+        DateRange::default(),
+        GalleryTopology::Grouped,
+        10,
+    )?;
+    assert_eq!(ids(hidden), [12]);
+    let hidden_tree = index.family_tree(PostId(12))?;
+    assert!(
+        hidden_tree
+            .node(PostId(10))
+            .is_some_and(|node| node.post.is_none())
+    );
+    assert_eq!(hidden_tree.badge().map(|badge| badge.posts), Some(2));
+
     drop(index);
     let reopened = Index::open(&path)?;
     assert_eq!(reopened.family_tree(PostId(2))?.root, PostId(1));
     assert!(reopened.family_hydrated(PostId(3))?);
+    assert_eq!(reopened.family_tree(PostId(12))?.root, PostId(10));
     drop(reopened);
     remove_index(&path);
     Ok(())
@@ -458,40 +477,21 @@ fn local_favorites_prefix_every_sort_without_escaping_the_query() -> Result<()> 
     Ok(())
 }
 
-#[test]
-fn rejected_parent_still_binds_visible_children() -> Result<()> {
-    let path = std::env::temp_dir().join(format!(
-        "adequate-booru-hidden-family-{}.redb",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    let index = Index::open(&path)?;
-    index.absorb_harvest(&[
-        harvest(post(10, 1, Rating::General, &["animated"])?, None, true),
-        harvest(post(11, 20, Rating::General, &["solo"])?, Some(10), false),
-        harvest(post(12, 30, Rating::General, &["solo"])?, Some(10), false),
-    ])?;
-    let grouped = index.search_topology(
-        &Query::parse("solo"),
-        &Arc::new(RoaringBitmap::new()),
-        Sort::Score,
-        DateRange::default(),
-        GalleryTopology::Grouped,
-        10,
-    )?;
-    assert_eq!(ids(grouped), [12]);
-    let tree = index.family_tree(PostId(12))?;
-    assert!(
-        tree.node(PostId(10))
-            .is_some_and(|node| node.post.is_none())
-    );
-    assert_eq!(tree.badge().map(|badge| badge.posts), Some(2));
-    drop(index);
-    remove_index(&path);
-    Ok(())
-}
-
 fn ids(hit: SearchHit) -> Vec<u32> {
     hit.posts.into_iter().map(|post| post.id.0).collect()
+}
+
+fn assert_truth(index: &Index, query: &Query, law: impl Fn(u8) -> bool) -> Result<()> {
+    let expected = (0_u8..8)
+        .rev()
+        .filter(|mask| law(*mask))
+        .map(|mask| u32::from(mask) + 1)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids(index.search(query, Sort::Newest, DateRange::default(), 8)?),
+        expected
+    );
+    Ok(())
 }
 
 fn atom(raw: &str) -> Result<QueryAtom> {

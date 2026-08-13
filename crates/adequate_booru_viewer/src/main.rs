@@ -40,25 +40,19 @@ mod booru;
 mod commands;
 mod config;
 mod controls;
-mod date;
 mod favorites;
 mod filter_bank;
 mod host;
-mod index;
-mod kin;
 mod media;
-mod model;
-mod posting;
 mod query_ui;
 mod saved_filter_ui;
 mod tag_chroma;
 mod tag_menu;
 mod tag_palette;
-mod trace;
-mod wire;
 mod witness;
 mod worker;
-mod xdg;
+
+pub(crate) use adequate_booru_viewer::{date, index, kin, model, trace, xdg};
 
 pub(crate) use dwemer_poolrooms::{chrome, water};
 

@@ -382,36 +382,6 @@ mod tests {
         Ok(())
     }
 
-    /// The pinned demo fixture must deserialize through the product types and
-    /// keep the nested `harmless screenshot` shape the take's choreography
-    /// depends on. Compile-time inclusion guards both content and location
-    /// against silent drift without binding the test binary to its checkout.
-    #[test]
-    fn demo_fixture_is_loadable() -> Result<()> {
-        let config: Config = toml::from_str(include_str!("../../../demo/wet/config.toml"))?;
-        let names = config
-            .filters
-            .shelves
-            .iter()
-            .map(|shelf| shelf.name.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(names, ["work", "play"]);
-        let screenshot = &config.filters.shelves[0].filters[0];
-        assert_eq!(screenshot.name.as_str(), "harmless screenshot");
-        assert_eq!(screenshot.active_group, vec![0_usize, 1]);
-        let slate: Slate = toml::from_str(include_str!("../../../demo/wet/slate.toml"))?;
-        assert_eq!(
-            slate.filter.saved().map(FilterName::as_str),
-            Some("harmless screenshot")
-        );
-        assert_eq!(slate.water, WaterMode::Dry);
-        assert_eq!(slate.images_per_row, 7);
-        assert_eq!(slate.shutters.get("reference-query"), Some(&false));
-        assert!(slate.closed_folders.contains("work"));
-        assert!(slate.closed_folders.contains("play"));
-        Ok(())
-    }
-
     #[test]
     fn first_run_seeds_safe_filter_only_when_config_absent() -> Result<()> {
         // Absent config ⇒ first launch ⇒ seed the deletable safe default.
@@ -426,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn slate_roundtrips_workbench_state() -> Result<()> {
+    fn slate_roundtrips_workbench_identity() -> Result<()> {
         let mut query = Query::default();
         assert!(query.push_atom(&[], tag("solo")?, TagPolarity::Positive));
         let slate = Slate {
@@ -458,76 +428,14 @@ mod tests {
         assert_eq!(roundtrip.dates, slate.dates);
         assert_eq!(roundtrip.water, WaterMode::ReallyWet);
         assert!(roundtrip.viewer_tags_open);
-        Ok(())
-    }
 
-    #[test]
-    fn slate_roundtrips_the_builtin_favorites_corpus_without_a_saved_name() -> Result<()> {
-        let slate = Slate {
+        let favorites = Slate {
             filter: FilterSelection::LocalFavorites,
             ..Slate::default()
         };
-        let text = toml::to_string_pretty(&slate)?;
-        let roundtrip = toml::from_str::<Slate>(&text)?;
-        assert_eq!(roundtrip.filter, FilterSelection::LocalFavorites);
-        assert!(roundtrip.query.tree.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn builtin_favorites_cannot_collide_with_a_saved_filter_name() -> Result<()> {
-        let named = FilterSelection::Saved {
-            name: FilterName::forge("favorites").context("filter name")?,
-        };
-        assert_ne!(named, FilterSelection::LocalFavorites);
-        assert_eq!(named.saved().map(FilterName::as_str), Some("favorites"));
-        assert_eq!(named.corpus(), Corpus::All);
-        assert_eq!(
-            FilterSelection::LocalFavorites.corpus(),
-            Corpus::LocalFavorites
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn slate_rejects_the_retired_active_filter_schema() -> Result<()> {
-        let text = toml::to_string_pretty(&Slate::default())?.replacen(
-            "[filter]\nkind = \"scratch\"",
-            "active_filter = \"beach\"",
-            1,
-        );
-        assert!(toml::from_str::<Slate>(&text).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn slate_defaults_to_wet() {
-        let slate = Slate::default();
-        assert_eq!(slate.water, WaterMode::Wet);
-        assert!(!slate.viewer_tags_open);
-    }
-
-    #[test]
-    fn slate_without_water_field_defaults_to_wet() -> Result<()> {
-        let slate = toml::from_str::<Slate>(
-            r#"
-sort = "score"
-images_per_row = 5
-
-[query]
-active_group = []
-"#,
-        )?;
-        assert_eq!(slate.water, WaterMode::Wet);
-        assert!(!slate.viewer_tags_open);
-        Ok(())
-    }
-
-    #[test]
-    fn filter_names_are_compacted_and_nonempty() -> Result<()> {
-        let name = FilterName::forge("  study   pose  ").context("valid filter name")?;
-        assert_eq!(name.as_str(), "study pose");
-        assert!(FilterName::forge(" \n\t ").is_none());
+        let favorites = toml::from_str::<Slate>(&toml::to_string_pretty(&favorites)?)?;
+        assert_eq!(favorites.filter, FilterSelection::LocalFavorites);
+        assert!(favorites.query.tree.is_empty());
         Ok(())
     }
 

@@ -1,6 +1,7 @@
 use crate::app::Bayonet;
 use anyhow::Result;
 use eternalist_apps::{NativeApp, WindowSpec};
+use std::time::Instant;
 
 pub fn run(ctx: egui::Context, pause_mirror: bool) -> Result<()> {
     let app = Bayonet::open(&ctx, pause_mirror)?;
@@ -12,6 +13,14 @@ impl NativeApp for Bayonet {
 
     fn draw(&mut self, ui: &mut egui::Ui) {
         self.pulse(ui);
+    }
+
+    fn service_deadline(&self, now: Instant) -> Option<Instant> {
+        Bayonet::service_deadline(self, now)
+    }
+
+    fn service_deadline_reached(&mut self, now: Instant) -> bool {
+        Bayonet::service_deadline_reached(self, now)
     }
 
     fn after_present(&mut self) -> bool {

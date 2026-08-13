@@ -37,19 +37,24 @@ impl Bayonet {
         }
     }
 
-    pub(super) fn flush_pulse_gates(&mut self, ctx: &egui::Context) {
-        if self.refresh_gate.flush() {
+    pub(super) fn flush_pulse_gates(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        if self.refresh_gate.flush(now) {
             self.request_refresh();
+            changed = true;
         }
-        if self.stats_gate.flush() {
+        if self.stats_gate.flush(now) {
             self.request_stats();
+            changed = true;
         }
-        for wake in [self.refresh_gate.wake_in(), self.stats_gate.wake_in()]
+        changed
+    }
+
+    pub(super) fn pulse_gate_deadline(&self) -> Option<Instant> {
+        [self.refresh_gate.deadline(), self.stats_gate.deadline()]
             .into_iter()
             .flatten()
-        {
-            ctx.request_repaint_after(wake);
-        }
+            .min()
     }
 
     pub(super) fn request_refresh(&mut self) {
@@ -208,8 +213,8 @@ impl PulseGate {
         }
     }
 
-    fn ready(&self) -> bool {
-        self.last.is_none_or(|last| last.elapsed() >= self.gap)
+    fn ready(&self, now: Instant) -> bool {
+        self.deadline().is_none_or(|deadline| deadline <= now)
     }
 
     fn fire(&mut self) {
@@ -218,7 +223,7 @@ impl PulseGate {
     }
 
     fn nudge(&mut self) -> bool {
-        if self.ready() {
+        if self.ready(Instant::now()) {
             self.fire();
             true
         } else {
@@ -227,8 +232,8 @@ impl PulseGate {
         }
     }
 
-    fn flush(&mut self) -> bool {
-        if self.stale && self.ready() {
+    fn flush(&mut self, now: Instant) -> bool {
+        if self.stale && self.ready(now) {
             self.fire();
             true
         } else {
@@ -236,9 +241,9 @@ impl PulseGate {
         }
     }
 
-    fn wake_in(&self) -> Option<Duration> {
+    fn deadline(&self) -> Option<Instant> {
         let last = self.last.filter(|_| self.stale)?;
-        Some(self.gap.saturating_sub(last.elapsed()))
+        last.checked_add(self.gap)
     }
 }
 
