@@ -345,6 +345,21 @@ fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
     let _gallery_header = focus.wait_focus(&app, &gallery_panel, WAIT)?;
     let _opened_gallery = story.key(Key::Return)?.next_frame()?;
     let rail_target = abv_contract::Target::ImagesPerRow.to_string();
+    let wheel_point = story.anchor(&gallery_panel)?.center();
+    let screen_bottom =
+        i16::try_from(story.capture()?.height().saturating_sub(20)).map_err(|_| {
+            Error::Verdict {
+                detail: "acceptance window is too tall for X11 pointer coordinates".to_owned(),
+            }
+        })?;
+    for _ in 0..4 {
+        let (_, y) = story.anchor(&rail_target)?.center();
+        if (20..=screen_bottom).contains(&y) {
+            break;
+        }
+        let ticks = if y > screen_bottom { 10 } else { -10 };
+        let _scrolled = story.scroll(wheel_point, ticks)?.next_frame()?;
+    }
     let settled = story.wait_stable(
         WAIT,
         Duration::from_millis(150),
@@ -358,6 +373,10 @@ fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
             detail: "settled gallery omitted its images-per-row rail".to_owned(),
         })?;
     let (x, y) = rail.center();
+    demand(
+        (20..=screen_bottom).contains(&y),
+        "inspector could not reveal its images-per-row rail",
+    )?;
     let clicked = story.session().click(x, y, Button::Primary)?;
     let _clicked = story.reaction(clicked).next_frame()?;
     let _rail_focus = focus.wait_focus(&app, &rail_target, WAIT)?;

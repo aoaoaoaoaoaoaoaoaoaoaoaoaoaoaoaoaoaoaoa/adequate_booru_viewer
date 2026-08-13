@@ -2219,7 +2219,7 @@ impl Bayonet {
         self.tag_palette_overlay(&ctx);
         self.absorb_tag_menu_wheel(&ctx);
         let mut menu_opened = false;
-        let _center = egui::CentralPanel::default().show_inside(ui, |ui| {
+        let _center = egui::CentralPanel::default().show(ui, |ui| {
             menu_opened = self.grid(ui);
         });
         if self.tag_menu.post_id() != prior {
