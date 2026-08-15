@@ -1,15 +1,24 @@
-use crate::app::Bayonet;
+use crate::{app::Bayonet, xdg::Lair};
 use anyhow::Result;
-use eternalist_apps::{NativeApp, WindowSpec};
+use eternalist_apps::{CrashProduct, CrashReportSpec, NativeApp, WindowSpec};
 use std::time::Instant;
 
 pub fn run(ctx: egui::Context, pause_mirror: bool) -> Result<()> {
-    let app = Bayonet::open(&ctx, pause_mirror)?;
-    eternalist_apps::run(ctx, app)
+    eternalist_apps::run_with(ctx, |ctx| Bayonet::open(ctx, pause_mirror))
 }
 
 impl NativeApp for Bayonet {
     const WINDOW: WindowSpec = WindowSpec::new("adequate booru viewer", [1_440.0, 920.0]);
+
+    fn crash_reports() -> Option<CrashReportSpec> {
+        Lair::claim().ok().map(|lair| {
+            CrashReportSpec::new(
+                CrashProduct::BooruViewer,
+                env!("CARGO_PKG_VERSION"),
+                lair.state,
+            )
+        })
+    }
 
     fn draw(&mut self, ui: &mut egui::Ui) {
         self.pulse(ui);
