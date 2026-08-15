@@ -33,13 +33,13 @@ anyhow = "1.0.104"
 arboard = "3.6.1"
 crossbeam-channel = "0.5.16"
 directories = "6.0.0"
-brass_poolrooms = "0.13.0"
+brass_poolrooms = "0.13.1"
 abv-contract = { path = "../abv-contract", version = "0.2.0" }
 egui = "=0.36.1"
 egui-wgpu = { version = "=0.36.1", default-features = false }
 egui-winit = { version = "=0.36.1", default-features = false, features = ["clipboard", "links"] }
 egui-tester-witness = { version = "0.9.6", optional = true, features = ["egui"] }
-eternalist-apps = "0.7.2"
+eternalist-apps = "0.7.3"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 memmap2 = "0.9.11"
 redb = "4.1.0"
