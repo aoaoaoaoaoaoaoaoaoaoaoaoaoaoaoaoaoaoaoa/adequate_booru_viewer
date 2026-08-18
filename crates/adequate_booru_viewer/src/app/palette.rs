@@ -58,24 +58,25 @@ impl Bayonet {
             egui::vec2(TAG_MENU_WIDTH, height),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                ui.set_min_size(egui::vec2(TAG_MENU_WIDTH, height));
-                let _frame = egui::Frame::new()
+                let frame = egui::Frame::new()
                     .fill(chrome::SURFACE)
                     .stroke(egui::Stroke::new(1.0_f32, chrome::EDGE))
-                    .inner_margin(egui::Margin::symmetric(7, 6))
-                    .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        palette_body(
-                            ui,
-                            &groups,
-                            &self.query,
-                            &mut self.water,
-                            height,
-                            &mut strikes,
-                            definitions,
-                            &mut hovered_definition,
-                        );
-                    });
+                    .inner_margin(egui::Margin::symmetric(7, 6));
+                let content = egui::vec2(TAG_MENU_WIDTH, height) - frame.total_margin().sum();
+                let _frame = frame.show(ui, |ui| {
+                    ui.set_min_width(content.x);
+                    palette_body(
+                        ui,
+                        &groups,
+                        &self.query,
+                        &mut self.water,
+                        content.y,
+                        &mut strikes,
+                        definitions,
+                        &mut hovered_definition,
+                    );
+                });
+                crate::probe_anchor!(ui, "viewer:tag-drawer", _frame.response.rect);
             },
         );
         if let Some(tag) = hovered_definition {
@@ -92,7 +93,14 @@ impl Bayonet {
         {
             return groups.clone();
         }
-        let groups = self.learn_tag_groups(post);
+        let mut groups = self.learn_tag_groups(post);
+        groups.sort_by_key(|(kind, _)| match kind {
+            TagKind::Artist => 0,
+            TagKind::Copyright => 1,
+            TagKind::Character => 2,
+            TagKind::General => 3,
+            TagKind::Meta => 4,
+        });
         self.viewer_tag_groups = Some((post.id, groups.clone()));
         groups
     }

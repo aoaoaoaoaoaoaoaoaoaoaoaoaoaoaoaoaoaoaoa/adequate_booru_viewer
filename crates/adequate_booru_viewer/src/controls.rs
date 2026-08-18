@@ -38,7 +38,17 @@ pub fn symbol(
     water: &mut water::Surface,
     symbol: chrome::Symbol,
 ) -> chrome::MonoglyphResponse {
-    let response = chrome::Monoglyph::symbol(symbol).show(ui);
+    symbol_sized(ui, water, symbol, chrome::MechanismSize::Large)
+}
+
+/// Sink a foundry symbol of an explicit mechanism size into the active water surface.
+pub fn symbol_sized(
+    ui: &mut egui::Ui,
+    water: &mut water::Surface,
+    symbol: chrome::Symbol,
+    size: chrome::MechanismSize,
+) -> chrome::MonoglyphResponse {
+    let response = chrome::Monoglyph::symbol(symbol).size(size).show(ui);
     water.monoglyph(&response);
     response
 }

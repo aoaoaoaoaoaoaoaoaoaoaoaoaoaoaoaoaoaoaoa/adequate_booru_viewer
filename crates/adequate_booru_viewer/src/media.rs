@@ -1,5 +1,5 @@
 use anyhow::{Context as _, Result, bail};
-use image::ImageReader;
+use image::{ImageBuffer, ImageReader, Rgba, imageops::FilterType};
 use std::{
     io::Cursor,
     path::{Path, PathBuf},
@@ -13,12 +13,42 @@ use crate::model::{PostId, media_extension};
 /// Monotonic claim for temp-file names: concurrent fetchers of the same id
 /// must never share a temp path.
 static CLAIM: AtomicU64 = AtomicU64::new(0);
+const MAX_MEDIA_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct RgbaBlade {
     pub id: PostId,
     pub size: [usize; 2],
     pub rgba: Vec<u8>,
+}
+
+impl RgbaBlade {
+    /// Forge a display-sized derivative with a proper reconstruction filter.
+    /// GPU bilinear sampling alone aliases when an original is many times
+    /// larger than its viewport.
+    pub fn downsample(&self, bounds: [u32; 2]) -> Option<Self> {
+        let width = u32::try_from(self.size[0]).ok()?;
+        let height = u32::try_from(self.size[1]).ok()?;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let scale = (f64::from(bounds[0].max(1)) / f64::from(width))
+            .min(f64::from(bounds[1].max(1)) / f64::from(height))
+            .min(1.0);
+        if scale >= 1.0 {
+            return None;
+        }
+        let target_width = (f64::from(width) * scale).round().max(1.0) as u32;
+        let target_height = (f64::from(height) * scale).round().max(1.0) as u32;
+        let source = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, self.rgba.as_slice())?;
+        let derivative =
+            image::imageops::resize(&source, target_width, target_height, FilterType::Lanczos3);
+        Some(Self {
+            id: self.id,
+            size: [target_width as usize, target_height as usize],
+            rgba: derivative.into_raw(),
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -76,7 +106,12 @@ impl MediaCache {
             .get(url)
             .call()
             .with_context(|| format!("GET media {url}"))?;
-        response.body_mut().read_to_vec().context("read media body")
+        response
+            .body_mut()
+            .with_config()
+            .limit(MAX_MEDIA_BYTES)
+            .read_to_vec()
+            .context("read media body")
     }
 }
 

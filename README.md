@@ -46,10 +46,15 @@ within the active inspector panel; physical `Control+Tab` and
 the next Boolean group, and `Alt+Shift+G` selects the previous one. Completion
 suggestions retain local `Tab` and `Shift+Tab` while the tag entry owns them.
 
-the full viewer uses `T` for its tag drawer, arrows for family navigation,
-`Shift+Left` and `Shift+Right` for global results, and `Escape` to return to the
-gallery. The guide is modal: application commands and panel traversal remain
-dormant until it closes, then the prior focus target is restored.
+`F9` conceals or reveals the sidebar. In the gallery, `PageUp` and `PageDown`
+move exactly one row and `Home` returns to the first row. The full viewer uses
+`T` for its tag drawer, `R` for the family tree, Left and Right for global
+results, Alt+Left and Alt+Right for family peers, and Up and Down for the parent
+or first child. Inside the tree, plain arrows navigate the family and Alt+Left
+or Alt+Right returns to global-result navigation. `R`, Enter, or Escape returns
+to the selected image; Escape from the image closes the viewer. The guide is
+modal: application commands and panel traversal remain dormant until it
+closes, then the prior focus target is restored.
 
 ### architecture
 

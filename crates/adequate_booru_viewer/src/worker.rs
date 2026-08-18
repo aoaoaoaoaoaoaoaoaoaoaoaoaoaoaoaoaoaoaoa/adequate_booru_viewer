@@ -97,6 +97,7 @@ pub enum Command {
     FullBlade {
         id: PostId,
         url: Option<String>,
+        texture_bound: [u32; 2],
     },
     SaveMedia {
         id: PostId,
@@ -185,7 +186,10 @@ pub enum Event {
         bucket: u8,
         fault: String,
     },
-    FullBlade(RgbaBlade),
+    FullBlade {
+        blade: RgbaBlade,
+        display: Option<RgbaBlade>,
+    },
     FullBladeFault {
         id: PostId,
         fault: String,
@@ -428,9 +432,17 @@ impl Worker {
                 .media_tx
                 .try_send(MediaCommand::Cull { epoch })
                 .context("send media worker command"),
-            Command::FullBlade { id, url } => self
+            Command::FullBlade {
+                id,
+                url,
+                texture_bound,
+            } => self
                 .media_tx
-                .try_send(MediaCommand::FullBlade { id, url })
+                .try_send(MediaCommand::FullBlade {
+                    id,
+                    url,
+                    texture_bound,
+                })
                 .context("send media worker command"),
             Command::SaveMedia { id, url, path } => self
                 .media_tx
@@ -545,6 +557,7 @@ enum MediaCommand {
     FullBlade {
         id: PostId,
         url: Option<String>,
+        texture_bound: [u32; 2],
     },
     Save {
         id: PostId,
@@ -843,15 +856,20 @@ fn media_fetch_loop(media: MediaCache, work: Receiver<MediaCommand>, events: Kla
                 },
             },
             MediaCommand::Cull { .. } => continue,
-            MediaCommand::FullBlade { id, url } => {
-                match required_url(url.as_deref()).and_then(|url| media.blade(id, url)) {
-                    Ok(blade) => Event::FullBlade(blade),
-                    Err(err) => Event::FullBladeFault {
-                        id,
-                        fault: format!("{err:#}"),
-                    },
+            MediaCommand::FullBlade {
+                id,
+                url,
+                texture_bound,
+            } => match required_url(url.as_deref()).and_then(|url| media.blade(id, url)) {
+                Ok(blade) => {
+                    let display = blade.downsample(texture_bound);
+                    Event::FullBlade { blade, display }
                 }
-            }
+                Err(err) => Event::FullBladeFault {
+                    id,
+                    fault: format!("{err:#}"),
+                },
+            },
             MediaCommand::Save { id, url, path } => {
                 match required_url(url.as_deref()).and_then(|url| save_media(&media, id, url, path))
                 {
@@ -1164,6 +1182,7 @@ mod tests {
         tx.send(MediaCommand::FullBlade {
             id: PostId(9),
             url: None,
+            texture_bound: [1920, 1080],
         })
         .context("send full blade")?;
         let mut pending = VecDeque::new();

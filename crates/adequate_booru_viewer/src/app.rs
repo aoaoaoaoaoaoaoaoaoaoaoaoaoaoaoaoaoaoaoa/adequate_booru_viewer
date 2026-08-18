@@ -76,6 +76,7 @@ const MAX_GROUP_DEPTH: usize = 8;
 const PLATE_PAD: f32 = 4.0;
 const TILE_RADIUS: u8 = 2;
 const PREFETCH_DWELL: Duration = Duration::from_millis(120);
+const VIEWER_PREFETCH_LOOKAHEAD: usize = 2;
 const THUMB_PREFETCH_BUDGET: usize = 48;
 const CONFIG_SETTLE: Duration = Duration::from_millis(400);
 const VEIL_RADIUS: f32 = 2.0;
@@ -85,6 +86,102 @@ const VEIL_FALL: f32 = 0.06;
 const ZOOM_DIM: f32 = 0.78;
 const MENU_DIM: f32 = 0.62;
 const TAG_DEFINITION_RETRY: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResultMotion {
+    Previous,
+    Next,
+    PreviousRow,
+    NextRow,
+    First,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResultDirection {
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ResultWake {
+    samples: [Option<ResultDirection>; 5],
+    cursor: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResultSeam {
+    origin: PostId,
+    left: [Option<PostId>; VIEWER_PREFETCH_LOOKAHEAD],
+    right: [Option<PostId>; VIEWER_PREFETCH_LOOKAHEAD],
+}
+
+fn exact_key_pressed(input: &egui::InputState, modifiers: egui::Modifiers, key: egui::Key) -> bool {
+    input.events.iter().any(|event| {
+        matches!(
+            event,
+            egui::Event::Key {
+                key: candidate,
+                pressed: true,
+                modifiers: held,
+                ..
+            } if *candidate == key && held.matches_exact(modifiers)
+        )
+    })
+}
+
+impl ResultWake {
+    fn record(&mut self, direction: ResultDirection) {
+        self.samples[self.cursor] = Some(direction);
+        self.cursor = (self.cursor + 1) % self.samples.len();
+    }
+
+    fn bearing(self) -> ResultDirection {
+        let left = self
+            .samples
+            .into_iter()
+            .filter(|sample| *sample == Some(ResultDirection::Left))
+            .count();
+        let right = self.samples.into_iter().flatten().count() - left;
+        if left > right {
+            ResultDirection::Left
+        } else {
+            ResultDirection::Right
+        }
+    }
+}
+
+impl ResultMotion {
+    fn read(input: &egui::InputState) -> Option<Self> {
+        [
+            (egui::Key::ArrowLeft, Self::Previous),
+            (egui::Key::ArrowRight, Self::Next),
+            (egui::Key::PageUp, Self::PreviousRow),
+            (egui::Key::PageDown, Self::NextRow),
+            (egui::Key::Home, Self::First),
+        ]
+        .into_iter()
+        .find_map(|(key, motion)| {
+            exact_key_pressed(input, egui::Modifiers::NONE, key).then_some(motion)
+        })
+    }
+
+    fn scroll_offset(self, current: f32, row_height: f32) -> Option<f32> {
+        match self {
+            Self::PreviousRow => Some((current - row_height).max(0.0)),
+            Self::NextRow => Some(current + row_height),
+            Self::First => Some(0.0),
+            Self::Previous | Self::Next => None,
+        }
+    }
+
+    const fn direction(self) -> Option<ResultDirection> {
+        match self {
+            Self::Previous => Some(ResultDirection::Left),
+            Self::Next => Some(ResultDirection::Right),
+            Self::PreviousRow | Self::NextRow | Self::First => None,
+        }
+    }
+}
 
 struct DurableState {
     config: Config,
@@ -136,6 +233,8 @@ pub struct Bayonet {
     hit: SearchHit,
     hit_key: HitKey,
     hit_cache: HitCache,
+    /// Newest result snapshot held behind an interaction that must not reorder
+    /// its live sequence.
     parked_hit: Option<(HitKey, SearchHit)>,
     retrieval_horizon: usize,
     horizon_pending: bool,
@@ -153,10 +252,15 @@ pub struct Bayonet {
     full_wait: HashMap<PostId, FullWait>,
     full_inflight: HashSet<PostId>,
     full_faults: HashSet<PostId>,
+    full_residency: HashSet<PostId>,
+    result_wake: ResultWake,
     zoom: Option<PostRecord>,
     /// The global-result tile from which the current family excursion began.
     /// Family focus may leave `hit.posts`; this anchor must not.
     viewer_gallery_anchor: Option<PostId>,
+    /// One departure through the result order that existed before favoriting
+    /// moved the open image.
+    viewer_result_seam: Option<ResultSeam>,
     zoom_gate: ZoomGate,
     zoom_rect: Option<egui::Rect>,
     family_serial: u64,
@@ -172,6 +276,11 @@ pub struct Bayonet {
     tag_definitions: HashMap<Tag, TagDefinitionMemo>,
     tag_definition_serial: u64,
     images_per_row: u16,
+    /// Actual column count of one rendered result row; viewport constraints may
+    /// narrow it below `images_per_row`.
+    gallery_columns: usize,
+    gallery_scroll_offset: f32,
+    gallery_center: Option<PostId>,
     /// Left-rail recess fold state, the running truth written back to the
     /// slate; keyed by section id, `true` ⇒ open. Seeded from the slate and
     /// updated whenever a recess is thrown.
@@ -385,8 +494,11 @@ impl Bayonet {
             full_wait: HashMap::new(),
             full_inflight: HashSet::new(),
             full_faults: HashSet::new(),
+            full_residency: HashSet::new(),
+            result_wake: ResultWake::default(),
             zoom: None,
             viewer_gallery_anchor: None,
+            viewer_result_seam: None,
             zoom_gate: ZoomGate::Fresh,
             zoom_rect: None,
             family_serial: 0,
@@ -404,6 +516,9 @@ impl Bayonet {
             images_per_row: slate
                 .images_per_row
                 .clamp(MIN_IMAGES_PER_ROW, MAX_IMAGES_PER_ROW),
+            gallery_columns: 1,
+            gallery_scroll_offset: 0.0,
+            gallery_center: None,
             shutters: slate.shutters,
             panels: PanelNavigator::default(),
             guide: CommandGuide::default(),
@@ -508,9 +623,14 @@ impl Bayonet {
             } else {
                 commands::Context::Workbench
             };
-            if let Some(dispatch) =
+            let dispatch = if self.zoom.is_some() {
+                commands::canon().route_in_modal(&ctx, viewer::layer(), &[context], |edict| {
+                    self.edict_status(edict)
+                })
+            } else {
                 commands::canon().route(&ctx, &[context], |edict| self.edict_status(edict))
-            {
+            };
+            if let Some(dispatch) = dispatch {
                 self.apply_edict(&ctx, dispatch);
             }
         }
@@ -570,9 +690,22 @@ impl Bayonet {
             {
                 CommandStatus::Hidden
             }
+            Edict::OpenViewerTree if self.viewer_surface == ViewerSurface::Family => {
+                CommandStatus::Hidden
+            }
+            Edict::OpenViewerTree
+                if self
+                    .viewer_family
+                    .as_ref()
+                    .and_then(FamilyTree::badge)
+                    .is_none() =>
+            {
+                CommandStatus::Disabled("the family tree is not available yet")
+            }
             Edict::FocusTagEntry
             | Edict::NextQueryGroup
             | Edict::PreviousQueryGroup
+            | Edict::OpenViewerTree
             | Edict::ToggleViewerTags => CommandStatus::Enabled,
         }
     }
@@ -593,6 +726,9 @@ impl Bayonet {
             }
             Edict::NextQueryGroup => self.cycle_query_group(GroupCycle::Forward),
             Edict::PreviousQueryGroup => self.cycle_query_group(GroupCycle::Backward),
+            Edict::OpenViewerTree => {
+                let _opened = self.open_family_tree();
+            }
             Edict::ToggleViewerTags => self.toggle_viewer_tags(ctx),
         }
     }
@@ -735,7 +871,7 @@ impl Bayonet {
             self.date_range,
             self.gallery,
         );
-        if self.tag_menu.is_open() {
+        if self.tag_menu.is_open() || self.zoom.is_some() {
             self.parked_hit = Some((key, hit));
             return;
         }
@@ -778,6 +914,13 @@ impl Bayonet {
     fn close_tag_menu(&mut self) {
         self.tag_menu = TagMenu::Closed;
         self.tag_menu_rect = None;
+        self.release_parked_hit();
+    }
+
+    fn release_parked_hit(&mut self) {
+        if self.tag_menu.is_open() || self.zoom.is_some() {
+            return;
+        }
         if let Some((key, hit)) = self.parked_hit.take() {
             self.commit_hit(key, hit);
         }
@@ -1271,7 +1414,7 @@ impl Bayonet {
                     ctx.request_repaint();
                 }
                 Event::Blade { bucket, blade } => {
-                    self.install_blade(ctx, blade, BladeKind::Thumb(bucket));
+                    self.install_blade(ctx, blade, None, BladeKind::Thumb(bucket));
                 }
                 Event::BladeFault { id, bucket, fault } => {
                     let key = ThumbKey { id, bucket };
@@ -1280,14 +1423,16 @@ impl Bayonet {
                     self.status = fault;
                     ctx.request_repaint();
                 }
-                Event::FullBlade(blade) => {
-                    self.install_blade(ctx, blade, BladeKind::Full);
+                Event::FullBlade { blade, display } => {
+                    self.install_blade(ctx, blade, display, BladeKind::Full);
                 }
                 Event::FullBladeFault { id, fault } => {
                     let _was_inflight = self.full_inflight.remove(&id);
                     let _was_waiting = self.full_wait.remove(&id);
                     let _faulted = self.full_faults.insert(id);
-                    self.status = fault;
+                    if self.zoom.as_ref().is_some_and(|post| post.id == id) {
+                        self.status = fault;
+                    }
                     ctx.request_repaint();
                 }
                 Event::MediaSaved { id, path } => {
@@ -1321,7 +1466,13 @@ impl Bayonet {
         }
     }
 
-    fn install_blade(&mut self, ctx: &egui::Context, blade: RgbaBlade, kind: BladeKind) {
+    fn install_blade(
+        &mut self,
+        ctx: &egui::Context,
+        blade: RgbaBlade,
+        display: Option<RgbaBlade>,
+        kind: BladeKind,
+    ) {
         match kind {
             BladeKind::Thumb(bucket) => {
                 let key = ThumbKey {
@@ -1336,11 +1487,15 @@ impl Bayonet {
                 let _was_inflight = self.full_inflight.remove(&blade.id);
                 let _was_waiting = self.full_wait.remove(&blade.id);
                 let _was_faulted = self.full_faults.remove(&blade.id);
-                // A blade landing after its viewer closed would pin GPU memory forever.
-                if self.zoom.as_ref().is_none_or(|post| post.id != blade.id) {
+                // A superseded prediction may land after the viewer turns;
+                // residency is the sole authority for GPU and decoded memory.
+                if !self.full_residency.contains(&blade.id) {
                     return;
                 }
-                let _old_texture = self.full.insert(blade.id, blade_texture(ctx, &blade, kind));
+                let texture_blade = display.as_ref().unwrap_or(&blade);
+                let _old_texture = self
+                    .full
+                    .insert(blade.id, blade_texture(ctx, texture_blade, kind));
                 let _old_born = self.full_loaded_at.insert(blade.id, Instant::now());
                 let _old_rgba = self.full_rgba.insert(blade.id, blade);
             }
@@ -1352,6 +1507,7 @@ impl Bayonet {
         let width = ui.available_width().max(MIN_TILE_EDGE);
         let max_cols = (((width + GAP) / (MIN_TILE_EDGE + GAP)) as usize).max(1);
         let cols = usize::from(self.images_per_row.max(1)).min(max_cols);
+        self.gallery_columns = cols;
         let tile = tile_edge(width, cols);
         let posts = std::mem::take(&mut self.hit.posts);
         let rows = posts.len().div_ceil(cols);
@@ -1360,7 +1516,33 @@ impl Bayonet {
         let mut visible_rows = 0..0;
         let arena = ui.max_rect();
         self.water.begin(crate::water::Domain::shelf(arena));
-        let scroll = egui::ScrollArea::vertical().show_rows(ui, row_height, rows, |ui, range| {
+        let centered = self
+            .gallery_center
+            .take()
+            .and_then(|id| posts.iter().position(|post| post.id == id))
+            .map(|slot| {
+                let row = slot / cols;
+                ((row as f32).mul_add(row_height, (tile - arena.height()) * 0.5)).max(0.0)
+            });
+        let navigate = self.zoom.is_none()
+            && !self.guide.is_open()
+            && !self.tag_menu.is_open()
+            && !self.bench_open
+            && !ui.ctx().text_edit_focused()
+            && ui.ctx().memory(egui::Memory::top_modal_layer).is_none();
+        let offset = centered.or_else(|| {
+            navigate
+                .then(|| ui.input(ResultMotion::read))
+                .flatten()
+                .and_then(|motion| motion.scroll_offset(self.gallery_scroll_offset, row_height))
+        });
+        let scroll = egui::ScrollArea::vertical();
+        let scroll = if let Some(offset) = offset {
+            scroll.vertical_scroll_offset(offset)
+        } else {
+            scroll
+        };
+        let scroll = scroll.show_rows(ui, row_height, rows, |ui, range| {
             visible_rows = range.clone();
             ui.spacing_mut().item_spacing.x = GAP;
             for row in range {
@@ -1374,6 +1556,7 @@ impl Bayonet {
                 });
             }
         });
+        self.gallery_scroll_offset = scroll.state.offset.y;
         if posts.is_empty() {
             self.empty_gallery(ui, arena);
         } else {
@@ -1462,7 +1645,7 @@ impl Bayonet {
         menu_opened
     }
 
-    /// Warms the disk cache with the full image after a short hover dwell, so
+    /// Warms the disk cache with the viewer image after a short hover dwell, so
     /// a click lands on bytes that are already local. The dwell keeps casual
     /// mouse sweeps from spraying multi-megabyte downloads.
     fn arm_prefetch(&mut self, ctx: &egui::Context, post: &PostRecord) {
@@ -1478,21 +1661,33 @@ impl Bayonet {
                     ctx.request_repaint_after(PREFETCH_DWELL.saturating_sub(since.elapsed()));
                     return;
                 }
-                let _marked = self.prefetched.insert(post.id);
-                let Some(url) = post.full_url().map(ToOwned::to_owned) else {
-                    return;
-                };
-                if let Err(err) = self.worker.send(Command::Prefetch {
-                    id: post.id,
-                    url: Some(url),
-                }) {
-                    self.status = format!("{err:#}");
-                }
+                self.prefetch_post(post);
             }
             _ => {
                 self.hover_arm = Some((post.id, Instant::now()));
                 ctx.request_repaint_after(PREFETCH_DWELL);
             }
+        }
+    }
+
+    fn prefetch_post(&mut self, post: &PostRecord) {
+        if self.prefetched.contains(&post.id) || self.full_inflight.contains(&post.id) {
+            return;
+        }
+        let Some(url) = post.viewer_url().map(ToOwned::to_owned) else {
+            return;
+        };
+        self.prefetch_url(post.id, url);
+    }
+
+    fn prefetch_url(&mut self, id: PostId, url: String) {
+        if self.prefetched.contains(&id) || self.full_inflight.contains(&id) {
+            return;
+        }
+        let _marked = self.prefetched.insert(id);
+        if let Err(err) = self.worker.send(Command::Prefetch { id, url: Some(url) }) {
+            let _unmarked = self.prefetched.remove(&id);
+            self.status = format!("{err:#}");
         }
     }
 
@@ -2213,7 +2408,7 @@ impl Bayonet {
             .scroll_id("filter-scroll")
             .show(ui, |ui| self.left_panel(ui, &mut panels));
         self.panels = panels;
-        self.water.heave(&ctx, inspector.scroll_offset);
+        inspector.agitate(&mut self.water);
         let prior = self.tag_menu.post_id();
         self.tag_menu_rect = None;
         self.tag_palette_overlay(&ctx);
@@ -2237,10 +2432,12 @@ impl Bayonet {
         } else {
             commands::Context::Workbench
         };
-        let idioms = if context == commands::Context::Viewer {
-            &commands::VIEWER_CONTEXT_IDIOMS[..]
-        } else {
-            &commands::WORKBENCH_IDIOMS[..]
+        let idioms = match (context, self.viewer_surface) {
+            (commands::Context::Viewer, ViewerSurface::Image) => &commands::IMAGE_VIEWER_IDIOMS[..],
+            (commands::Context::Viewer, ViewerSurface::Family) => {
+                &commands::FAMILY_VIEWER_IDIOMS[..]
+            }
+            (commands::Context::Workbench, _) => &commands::WORKBENCH_IDIOMS[..],
         };
         let mut guide = std::mem::take(&mut self.guide);
         guide.show(

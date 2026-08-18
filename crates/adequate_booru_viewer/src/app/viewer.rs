@@ -16,6 +16,10 @@ const KIN_DRAG_BLOCKED_CEIL: f32 = 22.0;
 const KIN_SPRING_OMEGA: f32 = 24.0;
 const KIN_SPRING_ZETA: f32 = 0.58;
 const VIEWER_RECOIL: f32 = 0.03;
+const VIEWER_ID: &str = "full-viewer";
+/// Content inset which leaves roughly eight visible points after egui's
+/// six-point window frame margin is added.
+const VIEWER_FIT_MARGIN: f32 = 14.0;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct KinDrag {
@@ -55,6 +59,30 @@ pub(super) enum KinStep {
     Next,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ViewerMotion {
+    Result(ResultMotion),
+    Kin(KinStep),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SeamPassage {
+    Ordinary,
+    Walled,
+    Exit(PostId),
+}
+
+impl KinStep {
+    const fn control(self) -> abv_contract::ViewerControl {
+        match self {
+            Self::Previous => abv_contract::ViewerControl::Previous,
+            Self::Parent => abv_contract::ViewerControl::Parent,
+            Self::Children => abv_contract::ViewerControl::Children,
+            Self::Next => abv_contract::ViewerControl::Next,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct KinNav {
     passages: [bool; 4],
@@ -67,7 +95,84 @@ impl KinNav {
     }
 }
 
-pub(super) fn viewer_title_bar(
+impl ResultSeam {
+    fn capture(posts: &[PostRecord], origin: PostId, slot: usize) -> Self {
+        let left = std::array::from_fn(|offset| {
+            slot.checked_sub(offset + 1)
+                .and_then(|target| posts.get(target))
+                .map(|post| post.id)
+        });
+        let right = std::array::from_fn(|offset| {
+            slot.checked_add(offset + 1)
+                .and_then(|target| posts.get(target))
+                .map(|post| post.id)
+        });
+        Self {
+            origin,
+            left,
+            right,
+        }
+    }
+
+    const fn ray(self, direction: ResultDirection) -> [Option<PostId>; VIEWER_PREFETCH_LOOKAHEAD] {
+        match direction {
+            ResultDirection::Left => self.left,
+            ResultDirection::Right => self.right,
+        }
+    }
+}
+
+pub(super) fn layer() -> egui::LayerId {
+    egui::LayerId::new(egui::Order::Middle, egui::Id::new(VIEWER_ID))
+}
+
+fn obscured(ctx: &egui::Context) -> bool {
+    ctx.memory(egui::Memory::top_modal_layer)
+        .is_some_and(|top| top != layer())
+}
+
+fn lateral_result_motion(
+    input: &egui::InputState,
+    modifiers: egui::Modifiers,
+) -> Option<ResultMotion> {
+    [
+        (egui::Key::ArrowLeft, ResultMotion::Previous),
+        (egui::Key::ArrowRight, ResultMotion::Next),
+    ]
+    .into_iter()
+    .find_map(|(key, motion)| exact_key_pressed(input, modifiers, key).then_some(motion))
+}
+
+fn kin_motion(input: &egui::InputState, lateral: egui::Modifiers) -> Option<KinStep> {
+    [
+        (egui::Modifiers::NONE, egui::Key::ArrowUp, KinStep::Parent),
+        (
+            egui::Modifiers::NONE,
+            egui::Key::ArrowDown,
+            KinStep::Children,
+        ),
+        (lateral, egui::Key::ArrowLeft, KinStep::Previous),
+        (lateral, egui::Key::ArrowRight, KinStep::Next),
+    ]
+    .into_iter()
+    .find_map(|(modifiers, key, motion)| exact_key_pressed(input, modifiers, key).then_some(motion))
+}
+
+fn viewer_motion(input: &egui::InputState, surface: ViewerSurface) -> Option<ViewerMotion> {
+    let (result_modifiers, kin_modifiers) = match surface {
+        ViewerSurface::Image => (egui::Modifiers::NONE, egui::Modifiers::ALT),
+        ViewerSurface::Family => (egui::Modifiers::ALT, egui::Modifiers::NONE),
+    };
+    lateral_result_motion(input, result_modifiers)
+        .map(ViewerMotion::Result)
+        .or_else(|| kin_motion(input, kin_modifiers).map(ViewerMotion::Kin))
+}
+
+fn record_control(ui: &egui::Ui, control: abv_contract::ViewerControl, response: &egui::Response) {
+    crate::witness::response(ui, abv_contract::Target::ViewerControl(control), response);
+}
+
+fn viewer_title_bar(
     ui: &mut egui::Ui,
     water: &mut brass_poolrooms::water::Surface,
     post: &PostRecord,
@@ -91,6 +196,7 @@ pub(super) fn viewer_title_bar(
                     crate::booru::post_url(post.id),
                 );
                 crate::probe_anchor!(ui, format!("danbooru:{}", post.id.0), link.interact_rect);
+                record_control(ui, abv_contract::ViewerControl::Danbooru, &link);
                 let _link = link.on_hover_text("open on Danbooru");
                 let _meta = ui.label(
                     egui::RichText::new(format!("score {}  fav {}", post.score, post.favs))
@@ -105,23 +211,40 @@ pub(super) fn viewer_title_bar(
                         (KinStep::Children, "children"),
                         (KinStep::Next, "next"),
                     ] {
-                        if kin_button(ui, step, kin.allows(step))
-                            .on_hover_text(help)
-                            .clicked()
-                        {
+                        let response = kin_button(ui, step, kin.allows(step));
+                        record_control(ui, step.control(), &response);
+                        if response.on_hover_text(help).clicked() {
                             actions.push(ViewerAction::Kin(step));
                         }
                     }
                 }
                 let _actions =
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if controls::symbol(ui, water, chrome::Symbol::Remove)
-                            .on_hover_text("close")
-                            .clicked()
-                        {
+                        let close = controls::symbol_sized(
+                            ui,
+                            water,
+                            chrome::Symbol::Remove,
+                            chrome::MechanismSize::Medium,
+                        );
+                        record_control(ui, abv_contract::ViewerControl::Close, &close);
+                        if close.on_hover_text("close").clicked() {
                             actions.push(ViewerAction::Close);
                         }
-                        if controls::plate(ui, if favorite { "♥" } else { "♡" }, favorite)
+                        let favorite_control = chrome::Monoglyph::symbol(chrome::Symbol::Heart)
+                            .finish(if favorite {
+                                chrome::MonoglyphFinish::Love
+                            } else {
+                                chrome::MonoglyphFinish::BrightCut
+                            })
+                            .size(chrome::MechanismSize::Medium)
+                            .show(ui);
+                        water.monoglyph(&favorite_control);
+                        record_control(
+                            ui,
+                            abv_contract::ViewerControl::Favorite,
+                            &favorite_control,
+                        );
+                        if favorite_control
                             .on_hover_text(if favorite {
                                 "remove local favorite"
                             } else {
@@ -131,12 +254,19 @@ pub(super) fn viewer_title_bar(
                         {
                             actions.push(ViewerAction::Favorite);
                         }
-                        if controls::plate_enabled(ui, post.full_url().is_some(), "save", false)
-                            .clicked()
-                        {
+                        let save = controls::plate_enabled(
+                            ui,
+                            post.original_url().is_some(),
+                            "save",
+                            false,
+                        );
+                        record_control(ui, abv_contract::ViewerControl::Save, &save);
+                        if save.clicked() {
                             actions.push(ViewerAction::Save);
                         }
-                        if controls::plate(ui, "copy", false).clicked() {
+                        let copy = controls::plate(ui, "copy", false);
+                        record_control(ui, abv_contract::ViewerControl::Copy, &copy);
+                        if copy.clicked() {
                             actions.push(ViewerAction::Copy);
                         }
                         if surface == ViewerSurface::Image {
@@ -147,11 +277,12 @@ pub(super) fn viewer_title_bar(
                                     .min_size(egui::vec2(24.0, 20.0)),
                             );
                             chrome::tension(ui, &response);
-                            let response = response.on_hover_text(format!(
-                                "toggle tags ({})",
-                                commands::canon().shortcuts(Edict::ToggleViewerTags)[0]
-                                    .label(ui.ctx())
-                            ));
+                            let response = response.on_hover_text(if tags_open {
+                                "hide tags"
+                            } else {
+                                "show tags"
+                            });
+                            record_control(ui, abv_contract::ViewerControl::Tags, &response);
                             if chrome::exact_activation(ui, &response) {
                                 actions.push(ViewerAction::Tags);
                             }
@@ -159,6 +290,7 @@ pub(super) fn viewer_title_bar(
                     });
             });
         });
+    crate::probe_anchor!(ui, "viewer:toolbar", _bar.response.rect);
     actions
 }
 
@@ -217,6 +349,7 @@ impl Bayonet {
     pub(super) fn open_full(&mut self, post: &PostRecord) {
         self.zoom = Some(post.clone());
         self.viewer_gallery_anchor = Some(post.id);
+        self.viewer_result_seam = None;
         self.zoom_gate = ZoomGate::Fresh;
         self.viewer_surface = ViewerSurface::Image;
         self.viewer_drag = KinDrag::default();
@@ -229,7 +362,7 @@ impl Bayonet {
         self.family_water.reset();
         self.water.close_pond();
         let _old_fault = self.full_faults.remove(&post.id);
-        self.request_full(post);
+        let _old_fade = self.full_loaded_at.remove(&post.id);
         self.request_family(post.id);
     }
 
@@ -243,23 +376,33 @@ impl Bayonet {
         }
     }
 
-    /// Steps the viewer through the current result sequence, keeping
-    /// full-image memory O(1) by evicting everything but the new post.
-    fn step_zoom(&mut self, step: i32) {
+    /// Steps the viewer through the current result sequence. Residency is
+    /// reconciled later in the frame so prepared successors survive promotion.
+    fn navigate_result(&mut self, motion: ResultMotion) {
         let Some(slot) = self.gallery_slot() else {
             return;
         };
-        let target = slot
-            .saturating_add_signed(step as isize)
-            .min(self.hit.posts.len().saturating_sub(1));
+        let last = self.hit.posts.len().saturating_sub(1);
+        let target = match self.seam_passage(motion) {
+            SeamPassage::Exit(id) => {
+                let Some(target) = self.hit.posts.iter().position(|post| post.id == id) else {
+                    return;
+                };
+                target
+            }
+            SeamPassage::Walled => return,
+            SeamPassage::Ordinary => match motion {
+                ResultMotion::Previous => slot.saturating_sub(1),
+                ResultMotion::Next => (slot + 1).min(last),
+                ResultMotion::PreviousRow => slot.saturating_sub(self.gallery_columns),
+                ResultMotion::NextRow => slot.saturating_add(self.gallery_columns).min(last),
+                ResultMotion::First => 0,
+            },
+        };
         let post = self.hit.posts[target].clone();
         if self.zoom.as_ref().is_some_and(|zoom| post.id == zoom.id) {
             return;
         }
-        self.full.retain(|id, _| *id == post.id);
-        self.full_rgba.retain(|id, _| *id == post.id);
-        self.full_loaded_at.retain(|id, _| *id == post.id);
-        self.full_wait.retain(|id, _| *id == post.id);
         self.open_full(&post);
     }
 
@@ -268,14 +411,43 @@ impl Bayonet {
         gallery_slot(&self.hit.posts, current, self.viewer_gallery_anchor)
     }
 
-    fn can_step_zoom(&self, step: i32) -> bool {
+    fn seam_passage(&self, motion: ResultMotion) -> SeamPassage {
+        let Some(current) = self.zoom.as_ref().map(|post| post.id) else {
+            return SeamPassage::Ordinary;
+        };
+        let Some(seam) = self
+            .viewer_result_seam
+            .filter(|seam| seam.origin == current)
+        else {
+            return SeamPassage::Ordinary;
+        };
+        let target = match motion {
+            ResultMotion::Previous => seam.left[0],
+            ResultMotion::Next => seam.right[0],
+            ResultMotion::PreviousRow | ResultMotion::NextRow | ResultMotion::First => {
+                return SeamPassage::Ordinary;
+            }
+        };
+        target.map_or(SeamPassage::Walled, SeamPassage::Exit)
+    }
+
+    fn can_navigate_result(&self, motion: ResultMotion) -> bool {
+        match self.seam_passage(motion) {
+            SeamPassage::Exit(id) => return self.hit.posts.iter().any(|post| post.id == id),
+            SeamPassage::Walled => return false,
+            SeamPassage::Ordinary => {}
+        }
         let Some(slot) = self.gallery_slot() else {
             return false;
         };
-        match step.cmp(&0) {
-            std::cmp::Ordering::Less => slot > 0,
-            std::cmp::Ordering::Equal => false,
-            std::cmp::Ordering::Greater => slot + 1 < self.hit.posts.len(),
+        match motion {
+            ResultMotion::Previous => slot > 0,
+            ResultMotion::Next => slot + 1 < self.hit.posts.len(),
+            ResultMotion::PreviousRow => slot >= self.gallery_columns,
+            ResultMotion::NextRow => {
+                slot.saturating_add(self.gallery_columns) < self.hit.posts.len()
+            }
+            ResultMotion::First => slot > 0,
         }
     }
 
@@ -291,19 +463,19 @@ impl Bayonet {
         let root = id == tree.root;
         KinNav {
             passages: [
-                lateral || root && self.can_step_zoom(-1),
+                lateral || root && self.can_navigate_result(ResultMotion::Previous),
                 node.parent
                     .is_some_and(|parent| tree.post(parent).is_some()),
                 node.children
                     .iter()
                     .any(|child| tree.post(*child).is_some()),
-                lateral || root && self.can_step_zoom(1),
+                lateral || root && self.can_navigate_result(ResultMotion::Next),
             ],
             present: tree.badge().is_some(),
         }
     }
 
-    fn open_family_tree(&mut self) -> bool {
+    pub(super) fn open_family_tree(&mut self) -> bool {
         if self
             .viewer_family
             .as_ref()
@@ -347,29 +519,36 @@ impl Bayonet {
         let Some(id) = self.zoom.as_ref().map(|post| post.id) else {
             return;
         };
-        let Some(tree) = self.viewer_family.as_ref() else {
+        let root = self
+            .viewer_family
+            .as_ref()
+            .is_some_and(|tree| id == tree.root);
+        if self.step_kin(step) || !root {
             return;
-        };
-        let root = id == tree.root;
-        let target = direct_kin_target(tree, id, step);
+        }
+        match step {
+            KinStep::Previous => self.navigate_result(ResultMotion::Previous),
+            KinStep::Next => self.navigate_result(ResultMotion::Next),
+            KinStep::Parent | KinStep::Children => {}
+        }
+    }
+
+    fn step_kin(&mut self, step: KinStep) -> bool {
+        let target = self.viewer_family.as_ref().and_then(|tree| {
+            let id = self.zoom.as_ref()?.id;
+            direct_kin_target(tree, id, step)
+        });
         if let Some(post) = target {
             self.focus_family_post(post);
-        } else if root {
-            match step {
-                KinStep::Previous => self.step_zoom(-1),
-                KinStep::Next => self.step_zoom(1),
-                KinStep::Parent | KinStep::Children => {}
-            }
+            true
+        } else {
+            false
         }
     }
 
     fn focus_family_post(&mut self, post: PostRecord) {
-        self.full.retain(|id, _| *id == post.id);
-        self.full_rgba.retain(|id, _| *id == post.id);
-        self.full_loaded_at.retain(|id, _| *id == post.id);
-        self.full_wait.retain(|id, _| *id == post.id);
-        self.full_faults.retain(|id| *id == post.id);
         self.zoom = Some(post.clone());
+        self.viewer_result_seam = None;
         self.viewer_surface = ViewerSurface::Image;
         self.viewer_drag = KinDrag::default();
         self.viewer_recoil = None;
@@ -378,7 +557,8 @@ impl Bayonet {
             tree.focus = post.id;
         }
         self.water.close_pond();
-        self.request_full(&post);
+        let _old_fault = self.full_faults.remove(&post.id);
+        let _old_fade = self.full_loaded_at.remove(&post.id);
     }
 
     fn select_tree_kin(&mut self, step: KinStep) {
@@ -456,16 +636,16 @@ impl Bayonet {
         (self.viewer_drag.offset, None)
     }
 
-    fn request_full(&mut self, post: &PostRecord) {
+    fn request_full(&mut self, ctx: &egui::Context, post: &PostRecord) {
         if self.full.contains_key(&post.id)
             || self.full_inflight.contains(&post.id)
             || self.full_faults.contains(&post.id)
         {
             return;
         }
-        let Some(url) = post.full_url().map(ToOwned::to_owned) else {
+        let Some(url) = post.viewer_url().map(ToOwned::to_owned) else {
             let _faulted = self.full_faults.insert(post.id);
-            self.status = format!("#{id} has no full image URL", id = post.id);
+            self.status = format!("#{id} has no viewable image URL", id = post.id);
             return;
         };
         let media_dir = self.lair.media_dir();
@@ -480,6 +660,7 @@ impl Bayonet {
         if let Err(err) = self.worker.send(Command::FullBlade {
             id: post.id,
             url: Some(url),
+            texture_bound: viewer_texture_bound(ctx),
         }) {
             let _was_inflight = self.full_inflight.remove(&post.id);
             let _was_waiting = self.full_wait.remove(&post.id);
@@ -488,51 +669,126 @@ impl Bayonet {
         }
     }
 
+    fn prepare_viewer_wake(&mut self, ctx: &egui::Context) {
+        let Some(current) = self.zoom.as_ref().map(|post| post.id) else {
+            return;
+        };
+        let slot = self.gallery_slot();
+        let bearing = self.result_wake.bearing();
+        let targets = if !self.prefetch_on_hover {
+            [None; VIEWER_PREFETCH_LOOKAHEAD]
+        } else if let Some(seam) = self
+            .viewer_result_seam
+            .filter(|seam| seam.origin == current)
+        {
+            seam.ray(bearing)
+        } else {
+            std::array::from_fn(|offset| {
+                let slot = slot?;
+                let target = match bearing {
+                    ResultDirection::Left => slot.checked_sub(offset + 1),
+                    ResultDirection::Right => slot.checked_add(offset + 1),
+                }?;
+                self.hit.posts.get(target).map(|post| post.id)
+            })
+        };
+        self.full_residency.clear();
+        let _current = self.full_residency.insert(current);
+        for id in targets.iter().flatten().copied() {
+            let _successor = self.full_residency.insert(id);
+        }
+        self.full.retain(|id, _| self.full_residency.contains(id));
+        self.full_rgba
+            .retain(|id, _| self.full_residency.contains(id));
+        self.full_loaded_at
+            .retain(|id, _| self.full_residency.contains(id));
+        self.full_wait
+            .retain(|id, _| self.full_residency.contains(id));
+        self.full_faults
+            .retain(|id| self.full_residency.contains(id));
+
+        for id in targets.into_iter().flatten() {
+            let candidate = self
+                .hit
+                .posts
+                .iter()
+                .find(|post| post.id == id)
+                .and_then(|post| {
+                    if self.full.contains_key(&post.id)
+                        || self.full_inflight.contains(&post.id)
+                        || self.full_faults.contains(&post.id)
+                    {
+                        return None;
+                    }
+                    Some((post.id, post.viewer_url()?.to_owned()))
+                });
+            if let Some((id, url)) = candidate {
+                self.prepare_full(ctx, id, url);
+            }
+        }
+    }
+
+    fn prepare_full(&mut self, ctx: &egui::Context, id: PostId, url: String) {
+        let _marked = self.prefetched.insert(id);
+        let _inflight = self.full_inflight.insert(id);
+        if let Err(err) = self.worker.send(Command::FullBlade {
+            id,
+            url: Some(url),
+            texture_bound: viewer_texture_bound(ctx),
+        }) {
+            let _unmarked = self.prefetched.remove(&id);
+            let _was_inflight = self.full_inflight.remove(&id);
+            self.status = format!("{err:#}");
+        }
+    }
+
+    fn toggle_viewer_favorite(&mut self, id: PostId) {
+        if self.viewer_result_seam.is_none_or(|seam| seam.origin != id)
+            && let Some(slot) = self.gallery_slot()
+        {
+            self.viewer_result_seam = Some(ResultSeam::capture(&self.hit.posts, id, slot));
+        }
+        self.toggle_local_favorite(id);
+    }
+
     pub(super) fn full_frame(&mut self, ctx: &egui::Context) {
+        let input_surface = self.viewer_surface;
         self.water
-            .begin_pond(self.zoom.is_some() && self.viewer_surface == ViewerSurface::Image);
-        let inputs_blocked =
-            self.guide.is_open() || ctx.memory(|memory| memory.top_modal_layer().is_some());
+            .begin_pond(self.zoom.is_some() && input_surface == ViewerSurface::Image);
+        let inputs_blocked = self.guide.is_open() || obscured(ctx);
         if !inputs_blocked && self.zoom.is_some() && !ctx.text_edit_focused() {
-            let key = ctx.input(|input| {
-                [
-                    (egui::Key::ArrowLeft, KinStep::Previous),
-                    (egui::Key::ArrowUp, KinStep::Parent),
-                    (egui::Key::ArrowDown, KinStep::Children),
-                    (egui::Key::ArrowRight, KinStep::Next),
-                ]
-                .into_iter()
-                .find_map(|(key, step)| {
-                    input.key_pressed(key).then_some((
-                        step,
-                        input.modifiers.shift && matches!(step, KinStep::Previous | KinStep::Next),
-                    ))
-                })
-            });
-            if let Some((step, true)) = key {
-                self.step_zoom(if step == KinStep::Previous { -1 } else { 1 });
-            } else if self.viewer_surface == ViewerSurface::Family {
-                if let Some((step, false)) = key {
+            let motion = ctx.input(|input| viewer_motion(input, input_surface));
+            if let Some(ViewerMotion::Result(step)) = motion {
+                if let Some(direction) = step.direction() {
+                    self.result_wake.record(direction);
+                }
+                self.navigate_result(step);
+            } else if input_surface == ViewerSurface::Family {
+                if let Some(ViewerMotion::Kin(step)) = motion {
                     self.select_tree_kin(step);
-                } else if ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+                } else if ctx.input(|input| {
+                    exact_key_pressed(input, egui::Modifiers::NONE, egui::Key::R)
+                        || exact_key_pressed(input, egui::Modifiers::NONE, egui::Key::Enter)
+                        || exact_key_pressed(input, egui::Modifiers::NONE, egui::Key::Escape)
+                }) {
                     self.promote_tree_focus();
                 }
-            } else if let Some((step, false)) = key {
-                let nav = self
-                    .zoom
-                    .as_ref()
-                    .map_or_else(KinNav::default, |post| self.kin_nav(post.id));
-                if nav.allows(step) {
-                    self.navigate_kin(step);
-                } else if matches!(step, KinStep::Previous | KinStep::Next) {
-                    self.step_zoom(if step == KinStep::Previous { -1 } else { 1 });
-                }
+            } else if let Some(ViewerMotion::Kin(step)) = motion {
+                let _moved = self.step_kin(step);
             }
         }
         let Some(post) = self.zoom.clone() else {
             return;
         };
-        self.request_full(&post);
+        if self.zoom_gate == ZoomGate::Fresh
+            && let Some(focused) = ctx.memory(egui::Memory::focused)
+        {
+            ctx.memory_mut(|memory| memory.surrender_focus(focused));
+        }
+        ctx.memory_mut(|memory| memory.set_modal_layer(layer()));
+        let _current = self.full_residency.insert(post.id);
+        self.request_full(ctx, &post);
+        self.prepare_viewer_wake(ctx);
         let mut close = false;
         let screen = ctx.content_rect();
         let surface = self.viewer_surface;
@@ -546,19 +802,23 @@ impl Bayonet {
             ViewerSurface::Family => egui::vec2(screen.width() * 0.88, screen.height() * 0.82),
         };
         let body = egui::vec2(image_box.x + drawer, image_box.y + VIEWER_CHROME);
+        let window_frame = egui::Frame::window(&ctx.global_style());
+        let window_size = body + window_frame.total_margin().sum();
         let kin_nav = self.kin_nav(post.id);
         let recoil = if surface == ViewerSurface::Image {
             self.viewer_recoil_scale(ctx)
         } else {
             1.0
         };
-        // fixed_size is re-asserted every frame: egui persists window sizes by Id,
-        // and a remembered size would wedge every later image into a stale frame.
-        let window = egui::Window::new("full-viewer")
-            .id(egui::Id::new("full-viewer"))
+        // `fixed_size` names the outer frame. Add its complete footprint so the
+        // body owns exactly `body`; egui persists that outer size by Id, hence
+        // it must still be reasserted for every image.
+        let window = egui::Window::new(VIEWER_ID)
+            .id(egui::Id::new(VIEWER_ID))
             .title_bar(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .fixed_size(body)
+            .frame(window_frame)
+            .fixed_size(window_size)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
@@ -574,7 +834,7 @@ impl Bayonet {
                     match action {
                         ViewerAction::Copy => self.copy_full(post.id),
                         ViewerAction::Save => self.save_full(&post),
-                        ViewerAction::Favorite => self.toggle_local_favorite(post.id),
+                        ViewerAction::Favorite => self.toggle_viewer_favorite(post.id),
                         ViewerAction::Tags => self.toggle_viewer_tags(ctx),
                         ViewerAction::Kin(step) => self.navigate_kin(step),
                         ViewerAction::Close => close = true,
@@ -597,7 +857,7 @@ impl Bayonet {
                                     let alpha = self.full_alpha(ctx, post.id);
                                     let (rect, response) = ui.allocate_exact_size(
                                         image_box,
-                                        egui::Sense::click_and_drag(),
+                                        egui::Sense::CLICK | egui::Sense::DRAG,
                                     );
                                     let (drag, drag_step) = self.drag_kin(ctx, &response, kin_nav);
                                     let uv = egui::Rect::from_min_max(
@@ -672,17 +932,25 @@ impl Bayonet {
                 .as_ref()
                 .is_some_and(|window| outside_click(ctx, window.response.rect));
         close |= !inputs_blocked
+            && input_surface == ViewerSurface::Image
             && !self.tag_menu.is_open()
-            && ctx.input(|input| input.key_pressed(egui::Key::Escape));
+            && ctx
+                .input(|input| exact_key_pressed(input, egui::Modifiers::NONE, egui::Key::Escape));
         if close || (self.zoom_gate == ZoomGate::Armed && clicked_outside) {
+            self.gallery_center = self
+                .gallery_slot()
+                .and_then(|slot| self.hit.posts.get(slot))
+                .map(|post| post.id);
             self.zoom = None;
             self.viewer_gallery_anchor = None;
+            self.viewer_result_seam = None;
             self.zoom_gate = ZoomGate::Fresh;
             self.full.clear();
             self.full_rgba.clear();
             self.full_loaded_at.clear();
             self.full_wait.clear();
             self.full_faults.clear();
+            self.full_residency.clear();
             self.viewer_tag_groups = None;
             self.viewer_family = None;
             self.viewer_surface = ViewerSurface::Image;
@@ -692,6 +960,8 @@ impl Bayonet {
             self.viewer_tree_pan = egui::Vec2::ZERO;
             self.viewer_tree_fresh = true;
             self.water.close_pond();
+            self.release_parked_hit();
+            ctx.request_repaint();
         } else {
             // A newly materialized fixed-size egui window settles its size and
             // centered position on successive passes. Drive both passes now;
@@ -723,13 +993,13 @@ impl Bayonet {
             centered_box(ui, size, "loading family");
             return None;
         };
-        let (pond, camera) = ui.allocate_exact_size(size, egui::Sense::drag());
+        let (pond, camera) = ui.allocate_exact_size(size, egui::Sense::DRAG);
         let _background = ui.painter().rect_filled(pond, 0.0, chrome::PAGE);
         self.family_water.begin(crate::water::Domain::basin(pond));
         self.family_water
             .set_floor(Some(crate::water::Floor::deep(pond)));
         let wheel = if !self.guide.is_open()
-            && ui.ctx().memory(|memory| memory.top_modal_layer().is_none())
+            && !obscured(ui.ctx())
             && pond.contains(ui.ctx().pointer_latest_pos().unwrap_or_default())
         {
             take_wheel(ui.ctx())
@@ -781,7 +1051,7 @@ impl Bayonet {
             let response = ui.interact(
                 rect,
                 ui.make_persistent_id(("family-tile", node.id)),
-                egui::Sense::click_and_drag(),
+                egui::Sense::CLICK | egui::Sense::DRAG,
             );
             if response.dragged() {
                 drag = response.drag_delta();
@@ -842,8 +1112,8 @@ impl Bayonet {
     }
 
     fn save_full(&mut self, post: &PostRecord) {
-        let Some(url) = post.full_url().map(ToOwned::to_owned) else {
-            self.status = format!("#{id} has no full image URL", id = post.id);
+        let Some(url) = post.original_url().map(ToOwned::to_owned) else {
+            self.status = format!("#{id} has no original media URL", id = post.id);
             return;
         };
         let Some(path) = rfd::FileDialog::new()
@@ -920,12 +1190,24 @@ fn full_image_box(
     screen: egui::Vec2,
     reserved_width: f32,
 ) -> egui::Vec2 {
-    let image = stable_image_size(post, texture);
     let bounds = egui::vec2(
-        (screen.x * 0.9 - reserved_width).max(64.0),
-        (screen.y * 0.9 - VIEWER_CHROME).max(64.0),
+        (screen.x - VIEWER_FIT_MARGIN * 2.0 - reserved_width).max(64.0),
+        (screen.y - VIEWER_FIT_MARGIN * 2.0 - VIEWER_CHROME).max(64.0),
     );
-    contain_native(image, bounds)
+    contain_native(stable_image_size(post, texture), bounds)
+}
+
+fn viewer_texture_bound(ctx: &egui::Context) -> [u32; 2] {
+    let screen = ctx.content_rect().size();
+    let points = egui::vec2(
+        (screen.x - VIEWER_FIT_MARGIN * 2.0).max(64.0),
+        (screen.y - VIEWER_FIT_MARGIN * 2.0 - VIEWER_CHROME).max(64.0),
+    );
+    let pixels = points * ctx.pixels_per_point();
+    [
+        pixels.x.ceil().max(1.0) as u32,
+        pixels.y.ceil().max(1.0) as u32,
+    ]
 }
 
 fn save_filename(post: &PostRecord, url: &str) -> String {
@@ -949,7 +1231,7 @@ fn wait_box(ui: &mut egui::Ui, size: egui::Vec2, opacity: f32) {
         |ui| {
             let alpha = (opacity * 255.0).round() as u8;
             if alpha > 0 {
-                let text = egui::RichText::new("loading full image")
+                let text = egui::RichText::new("loading image")
                     .color(egui::Color32::from_white_alpha(alpha));
                 let _label = ui.label(text);
                 ui.ctx().request_repaint_after(Duration::from_millis(16));
@@ -1302,5 +1584,26 @@ mod tests {
         let posts = [post(20), post(30), post(40)];
         assert_eq!(gallery_slot(&posts, PostId(10), Some(PostId(30))), Some(1));
         assert_eq!(gallery_slot(&posts, PostId(40), Some(PostId(30))), Some(2));
+        let seam = ResultSeam::capture(&posts, PostId(30), 1);
+        assert_eq!(seam.ray(ResultDirection::Left)[0], Some(PostId(20)));
+        assert_eq!(seam.ray(ResultDirection::Right)[0], Some(PostId(40)));
+    }
+
+    #[test]
+    fn result_wake_predicts_the_median_of_its_last_five_arrows() {
+        let mut wake = ResultWake::default();
+        assert_eq!(wake.bearing(), ResultDirection::Right);
+        for direction in [
+            ResultDirection::Left,
+            ResultDirection::Left,
+            ResultDirection::Left,
+            ResultDirection::Right,
+            ResultDirection::Right,
+        ] {
+            wake.record(direction);
+        }
+        assert_eq!(wake.bearing(), ResultDirection::Left);
+        wake.record(ResultDirection::Right);
+        assert_eq!(wake.bearing(), ResultDirection::Right);
     }
 }

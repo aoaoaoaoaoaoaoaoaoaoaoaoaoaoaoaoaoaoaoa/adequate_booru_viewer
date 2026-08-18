@@ -6,7 +6,7 @@ use std::{
 
 use adequate_booru_viewer::{
     index::Index,
-    model::{PostId, PostRecord, Rating, Tag},
+    model::{Harvest, Kin, PostId, PostRecord, Rating, Tag},
 };
 use egui_tester::{
     AppCommand, Application, Backend, Button, Condition, Error, Frame, Graphics, Key, Modifiers,
@@ -19,6 +19,9 @@ const TITLE: &str = "adequate booru viewer";
 const SLATE: &str = "xdg/state/adequate_booru_viewer/slate.toml";
 const BROWSER_RECORD: &str = "effects/danbooru-url";
 const EFFECT_POST: u32 = 9_000_001;
+const NEXT_POST: u32 = 9_000_000;
+const VIEWER_TOOLBAR: &str = "viewer:toolbar";
+const VIEWER_TAG_DRAWER: &str = "viewer:tag-drawer";
 const DEMO_CONFIG: &[u8] = include_bytes!("../../../demo/wet/config.toml");
 const DEMO_SLATE: &[u8] = include_bytes!("../../../demo/wet/slate.toml");
 
@@ -391,6 +394,31 @@ fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
         "gallery adjustment disturbed the selected query group",
     )?;
 
+    let tile = story.anchor(format!("tile:{EFFECT_POST}"))?;
+    let (x, y) = tile.center();
+    let opened = story.session().click(x, y, Button::Primary)?;
+    let _opened = story.reaction(opened).next_frame()?;
+    let _viewer =
+        focus.wait_anchor(&app, &abv_contract::Target::ViewerSurface.to_string(), WAIT)?;
+    let controls = [
+        abv_contract::ViewerControl::Danbooru,
+        abv_contract::ViewerControl::Next,
+        abv_contract::ViewerControl::Close,
+        abv_contract::ViewerControl::Favorite,
+        abv_contract::ViewerControl::Save,
+        abv_contract::ViewerControl::Copy,
+        abv_contract::ViewerControl::Tags,
+        abv_contract::ViewerControl::Danbooru,
+    ];
+    let first = abv_contract::Target::ViewerControl(controls[0]).to_string();
+    let _entered = story.key(Key::Tab)?.next_frame()?;
+    let _entry = focus.wait_focus(&app, &first, WAIT)?;
+    for control in &controls[1..] {
+        let _next = story.key(Key::Tab)?.next_frame()?;
+        let target = abv_contract::Target::ViewerControl(*control).to_string();
+        let _focused = focus.wait_focus(&app, &target, WAIT)?;
+    }
+
     app.terminate()
 }
 
@@ -399,7 +427,7 @@ fn native_effects(harness: &Harness<'_>) -> Result<()> {
     let mut story = harness.story(&app)?;
     let _post = story.wait(Condition::new(
         "seeded reference post visible",
-        |state: &Observation| state.result_posts == 1,
+        |state: &Observation| state.result_posts == 2,
     ))?;
 
     let _focused = story
@@ -443,6 +471,32 @@ fn native_effects(harness: &Harness<'_>) -> Result<()> {
         .ok_or_else(|| Error::Verdict {
             detail: "initial viewer frame omitted its image surface".to_owned(),
         })?;
+    let mut focus: Probe<Observation> = app.witness()?.typed();
+    let family_control =
+        abv_contract::Target::ViewerControl(abv_contract::ViewerControl::Previous).to_string();
+    let _family_ready = focus.wait_anchor(&app, &family_control, Duration::from_secs(5))?;
+    let _tree = story.key(Key::Character('r'))?.next_frame()?;
+    let family_node = format!("family-node:{EFFECT_POST}");
+    let _tree_open = focus.wait_anchor(&app, &family_node, Duration::from_secs(5))?;
+    let _tree_right = story.key(Key::Right)?.next_frame()?;
+    let _tree_retained = focus.wait_anchor(&app, &family_node, Duration::from_secs(5))?;
+    let _tree_home = story.key(Key::Home)?.next_frame()?;
+    let _tree_retained = focus.wait_anchor(&app, &family_node, Duration::from_secs(5))?;
+    let _image = story.key(Key::Escape)?.next_frame()?;
+    let tag_control =
+        abv_contract::Target::ViewerControl(abv_contract::ViewerControl::Tags).to_string();
+    let _image_open = focus.wait_anchor(&app, &tag_control, Duration::from_secs(5))?;
+    let _tree = story.key(Key::Character('r'))?.next_frame()?;
+    let _tree_open = focus.wait_anchor(&app, &family_node, Duration::from_secs(5))?;
+    let _image = story.key(Key::Character('r'))?.next_frame()?;
+    let _image_open = focus.wait_anchor(&app, &tag_control, Duration::from_secs(5))?;
+    let _tree = story.key(Key::Character('r'))?.next_frame()?;
+    let _tree_open = focus.wait_anchor(&app, &family_node, Duration::from_secs(5))?;
+    let _next = story.chord(Modifiers::ALT, Key::Right)?.next_frame()?;
+    let next_link = format!("danbooru:{NEXT_POST}");
+    let _next_open = focus.wait_anchor(&app, &next_link, Duration::from_secs(5))?;
+    let _returned = story.key(Key::Left)?.next_frame()?;
+    let _effect_open = focus.wait_anchor(&app, &link_target, Duration::from_secs(5))?;
     let _tags = story.key(Key::Character('t'))?.until(Condition::new(
         "viewer tag drawer open",
         |state: &Observation| state.viewer_tags_open,
@@ -466,6 +520,23 @@ fn native_effects(harness: &Harness<'_>) -> Result<()> {
         .ok_or_else(|| Error::Verdict {
             detail: "open tag drawer frame omitted its image surface".to_owned(),
         })?;
+    let toolbar = opened
+        .anchor(VIEWER_TOOLBAR)
+        .ok_or_else(|| Error::Verdict {
+            detail: "open viewer omitted its toolbar geometry".to_owned(),
+        })?;
+    let tag_drawer = opened
+        .anchor(VIEWER_TAG_DRAWER)
+        .ok_or_else(|| Error::Verdict {
+            detail: "open viewer omitted its tag-drawer geometry".to_owned(),
+        })?;
+    demand(
+        (toolbar.rect[2] - tag_drawer.rect[2]).abs() <= 1.0,
+        format!(
+            "viewer toolbar and tag drawer diverged: {:?} versus {:?}",
+            toolbar.rect, tag_drawer.rect
+        ),
+    )?;
     let _tags = story.key(Key::Character('t'))?.until(Condition::new(
         "viewer tag drawer closed",
         |state: &Observation| !state.viewer_tags_open,
@@ -551,22 +622,54 @@ fn seed(testbed: &Testbed) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
     index
-        .absorb(&[PostRecord {
-            id: PostId(EFFECT_POST),
-            rating: Rating::General,
-            score: 42,
-            favs: 7,
-            width: 640,
-            height: 480,
-            created_at: "2026-08-11T00:00:00Z".to_owned(),
-            tags,
-            tag_hints: Vec::new(),
-            preview_url: Some("https://example.test/reference.jpg".to_owned()),
-            thumb_360_url: None,
-            thumb_720_url: None,
-            large_url: None,
-            file_url: None,
-        }])
+        .absorb_harvest(&[
+            Harvest {
+                post: PostRecord {
+                    id: PostId(EFFECT_POST),
+                    rating: Rating::General,
+                    score: 42,
+                    favs: 7,
+                    width: 640,
+                    height: 480,
+                    created_at: "2026-08-11T00:00:00Z".to_owned(),
+                    tags: tags.clone(),
+                    tag_hints: Vec::new(),
+                    preview_url: Some("https://example.test/reference.jpg".to_owned()),
+                    thumb_360_url: None,
+                    thumb_720_url: None,
+                    large_url: None,
+                    file_url: None,
+                },
+                kin: Kin {
+                    id: PostId(EFFECT_POST),
+                    parent: None,
+                    has_children: true,
+                },
+            },
+            Harvest {
+                post: PostRecord {
+                    id: PostId(NEXT_POST),
+                    rating: Rating::General,
+                    score: 41,
+                    favs: 6,
+                    width: 640,
+                    height: 480,
+                    created_at: "2026-08-10T00:00:00Z".to_owned(),
+                    tags,
+                    tag_hints: Vec::new(),
+                    preview_url: Some("https://example.test/next-reference.jpg".to_owned()),
+                    thumb_360_url: None,
+                    thumb_720_url: None,
+                    large_url: None,
+                    file_url: None,
+                },
+                kin: Kin {
+                    id: PostId(NEXT_POST),
+                    parent: None,
+                    has_children: false,
+                },
+            },
+        ])
         .map_err(|error| Error::Verdict {
             detail: format!("seed acceptance index: {error:#}"),
         })?;

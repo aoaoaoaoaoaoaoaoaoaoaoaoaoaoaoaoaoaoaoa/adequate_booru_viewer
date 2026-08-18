@@ -1021,12 +1021,35 @@ impl PostRecord {
         }
     }
 
-    pub fn full_url(&self) -> Option<&str> {
-        self.large_url
+    /// Best available image the in-process decoder can present.
+    ///
+    /// Danbooru's `large_file_url` is a resized sample. Prefer the original
+    /// `file_url` whenever its format belongs to the decoder's raster
+    /// repertoire; non-image originals such as video fall back to the sample.
+    pub fn viewer_url(&self) -> Option<&str> {
+        self.file_url
             .as_deref()
-            .or(self.file_url.as_deref())
+            .filter(|url| decodable_raster(url))
+            .or(self.large_url.as_deref())
             .or(self.preview_url.as_deref())
     }
+
+    /// Original media bytes, with derived images only as compatibility
+    /// fallbacks for records whose original URL is absent.
+    pub fn original_url(&self) -> Option<&str> {
+        self.file_url
+            .as_deref()
+            .or(self.large_url.as_deref())
+            .or(self.preview_url.as_deref())
+    }
+}
+
+fn decodable_raster(url: &str) -> bool {
+    media_extension(url).is_some_and(|extension| {
+        ["gif", "jpeg", "jpg", "png", "webp"]
+            .into_iter()
+            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+    })
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1288,7 +1311,7 @@ mod tests {
     }
 
     #[test]
-    fn ingress_rejects_animated_unsupported_and_media_less_posts() {
+    fn media_policy_rejects_unusable_posts_and_preserves_originals() {
         let post = PostRecord {
             id: PostId(1),
             rating: Rating::General,
@@ -1325,6 +1348,18 @@ mod tests {
         );
         assert_eq!(media_extension("https://example.test/no-extension"), None);
         assert_eq!(media_extension("https://example.test/bad.ext%20"), None);
+
+        let sample = "https://example.test/sample.jpg";
+        let original = "https://example.test/original.PNG?download=1";
+        solo.large_url = Some(sample.to_owned());
+        solo.file_url = Some(original.to_owned());
+        assert_eq!(solo.viewer_url(), Some(original));
+        assert_eq!(solo.original_url(), Some(original));
+
+        let video = "https://example.test/original.webm";
+        solo.file_url = Some(video.to_owned());
+        assert_eq!(solo.viewer_url(), Some(sample));
+        assert_eq!(solo.original_url(), Some(video));
     }
 
     #[test]
