@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 abv-contract = { path = "../abv-contract", version = "0.2.1" }
-adequate_booru_viewer = { path = "../adequate_booru_viewer", version = "1.3.9" }
+adequate_booru_viewer = { path = "../adequate_booru_viewer", version = "1.3.10" }
 arboard = "3.6.1"
 egui-tester = "0.9.6"
 serde = { version = "1.0.229", features = ["derive"] }

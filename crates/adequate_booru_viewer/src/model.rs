@@ -61,11 +61,11 @@ pub enum TagKind {
 }
 
 impl TagKind {
-    pub const ALL: [Self; 5] = [
-        Self::General,
+    pub const PALETTE_ORDER: [Self; 5] = [
         Self::Artist,
         Self::Copyright,
         Self::Character,
+        Self::General,
         Self::Meta,
     ];
 

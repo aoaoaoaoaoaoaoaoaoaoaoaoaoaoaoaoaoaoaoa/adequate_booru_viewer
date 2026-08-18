@@ -93,14 +93,7 @@ impl Bayonet {
         {
             return groups.clone();
         }
-        let mut groups = self.learn_tag_groups(post);
-        groups.sort_by_key(|(kind, _)| match kind {
-            TagKind::Artist => 0,
-            TagKind::Copyright => 1,
-            TagKind::Character => 2,
-            TagKind::General => 3,
-            TagKind::Meta => 4,
-        });
+        let groups = self.learn_tag_groups(post);
         self.viewer_tag_groups = Some((post.id, groups.clone()));
         groups
     }

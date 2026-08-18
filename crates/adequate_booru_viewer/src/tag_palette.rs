@@ -15,7 +15,7 @@ pub fn grouped(
             (tag.clone(), kind)
         })
         .collect::<Vec<_>>();
-    TagKind::ALL
+    TagKind::PALETTE_ORDER
         .into_iter()
         .filter_map(|kind| {
             let group = tags
