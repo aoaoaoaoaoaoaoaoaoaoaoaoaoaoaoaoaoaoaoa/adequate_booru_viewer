@@ -270,12 +270,15 @@ fn viewer_title_bar(
                             actions.push(ViewerAction::Copy);
                         }
                         if surface == ViewerSurface::Image {
-                            let spec = commands::canon().spec(Edict::ToggleViewerTags);
-                            let response = ui.add(
-                                egui::Button::new(spec.widget_text(ui))
-                                    .selected(tags_open)
-                                    .min_size(egui::vec2(24.0, 20.0)),
+                            let command = commands::canon().button_with(
+                                Edict::ToggleViewerTags,
+                                ui,
+                                |button| {
+                                    button.selected(tags_open).min_size(egui::vec2(24.0, 20.0))
+                                },
                             );
+                            let activated = command.clicked();
+                            let response = command.into_response();
                             chrome::tension(ui, &response);
                             let response = response.on_hover_text(if tags_open {
                                 "hide tags"
@@ -283,7 +286,7 @@ fn viewer_title_bar(
                                 "show tags"
                             });
                             record_control(ui, abv_contract::ViewerControl::Tags, &response);
-                            if chrome::exact_activation(ui, &response) {
+                            if activated {
                                 actions.push(ViewerAction::Tags);
                             }
                         }

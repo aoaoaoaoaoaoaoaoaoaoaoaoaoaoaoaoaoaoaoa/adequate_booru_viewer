@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "adequate_booru_viewer"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "abv-contract",
  "anyhow",
@@ -252,15 +252,15 @@ dependencies = [
 
 [[package]]
 name = "brass_foundry"
-version = "0.13.12"
+version = "0.13.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a17ec4de95d3ab5bd4621b4b415888c2b81a967d0e8d2558bf39390472daa77"
+checksum = "7ec340d8debb6b5beedc265845dfb83f4d97560586597e4dda7ef752f13e6dd8"
 
 [[package]]
 name = "brass_poolrooms"
-version = "0.13.12"
+version = "0.13.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca675435651f2ca30b09aa4733d820e53781ac22011aac61fbe11a415eb12cf1"
+checksum = "817d2f1bb96c129d46bc2a2d5ca5791f510b2a6e54d182d30c53c1a3057c1bf2"
 dependencies = [
  "anyhow",
  "brass_foundry",
@@ -852,9 +852,9 @@ checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
 
 [[package]]
 name = "eternalist-apps"
-version = "0.7.12"
+version = "0.7.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aa020d70f593f396c74bc124fe3695afc4803e45f2aa56036da96cf212a4c4a"
+checksum = "b55831c29e51612504cbdb824b026498401c9dfe076b5d78e3627a9a4ccc7e01"
 dependencies = [
  "anyhow",
  "brass_poolrooms",
@@ -4108,7 +4108,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "1.3.10"
+version = "1.3.11"
 dependencies = [
  "anyhow",
  "serde",
