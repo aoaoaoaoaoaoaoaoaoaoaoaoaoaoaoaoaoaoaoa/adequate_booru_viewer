@@ -3,6 +3,11 @@ use crate::config::MirrorPolicy;
 
 impl Bayonet {
     fn autocomplete(&mut self, ui: &mut egui::Ui, focused: bool) -> bool {
+        if active_pattern(&self.tag_entry).is_some() {
+            self.suggest_memo = None;
+            self.suggest_pick = 0;
+            return false;
+        }
         let Some(prefix) = active_prefix(&self.tag_entry) else {
             self.suggest_memo = None;
             self.suggest_pick = 0;
@@ -249,6 +254,8 @@ impl Bayonet {
         if let Some(wake) = chrome::text_wake(ui, &entry, &before, &self.tag_entry) {
             self.water.text(wake);
         }
+        self.sync_pattern_demand(&query);
+        self.pattern_entry_feedback(ui);
         let accepted_completion = self.autocomplete(ui, entry.has_focus());
         let enter = !self.guide.is_open()
             && ui.ctx().memory(|memory| memory.top_modal_layer().is_none())
@@ -269,6 +276,7 @@ impl Bayonet {
             query.root(),
             &active_group,
             &mut actions,
+            &self.pattern_memo,
             &mut |atom| atom_kind(index, kinds, status, atom),
         );
         ui.add_space(5.0);
@@ -580,7 +588,13 @@ impl Bayonet {
     }
 
     fn commit_tag_entry(&mut self) {
-        let terms = Query::parse_terms(&self.tag_entry);
+        let terms = match Query::parse_terms(&self.tag_entry) {
+            Ok(terms) => terms,
+            Err(fault) => {
+                self.tag_entry_fault = Some(fault);
+                return;
+            }
+        };
         if terms.is_empty() {
             return;
         }
@@ -589,7 +603,52 @@ impl Bayonet {
             let _inserted = query.push_atom(&self.active_group, term.atom, term.polarity);
         }
         self.tag_entry.clear();
+        self.tag_entry_fault = None;
         self.install_query(query);
+    }
+
+    fn sync_pattern_demand(&mut self, query: &Query) {
+        self.tag_entry_fault = Query::parse_terms(&self.tag_entry).err();
+        let mut demand = query.tag_patterns();
+        if let Some(Ok(pattern)) = active_pattern(&self.tag_entry) {
+            let _inserted = demand.insert(pattern);
+        }
+        let demand = demand.into_iter().collect::<Vec<_>>();
+        if demand == self.pattern_demand {
+            return;
+        }
+        let serial = self.pattern_serial.saturating_add(1);
+        if demand.is_empty() {
+            self.pattern_memo.clear();
+            self.pattern_demand.clear();
+            self.pattern_serial = serial;
+            return;
+        }
+        if let Err(err) = self.worker.send(Command::ResolvePatterns {
+            serial,
+            patterns: demand.clone(),
+        }) {
+            self.status = format!("{err:#}");
+        } else {
+            self.pattern_demand.clone_from(&demand);
+            self.pattern_serial = serial;
+        }
+    }
+
+    fn pattern_entry_feedback(&self, ui: &mut egui::Ui) {
+        if let Some(fault) = &self.tag_entry_fault {
+            let _fault = ui.label(egui::RichText::new(fault.to_string()).color(chrome::HOT));
+            return;
+        }
+        let Some(Ok(pattern)) = active_pattern(&self.tag_entry) else {
+            return;
+        };
+        let text = self.pattern_memo.get(&pattern).map_or_else(
+            || "matching known regular tags…".to_owned(),
+            |matches| format!("{} known regular tags", matches.len()),
+        );
+        let count = ui.label(chrome::muted(text));
+        let _count = pattern_hover(count, self.pattern_memo.get(&pattern).map(Vec::as_slice));
     }
 
     fn apply_query_actions(&mut self, actions: Vec<QueryAction>) {

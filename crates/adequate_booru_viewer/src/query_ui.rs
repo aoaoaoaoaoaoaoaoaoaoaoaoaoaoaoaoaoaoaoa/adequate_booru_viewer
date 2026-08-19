@@ -1,8 +1,9 @@
 use crate::{
     chrome, controls,
-    model::{BoolGroup, BoolOp, QueryAtom, QueryExpr, TagKind},
+    model::{BoolGroup, BoolOp, QueryAtom, QueryExpr, TagKind, TagPattern, TagPatternMatch},
     tag_chroma, water,
 };
+use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 pub enum QueryAction {
@@ -44,11 +45,21 @@ pub fn render_query_tree(
     root: &QueryExpr,
     active: &[usize],
     actions: &mut Vec<QueryAction>,
+    pattern_memo: &HashMap<TagPattern, Vec<TagPatternMatch>>,
     tag_kind: &mut impl FnMut(&QueryAtom) -> TagKind,
 ) {
     let mut path = Vec::new();
     render_query_expr(
-        ui, water, root, &mut path, None, active, 0, actions, tag_kind,
+        ui,
+        water,
+        root,
+        &mut path,
+        None,
+        active,
+        0,
+        actions,
+        pattern_memo,
+        tag_kind,
     );
 }
 
@@ -61,21 +72,50 @@ fn render_query_expr(
     active: &[usize],
     depth: usize,
     actions: &mut Vec<QueryAction>,
+    pattern_memo: &HashMap<TagPattern, Vec<TagPatternMatch>>,
     tag_kind: &mut impl FnMut(&QueryAtom) -> TagKind,
 ) {
     let (negated, core) = expr.denote();
     match core {
         QueryExpr::Atom { atom } => {
-            render_atom(ui, water, atom, negated, parent, actions, tag_kind);
+            render_atom(
+                ui,
+                water,
+                atom,
+                negated,
+                parent,
+                actions,
+                pattern_memo,
+                tag_kind,
+            );
         }
         QueryExpr::Group { group } => {
             render_group(
-                ui, water, group, negated, path, parent, active, depth, actions, tag_kind,
+                ui,
+                water,
+                group,
+                negated,
+                path,
+                parent,
+                active,
+                depth,
+                actions,
+                pattern_memo,
+                tag_kind,
             );
         }
         QueryExpr::Not { child } => {
             render_query_expr(
-                ui, water, child, path, parent, active, depth, actions, tag_kind,
+                ui,
+                water,
+                child,
+                path,
+                parent,
+                active,
+                depth,
+                actions,
+                pattern_memo,
+                tag_kind,
             );
         }
     }
@@ -91,6 +131,7 @@ fn render_group(
     active: &[usize],
     depth: usize,
     actions: &mut Vec<QueryAction>,
+    pattern_memo: &HashMap<TagPattern, Vec<TagPatternMatch>>,
     tag_kind: &mut impl FnMut(&QueryAtom) -> TagKind,
 ) {
     let active_here = path.as_slice() == active;
@@ -180,6 +221,7 @@ fn render_group(
                 active,
                 depth + 1,
                 actions,
+                pattern_memo,
                 tag_kind,
             );
             let _old = path.pop();
@@ -230,12 +272,13 @@ fn render_atom(
     negated: bool,
     parent: Option<(Vec<usize>, usize)>,
     actions: &mut Vec<QueryAction>,
+    pattern_memo: &HashMap<TagPattern, Vec<TagPatternMatch>>,
     tag_kind: &mut impl FnMut(&QueryAtom) -> TagKind,
 ) {
     let Some((parent, child)) = parent else {
         let _row = ui.horizontal(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-            atom_label(ui, atom, negated, tag_kind);
+            atom_label(ui, atom, negated, pattern_memo, tag_kind);
         });
         return;
     };
@@ -273,7 +316,7 @@ fn render_atom(
                 child,
             });
         }
-        atom_label(ui, atom, negated, tag_kind);
+        atom_label(ui, atom, negated, pattern_memo, tag_kind);
         crate::probe_anchor!(
             ui,
             format!("atom:{}", atom.term()),
@@ -286,11 +329,44 @@ fn atom_label(
     ui: &mut egui::Ui,
     atom: &QueryAtom,
     negated: bool,
+    pattern_memo: &HashMap<TagPattern, Vec<TagPatternMatch>>,
     tag_kind: &mut impl FnMut(&QueryAtom) -> TagKind,
 ) {
-    let _label = ui
-        .label(tag_chroma::atom(atom, tag_kind(atom), negated))
-        .on_hover_text(atom.term());
+    let label = ui.label(tag_chroma::atom(atom, tag_kind(atom), negated));
+    let QueryAtom::Pattern(pattern) = atom else {
+        let _label = label.on_hover_text(atom.term());
+        return;
+    };
+    let _label = pattern_hover(label, pattern_memo.get(pattern).map(Vec::as_slice));
+}
+
+pub fn pattern_hover(
+    response: egui::Response,
+    matches: Option<&[TagPatternMatch]>,
+) -> egui::Response {
+    response.on_hover_ui(|ui| pattern_ledger(ui, matches))
+}
+
+fn pattern_ledger(ui: &mut egui::Ui, matches: Option<&[TagPatternMatch]>) {
+    let Some(matches) = matches else {
+        let _pending = ui.label(chrome::muted("matching known regular tags…"));
+        return;
+    };
+    ui.set_max_width(420.0);
+    let _count = ui.label(format!("{} known regular tags", matches.len()));
+    if matches.is_empty() {
+        return;
+    }
+    let _ledger = egui::ScrollArea::vertical().max_height(320.0).show_rows(
+        ui,
+        18.0,
+        matches.len(),
+        |ui, range| {
+            for hit in &matches[range] {
+                let _tag = ui.label(tag_chroma::text(hit.tag.to_string(), hit.kind));
+            }
+        },
+    );
 }
 
 fn op_blurb(op: BoolOp) -> &'static str {

@@ -19,7 +19,10 @@ use crate::{
     index::{CacheStats, FactMergeBudget, Index, TagSuggestion},
     kin::Backfill,
     media::{MediaCache, RgbaBlade, required_url},
-    model::{Corpus, FamilyTree, GalleryTopology, PostId, PostRecord, Query, SearchHit, Sort, Tag},
+    model::{
+        Corpus, FamilyTree, GalleryTopology, PostId, PostRecord, Query, SearchHit, Sort, Tag,
+        TagPattern, TagPatternMatch,
+    },
 };
 
 const DANBOORU_READ_GAP: Duration = Duration::from_millis(150);
@@ -76,6 +79,10 @@ pub enum Command {
     Suggest {
         serial: u64,
         prefix: String,
+    },
+    ResolvePatterns {
+        serial: u64,
+        patterns: Vec<TagPattern>,
     },
     Family {
         serial: u64,
@@ -136,6 +143,10 @@ pub enum Event {
     Suggested {
         serial: u64,
         hits: Vec<TagSuggestion>,
+    },
+    PatternsResolved {
+        serial: u64,
+        expansions: Vec<(TagPattern, Vec<TagPatternMatch>)>,
     },
     Warmed {
         query_key: String,
@@ -390,6 +401,10 @@ impl Worker {
                 .refresh_tx
                 .try_send(RefreshCommand::Suggest { serial, prefix })
                 .context("send suggest worker command"),
+            Command::ResolvePatterns { serial, patterns } => self
+                .refresh_tx
+                .try_send(RefreshCommand::ResolvePatterns { serial, patterns })
+                .context("send tag-pattern worker command"),
             Command::Family { serial, id } => self
                 .family_tx
                 .try_send(FamilyCommand { serial, id })
@@ -518,6 +533,10 @@ enum RefreshCommand {
         serial: u64,
         prefix: String,
     },
+    ResolvePatterns {
+        serial: u64,
+        patterns: Vec<TagPattern>,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -575,13 +594,27 @@ fn refresh_loop(index: Index, commands: Receiver<RefreshCommand>, events: Klaxon
         let mut search = None;
         let mut stats = None;
         let mut suggest = None;
-        collect_refresh(first, &mut search, &mut stats, &mut suggest);
+        let mut patterns = None;
+        collect_refresh(first, &mut search, &mut stats, &mut suggest, &mut patterns);
         for command in commands.try_iter() {
-            collect_refresh(command, &mut search, &mut stats, &mut suggest);
+            collect_refresh(
+                command,
+                &mut search,
+                &mut stats,
+                &mut suggest,
+                &mut patterns,
+            );
         }
         if let Some((serial, prefix)) = suggest {
             let event = match index.tag_suggestions(&prefix, SUGGESTION_LIMIT) {
                 Ok(hits) => Event::Suggested { serial, hits },
+                Err(err) => Event::Fault(format!("{err:#}")),
+            };
+            events.send(event);
+        }
+        if let Some((serial, patterns)) = patterns {
+            let event = match index.tag_pattern_matches(&patterns) {
+                Ok(expansions) => Event::PatternsResolved { serial, expansions },
                 Err(err) => Event::Fault(format!("{err:#}")),
             };
             events.send(event);
@@ -634,6 +667,7 @@ fn collect_refresh(
     search: &mut PendingSearch,
     stats: &mut Option<u64>,
     suggest: &mut Option<(u64, String)>,
+    patterns: &mut Option<(u64, Vec<TagPattern>)>,
 ) {
     match command {
         RefreshCommand::Search {
@@ -659,6 +693,10 @@ fn collect_refresh(
         }
         RefreshCommand::Stats { serial } => *stats = Some(serial),
         RefreshCommand::Suggest { serial, prefix } => *suggest = Some((serial, prefix)),
+        RefreshCommand::ResolvePatterns {
+            serial,
+            patterns: demand,
+        } => *patterns = Some((serial, demand)),
     }
 }
 

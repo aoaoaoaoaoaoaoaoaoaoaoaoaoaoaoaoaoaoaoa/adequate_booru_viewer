@@ -23,9 +23,10 @@ use crate::{
     media::{MediaCache, RgbaBlade, extension},
     model::{
         BoolOp, Corpus, FamilyBadge, FamilyTree, GalleryTopology, GroupCycle, PostId, PostRecord,
-        Query, QueryAtom, SearchHit, SearchTail, Sort, Tag, TagKind, TagPolarity,
+        Query, QueryAtom, QueryTextError, SearchHit, SearchTail, Sort, Tag, TagKind, TagPattern,
+        TagPatternMatch, TagPolarity,
     },
-    query_ui::{QueryAction, render_query_tree},
+    query_ui::{QueryAction, pattern_hover, render_query_tree},
     saved_filter_ui::{self, Action as SavedFilterAction, EntryEdit, NameEdit, ShelfEdit},
     tag_chroma,
     tag_menu::{
@@ -215,6 +216,7 @@ pub struct Bayonet {
     local_favorites: LocalFavorites,
     active_group: Vec<usize>,
     tag_entry: String,
+    tag_entry_fault: Option<QueryTextError>,
     filter_name_entry: String,
     name_edit: NameEdit,
     filter_selection: FilterSelection,
@@ -300,6 +302,9 @@ pub struct Bayonet {
     suggest_memo: Option<(String, Vec<TagSuggestion>)>,
     suggest_pick: usize,
     suggest_serial: u64,
+    pattern_memo: HashMap<TagPattern, Vec<TagPatternMatch>>,
+    pattern_demand: Vec<TagPattern>,
+    pattern_serial: u64,
     refetch_inflight: HashSet<PostId>,
     prefetch_on_hover: bool,
     mirror_policy: MirrorPolicy,
@@ -461,6 +466,7 @@ impl Bayonet {
             local_favorites,
             active_group,
             tag_entry: String::new(),
+            tag_entry_fault: None,
             filter_name_entry: String::new(),
             name_edit: NameEdit::Idle,
             filter_selection,
@@ -543,6 +549,9 @@ impl Bayonet {
             suggest_memo: None,
             suggest_pick: 0,
             suggest_serial: 0,
+            pattern_memo: HashMap::new(),
+            pattern_demand: Vec::new(),
+            pattern_serial: 0,
             refetch_inflight: HashSet::new(),
             prefetch_on_hover: config.prefetch_on_hover,
             mirror_policy,
@@ -1268,6 +1277,9 @@ impl Bayonet {
                     }
                     self.nudge_refresh();
                     self.nudge_stats();
+                    if posts > 0 {
+                        self.pattern_demand.clear();
+                    }
                     if active && !self.date_range.active() && cursor.state != WarmState::Exhausted {
                         let query = self.query.clone();
                         if let Err(err) = self.dispatch_warm(query, cursor.stride) {
@@ -1301,6 +1313,9 @@ impl Bayonet {
                     );
                     self.nudge_refresh();
                     self.nudge_stats();
+                    if posts > 0 {
+                        self.pattern_demand.clear();
+                    }
                     let cursor = self.warm.active();
                     if cursor.state == WarmState::Idle {
                         let query = self.query.clone();
@@ -1329,6 +1344,7 @@ impl Bayonet {
                     ctx.request_repaint();
                 }
                 Event::Family { serial, mut tree } => {
+                    self.pattern_demand.clear();
                     let focus = self
                         .viewer_family
                         .as_ref()
@@ -1390,12 +1406,23 @@ impl Bayonet {
                         ctx.request_repaint();
                     }
                 }
+                Event::PatternsResolved { serial, expansions } => {
+                    if serial == self.pattern_serial {
+                        self.pattern_memo
+                            .retain(|pattern, _| self.pattern_demand.contains(pattern));
+                        for (pattern, matches) in expansions {
+                            let _old = self.pattern_memo.insert(pattern, matches);
+                        }
+                        ctx.request_repaint();
+                    }
+                }
                 Event::Toast(text) => {
                     self.status = text;
                     ctx.request_repaint();
                 }
                 Event::Refetched { post } => {
                     if let Some(post) = post {
+                        self.pattern_demand.clear();
                         let _was_inflight = self.refetch_inflight.remove(&post.id);
                         if self.zoom.as_ref().is_some_and(|zoom| zoom.id == post.id) {
                             self.zoom = Some(*post.clone());
@@ -2120,6 +2147,17 @@ impl HitCache {
 struct ActivePrefix {
     body: String,
     negative: bool,
+}
+
+fn active_pattern(text: &str) -> Option<std::result::Result<TagPattern, QueryTextError>> {
+    if text.ends_with(char::is_whitespace) {
+        return None;
+    }
+    let token = text.split_whitespace().next_back()?;
+    let body = token
+        .strip_prefix('-')
+        .unwrap_or_else(|| token.strip_prefix('+').unwrap_or(token));
+    body.strip_prefix('/').map(TagPattern::forge)
 }
 
 fn active_prefix(text: &str) -> Option<ActivePrefix> {

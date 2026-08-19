@@ -173,7 +173,7 @@ const QUERY_GESTURES: [GuideGesture; 3] = [
     ),
     GuideGesture::new(
         "Add terms",
-        "Adds the typed tags to the highlighted group; prefix a tag with minus to exclude it.",
+        "Adds typed terms to the highlighted group; use -tag to exclude or /pattern to match known regular tags by regexp.",
         &ENTER,
     ),
 ];

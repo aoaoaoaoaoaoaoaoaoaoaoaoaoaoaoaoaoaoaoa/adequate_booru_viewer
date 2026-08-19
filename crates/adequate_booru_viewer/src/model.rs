@@ -1,4 +1,5 @@
 use anyhow::{Context as _, Result, bail};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -99,6 +100,66 @@ impl TagKind {
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct TagPattern(String);
+
+impl TagPattern {
+    pub fn forge(source: &str) -> std::result::Result<Self, QueryTextError> {
+        if source.is_empty() {
+            return Err(QueryTextError::IncompletePattern);
+        }
+        let _matcher = Regex::new(source)
+            .map_err(|fault| QueryTextError::InvalidPattern(fault.to_string()))?;
+        Ok(Self(source.to_owned()))
+    }
+
+    pub fn source(&self) -> &str {
+        &self.0
+    }
+
+    pub fn matcher(&self) -> std::result::Result<Regex, regex::Error> {
+        Regex::new(&self.0)
+    }
+}
+
+impl TryFrom<String> for TagPattern {
+    type Error = QueryTextError;
+
+    fn try_from(source: String) -> std::result::Result<Self, Self::Error> {
+        Self::forge(&source)
+    }
+}
+
+impl From<TagPattern> for String {
+    fn from(pattern: TagPattern) -> Self {
+        pattern.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QueryTextError {
+    IncompletePattern,
+    InvalidPattern(String),
+}
+
+impl Display for QueryTextError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IncompletePattern => f.write_str("enter a regexp after `/`"),
+            Self::InvalidPattern(fault) => write!(f, "invalid regexp: {fault}"),
+        }
+    }
+}
+
+impl std::error::Error for QueryTextError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TagPatternMatch {
+    pub tag: Tag,
+    pub kind: TagKind,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -210,6 +271,7 @@ impl Query {
                 group: BoolGroup {
                     op: BoolOp::And,
                     children: Self::parse_terms(raw)
+                        .expect("static query text")
                         .into_iter()
                         .map(QueryTerm::into_expr)
                         .collect(),
@@ -218,7 +280,7 @@ impl Query {
         }
     }
 
-    pub fn parse_terms(raw: &str) -> Vec<QueryTerm> {
+    pub fn parse_terms(raw: &str) -> std::result::Result<Vec<QueryTerm>, QueryTextError> {
         raw.split_whitespace()
             .filter_map(|token| {
                 let (polarity, body) = match token.strip_prefix('-') {
@@ -228,7 +290,11 @@ impl Query {
                         token.strip_prefix('+').unwrap_or(token),
                     ),
                 };
-                QueryAtom::parse(body).map(|atom| QueryTerm { atom, polarity })
+                let atom = match body.strip_prefix('/') {
+                    Some(source) => Some(TagPattern::forge(source).map(QueryAtom::Pattern)),
+                    None => QueryAtom::parse(body).map(Ok),
+                };
+                atom.map(|atom| atom.map(|atom| QueryTerm { atom, polarity }))
             })
             .collect()
     }
@@ -387,7 +453,7 @@ impl Query {
         let mut terms = Vec::with_capacity(3);
         if let Some(rating) = atoms.iter().find_map(|atom| match atom {
             QueryAtom::Rating(rating) => Some(rating.term()),
-            QueryAtom::Tag(_) => None,
+            QueryAtom::Tag(_) | QueryAtom::Pattern(_) => None,
         }) {
             terms.push(rating);
         }
@@ -412,6 +478,12 @@ impl Query {
             .required_positive_atoms(false)
             .into_iter()
             .collect()
+    }
+
+    pub fn tag_patterns(&self) -> BTreeSet<TagPattern> {
+        let mut patterns = BTreeSet::new();
+        self.root.collect_tag_patterns(&mut patterns);
+        patterns
     }
 }
 
@@ -661,6 +733,23 @@ impl QueryExpr {
             }
         }
     }
+
+    fn collect_tag_patterns(&self, patterns: &mut BTreeSet<TagPattern>) {
+        match self {
+            Self::Atom {
+                atom: QueryAtom::Pattern(pattern),
+            } => {
+                let _inserted = patterns.insert(pattern.clone());
+            }
+            Self::Atom { .. } => {}
+            Self::Not { child } => child.collect_tag_patterns(patterns),
+            Self::Group { group } => {
+                for child in &group.children {
+                    child.collect_tag_patterns(patterns);
+                }
+            }
+        }
+    }
 }
 
 fn target_after_child_removal(
@@ -751,10 +840,14 @@ impl Display for BoolOp {
 pub enum QueryAtom {
     Tag(Tag),
     Rating(RatingClass),
+    Pattern(TagPattern),
 }
 
 impl QueryAtom {
     pub fn parse(raw: &str) -> Option<Self> {
+        if let Some(source) = raw.strip_prefix('/') {
+            return TagPattern::forge(source).ok().map(Self::Pattern);
+        }
         RatingClass::parse_metatag(raw)
             .map(Self::Rating)
             .or_else(|| Tag::forge(raw).map(Self::Tag))
@@ -764,13 +857,14 @@ impl QueryAtom {
         match self {
             Self::Tag(tag) => tag.to_string(),
             Self::Rating(rating) => rating.term(),
+            Self::Pattern(pattern) => format!("/{}", pattern.source()),
         }
     }
 
     fn tag_term(&self) -> Option<String> {
         match self {
             Self::Tag(tag) => Some(tag.to_string()),
-            Self::Rating(_) => None,
+            Self::Rating(_) | Self::Pattern(_) => None,
         }
     }
 }

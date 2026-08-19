@@ -259,7 +259,7 @@ fn suite(index: &Index, limit: usize) -> Result<Vec<Case>> {
 
 fn flat(raw: &str) -> Result<Query> {
     let mut query = Query::default();
-    for term in Query::parse_terms(raw) {
+    for term in Query::parse_terms(raw)? {
         if !query.push_atom(&[], term.atom, term.polarity) {
             bail!("push atom from {raw:?}");
         }

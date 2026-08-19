@@ -14,8 +14,8 @@ use std::{
 
 use crate::model::{
     BoolOp, Corpus, FamilyTree, GalleryTopology, Harvest, Kin, PostId, PostRecord, Query,
-    QueryAtom, QueryExpr, RatingClass, SearchHit, SearchTail, Sort, Tag, TagKind, decode_record,
-    encode_record, narrow_post_id, record_day,
+    QueryAtom, QueryExpr, RatingClass, SearchHit, SearchTail, Sort, Tag, TagKind, TagPattern,
+    TagPatternMatch, decode_record, encode_record, narrow_post_id, record_day,
 };
 use crate::posting::{self, Batch as FactBatch, Lane as PostingLane};
 use crate::trace::startup;
@@ -332,6 +332,7 @@ impl FavoriteRankVault {
 pub struct Index {
     db: Arc<Database>,
     kin: Arc<RwLock<kin::Atlas>>,
+    tag_bank: Arc<RwLock<Option<BTreeMap<Tag, TagKind>>>>,
     anchor: Arc<Mutex<Instant>>,
     vault: Arc<Mutex<Vault>>,
     records: Arc<Mutex<RecordVault>>,
@@ -351,6 +352,7 @@ impl Index {
         let index = Self {
             db: Arc::new(db),
             kin: Arc::new(RwLock::new(atlas)),
+            tag_bank: Arc::new(RwLock::new(None)),
             anchor: Arc::new(Mutex::new(Instant::now())),
             vault: Arc::new(Mutex::new(Vault::new())),
             records: Arc::new(Mutex::new(RecordVault::new())),
@@ -371,6 +373,7 @@ impl Index {
         let tx = self.begin_quick_write("begin index write")?;
         Self::absorb_into(&tx, &posts)?;
         tx.commit().context("commit index write")?;
+        self.patch_tag_bank(&posts);
         self.evict_records(&posts);
         self.clear_sort_heads();
         self.refresh_sort_keys(&posts);
@@ -468,6 +471,7 @@ impl Index {
         }
         tx.commit().context("commit harvested index write")?;
         atlas.apply(&mutation)?;
+        self.patch_tag_bank(&posts);
         self.evict_records(&posts);
         self.clear_sort_heads();
         self.refresh_sort_keys(&posts);
@@ -492,6 +496,18 @@ impl Index {
 
     fn invalidate_favorite_ranks(&self, posts: &[&PostRecord]) {
         lock(&self.favorite_ranks).invalidate(posts);
+    }
+
+    fn patch_tag_bank(&self, posts: &[&PostRecord]) {
+        let mut slot = write(&self.tag_bank);
+        let Some(bank) = slot.as_mut() else {
+            return;
+        };
+        for post in posts.iter().filter(|post| post.indexable()) {
+            for hint in &post.tag_hints {
+                let _old = bank.insert(hint.tag.clone(), hint.kind);
+            }
+        }
     }
 
     fn absorb_into(tx: &redb::WriteTransaction, posts: &[&PostRecord]) -> Result<()> {
@@ -587,6 +603,50 @@ impl Index {
         hits.sort_unstable_by(|a, b| b.posts.cmp(&a.posts).then_with(|| a.tag.cmp(&b.tag)));
         hits.truncate(limit);
         Ok(hits)
+    }
+
+    pub fn tag_pattern_matches(
+        &self,
+        patterns: &[TagPattern],
+    ) -> Result<Vec<(TagPattern, Vec<TagPatternMatch>)>> {
+        self.ensure_tag_bank()?;
+        let bank = read(&self.tag_bank);
+        let bank = bank.as_ref().context("tag bank was not initialized")?;
+        patterns
+            .iter()
+            .map(|pattern| {
+                let matcher = pattern.matcher()?;
+                let matches = bank
+                    .iter()
+                    .filter(|(tag, kind)| {
+                        **kind == TagKind::General && matcher.is_match(tag.as_str())
+                    })
+                    .map(|(tag, kind)| TagPatternMatch {
+                        tag: tag.clone(),
+                        kind: *kind,
+                    })
+                    .collect::<Vec<_>>();
+                Ok((pattern.clone(), matches))
+            })
+            .collect()
+    }
+
+    fn ensure_tag_bank(&self) -> Result<()> {
+        let mut slot = write(&self.tag_bank);
+        if slot.is_some() {
+            return Ok(());
+        }
+        let tx = self.db.begin_read().context("begin tag bank read")?;
+        let kinds = tx.open_table(TAG_KINDS).context("open tag kind table")?;
+        let mut bank = BTreeMap::new();
+        for row in kinds.iter().context("iterate tag bank")? {
+            let (tag, kind) = row.context("read tag bank row")?;
+            let tag = Tag::forge(tag.value()).context("indexed tag key is empty")?;
+            let kind = TagKind::from_code(kind.value()).context("invalid indexed tag kind")?;
+            let _old = bank.insert(tag, kind);
+        }
+        *slot = Some(bank);
+        Ok(())
     }
 
     pub fn tag_kind(&self, tag: &Tag) -> Result<TagKind> {
@@ -1313,6 +1373,20 @@ impl Index {
         let remote = if query.is_empty() {
             None
         } else {
+            let patterns = query.tag_patterns().into_iter().collect::<Vec<_>>();
+            let pattern_matches = if patterns.is_empty() {
+                HashMap::new()
+            } else {
+                self.tag_pattern_matches(&patterns)?
+                    .into_iter()
+                    .map(|(pattern, matches)| {
+                        (
+                            pattern,
+                            matches.into_iter().map(|matched| matched.tag).collect(),
+                        )
+                    })
+                    .collect::<HashMap<_, Vec<_>>>()
+            };
             let tag_chunks = tx.open_table(TAG_CHUNKS).context("open tag chunks")?;
             let rating_chunks = tx.open_table(RATING_CHUNKS).context("open rating chunks")?;
             let facts = tx.open_table(POSTING_FACTS).context("open posting facts")?;
@@ -1324,6 +1398,7 @@ impl Index {
                     ratings: &rating_chunks,
                     pending: &pending,
                     vault: &self.vault,
+                    pattern_matches: &pattern_matches,
                     universe: None,
                 }
                 .eval(query.root())?,
@@ -1571,6 +1646,7 @@ where
     ratings: &'a B,
     pending: &'a FactBatch,
     vault: &'a Mutex<Vault>,
+    pattern_matches: &'a HashMap<TagPattern, Vec<Tag>>,
     universe: Option<RoaringBitmap>,
 }
 
@@ -1601,7 +1677,7 @@ where
         }
     }
 
-    fn atom(&self, atom: &QueryAtom) -> Result<Candidate> {
+    fn atom(&mut self, atom: &QueryAtom) -> Result<Candidate> {
         match atom {
             QueryAtom::Tag(tag) => read_posting_bitmap(
                 self.tags,
@@ -1619,6 +1695,24 @@ where
                 rating.key(),
             )
             .map(Candidate::Finite),
+            QueryAtom::Pattern(pattern) => {
+                let mut union = RoaringBitmap::new();
+                let matches = self
+                    .pattern_matches
+                    .get(pattern)
+                    .context("query tag pattern was not resolved")?;
+                for tag in matches {
+                    union |= read_posting_bitmap(
+                        self.tags,
+                        self.pending,
+                        self.vault,
+                        PostingLane::Tag,
+                        tag.as_str(),
+                    )?
+                    .as_ref();
+                }
+                Ok(Candidate::Finite(BitmapCow::Owned(union)))
+            }
         }
     }
 
