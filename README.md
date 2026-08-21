@@ -95,7 +95,8 @@ scripts/package
 
 the pinned Eternalist Foundry workflow proves every declared host, builds and
 tests the unsigned DMG and NSIS installer, and publishes artifacts only after
-judging the complete evidence graph.
+judging the complete evidence graph and finding the exact crate version on
+crates.io.
 
 anyway, check out how wet it is:
 
