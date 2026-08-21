@@ -1167,7 +1167,7 @@ impl Bayonet {
 
     pub(super) fn toggle_viewer_tags(&mut self, ctx: &egui::Context) {
         self.viewer_tags_open = !self.viewer_tags_open;
-        self.save_config();
+        self.inscribe_durable_state();
         ctx.request_repaint();
     }
 }

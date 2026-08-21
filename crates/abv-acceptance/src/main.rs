@@ -81,7 +81,17 @@ struct Observation {
     active_group: Vec<usize>,
     images_per_row: u16,
     guide_open: bool,
+    settings: SettingsObservation,
+    prefetch_on_hover: bool,
+    mirror_active: bool,
     viewer_tags_open: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SettingsObservation {
+    open: bool,
+    fault: Option<String>,
+    settled: bool,
 }
 
 type AbvStory<'app, 'bed> = Story<'app, 'bed, Observation>;
@@ -292,6 +302,44 @@ fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
     let _current = focus.read()?;
     let _modal_retired = focus.wait_fresh(&app, WAIT)?;
     let _focus_settled = focus.wait_fresh(&app, WAIT)?;
+
+    let _settings = story.key(Key::Function(2))?.until(Condition::new(
+        "settings open",
+        |state: &Observation| {
+            state.settings.open && state.settings.fault.is_none() && state.settings.settled
+        },
+    ))?;
+    let quarantined = story
+        .chord(Modifiers::ALT, Key::Character('f'))?
+        .next_frame()?
+        .into_value();
+    demand(
+        quarantined.state.settings.open && !quarantined.state.query_open,
+        "Alt+F escaped through the open settings sheet",
+    )?;
+    demand(
+        !quarantined.state.mirror_active,
+        "settings story did not inherit the paused mirror projection",
+    )?;
+    let prefetch = story.anchor("eternalist.settings.prefetch_on_hover")?;
+    let (x, y) = prefetch.center();
+    let toggled = story.session().click(x, y, Button::Primary)?;
+    let _disabled = story.reaction(toggled).until(Condition::new(
+        "hover prefetch disabled",
+        |state: &Observation| !state.prefetch_on_hover,
+    ))?;
+    let _closed = story
+        .chord(Modifiers::CTRL, Key::Character(','))?
+        .until(Condition::new(
+            "settings closed and configuration settled",
+            |state: &Observation| !state.settings.open && state.settings.settled,
+        ))?;
+    app.wait_until(WAIT, "hover prefetch to reach config.toml", || {
+        Ok(harness
+            .testbed
+            .read_private_to_string("xdg/config/adequate_booru_viewer/config.toml")
+            .is_ok_and(|text| text.contains("prefetch_on_hover = false")))
+    })?;
 
     let _focused = story
         .chord(Modifiers::ALT, Key::Character('f'))?

@@ -29,7 +29,7 @@ pub fn rect(ctx: &egui::Context, name: impl Display, rect: egui::Rect) {
 }
 
 #[cfg(feature = "egui-test")]
-pub use active::State;
+pub use active::{Settings, State};
 
 #[cfg(feature = "egui-test")]
 mod active {
@@ -51,6 +51,16 @@ mod active {
         pub active_group: Vec<usize>,
         pub images_per_row: u16,
         pub guide_open: bool,
+        pub settings: Settings,
+        pub prefetch_on_hover: bool,
+        pub mirror_active: bool,
         pub viewer_tags_open: bool,
+    }
+
+    #[derive(Default, Serialize)]
+    pub struct Settings {
+        pub open: bool,
+        pub fault: Option<String>,
+        pub settled: bool,
     }
 }

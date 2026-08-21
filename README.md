@@ -56,6 +56,12 @@ to the selected image; Escape from the image closes the viewer. The guide is
 modal: application commands and panel traversal remain dormant until it
 closes, then the prior focus target is restored.
 
+`F2` opens application settings; `Control+,` does the same on Linux and
+Windows, while `Command+,` is the macOS form. Hover prefetch and the background
+mirror share this central sheet with their contextual controls. The sheet names
+the XDG configuration file, reports invalid or unknown TOML keys without
+overwriting their source, and offers an explicit reload after repair.
+
 ### architecture
 
 ABV owns booru semantics, indexing, workers, configuration, typed command
@@ -68,9 +74,10 @@ product-specific; the reorderable, one-level shelved filter collection uses
 the shared Cabinet law.
 
 Persistence settlement and the crawl refresh gates are semantic service
-deadlines, independent of rendering. Config and workbench snapshots cross the
-shared Eternalist background scribe; visual fades, recoils, and hover dwell
-alone retain repaint timing.
+deadlines, independent of rendering. Strict, format-preserving configuration
+crosses the Eternalist configuration ledger; disposable workbench state crosses
+its own background scribe. Visual fades, recoils, and hover dwell alone retain
+repaint timing.
 
 Native acceptance lives here because its fixtures, semantic targets, and
 verdicts are product behavior. `scripts/test-gui` first proves an ordinary

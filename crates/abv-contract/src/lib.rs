@@ -2,7 +2,7 @@
 
 use std::{borrow::Cow, fmt};
 
-pub const UI_FINGERPRINT: &str = "abv.ui/2";
+pub const UI_FINGERPRINT: &str = "abv.ui/3";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Water {

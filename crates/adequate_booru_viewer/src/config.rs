@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     fmt::{Display, Formatter},
     path::Path,
-    sync::Arc,
 };
 
 use crate::{
@@ -31,37 +30,36 @@ impl Default for Config {
     }
 }
 
-impl Config {
-    pub fn load(path: &Path) -> Result<Arc<Self>> {
-        match std::fs::read_to_string(path) {
-            Ok(text) => toml::from_str::<Self>(&text)
-                .map(Arc::new)
-                .with_context(|| format!("parse {}", path.display())),
-            // A *missing* config means the very first launch — seed the safe
-            // default filter. First-run-ever is keyed on the file's absence, not
-            // on an empty library, so deleting the seed never resurrects it (the
-            // app writes the config on first run, and the file persists after).
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                Ok(Arc::new(Self::first_run()))
-            }
-            Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
-        }
+impl PartialEq for Config {
+    fn eq(&self, other: &Self) -> bool {
+        // Shelf openness is deliberately skipped by Serde and belongs to the
+        // slate. It cannot make two user-authored configurations unequal.
+        self.prefetch_on_hover == other.prefetch_on_hover
+            && self.mirror == other.mirror
+            && self.filters.saved == other.filters.saved
+            && self.filters.shelves.len() == other.filters.shelves.len()
+            && self
+                .filters
+                .shelves
+                .iter()
+                .zip(&other.filters.shelves)
+                .all(|(left, right)| left.name == right.name && left.filters == right.filters)
     }
+}
 
+impl Config {
     /// The shipped first-launch library: one deletable `general rating` filter,
     /// so a new user is not dropped straight into the full firehose.
-    fn first_run() -> Self {
+    pub(crate) fn first_run() -> Self {
         let mut config = Self::default();
         if let Some(filter) = safe_default_filter() {
             config.filters.saved.push(filter);
         }
         config
     }
-
-    pub fn save(&self, path: &Path) -> Result<()> {
-        save_toml(self, path, "serialize config")
-    }
 }
+
+impl eternalist_apps::configuration::Configuration for Config {}
 
 /// The canonical name of the seeded first-run filter; the app activates it on a
 /// first launch (see `Bayonet::open`).
@@ -372,6 +370,7 @@ mod tests {
         };
         let text = toml::to_string_pretty(&config)?;
         let roundtrip = toml::from_str::<Config>(&text)?;
+        assert_eq!(config, roundtrip);
         assert!(!roundtrip.prefetch_on_hover);
         assert_eq!(roundtrip.mirror.policy, MirrorPolicy::Paused);
         assert_eq!(roundtrip.filters.saved[0].name.as_str(), "beach");
@@ -385,7 +384,7 @@ mod tests {
     #[test]
     fn first_run_seeds_safe_filter_only_when_config_absent() -> Result<()> {
         // Absent config ⇒ first launch ⇒ seed the deletable safe default.
-        let seeded = Config::load(Path::new("/nonexistent-abv-first-run/config.toml"))?;
+        let seeded = Config::first_run();
         assert_eq!(seeded.filters.saved.len(), 1);
         assert_eq!(seeded.filters.saved[0].name.as_str(), SAFE_DEFAULT_FILTER);
         assert!(toml::to_string(&seeded.filters.saved[0])?.contains("general"));

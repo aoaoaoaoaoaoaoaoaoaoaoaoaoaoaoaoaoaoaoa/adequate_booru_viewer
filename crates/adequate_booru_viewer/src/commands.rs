@@ -2,7 +2,10 @@ use std::sync::OnceLock;
 
 use eternalist_apps::{
     command_guide::{GuideGesture, GuideSection},
-    commands::{CommandCanon, CommandScope, CommandSpec, Shortcut, ShortcutKey, ShortcutModifiers},
+    commands::{
+        CommandCanon, CommandScope, CommandSpec, SETTINGS_SHORTCUTS, Shortcut, ShortcutKey,
+        ShortcutModifiers,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -243,6 +246,11 @@ const FAMILY_TREE_GESTURES: [GuideGesture; 4] = [
         &[],
     ),
 ];
+const APPLICATION_GESTURES: [GuideGesture; 1] = [GuideGesture::new(
+    "Open settings",
+    "Open the central application configuration.",
+    &SETTINGS_SHORTCUTS,
+)];
 
 const SIDEBAR_IDIOMS: GuideSection = GuideSection::new("SIDEBAR", &SIDEBAR_GESTURES);
 const QUERY_IDIOMS: GuideSection = GuideSection::new("REFERENCE QUERY", &QUERY_GESTURES);
@@ -250,10 +258,16 @@ const GALLERY_IDIOMS: GuideSection = GuideSection::new("GALLERY", &GALLERY_GESTU
 const IMAGE_NAVIGATION_IDIOMS: GuideSection =
     GuideSection::new("NAVIGATION", &IMAGE_NAVIGATION_GESTURES);
 const FAMILY_TREE_IDIOMS: GuideSection = GuideSection::new("FAMILY TREE", &FAMILY_TREE_GESTURES);
+const APPLICATION_IDIOMS: GuideSection = GuideSection::new("APPLICATION", &APPLICATION_GESTURES);
 
-pub const WORKBENCH_IDIOMS: [GuideSection; 3] = [SIDEBAR_IDIOMS, QUERY_IDIOMS, GALLERY_IDIOMS];
-pub const IMAGE_VIEWER_IDIOMS: [GuideSection; 1] = [IMAGE_NAVIGATION_IDIOMS];
-pub const FAMILY_VIEWER_IDIOMS: [GuideSection; 1] = [FAMILY_TREE_IDIOMS];
+pub const WORKBENCH_IDIOMS: [GuideSection; 4] = [
+    SIDEBAR_IDIOMS,
+    QUERY_IDIOMS,
+    GALLERY_IDIOMS,
+    APPLICATION_IDIOMS,
+];
+pub const IMAGE_VIEWER_IDIOMS: [GuideSection; 2] = [IMAGE_NAVIGATION_IDIOMS, APPLICATION_IDIOMS];
+pub const FAMILY_VIEWER_IDIOMS: [GuideSection; 2] = [FAMILY_TREE_IDIOMS, APPLICATION_IDIOMS];
 
 pub fn canon() -> &'static CommandCanon<Edict, Context> {
     static CANON: OnceLock<CommandCanon<Edict, Context>> = OnceLock::new();

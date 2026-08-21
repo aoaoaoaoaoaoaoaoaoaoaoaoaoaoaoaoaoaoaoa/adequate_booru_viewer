@@ -164,6 +164,11 @@ impl Bayonet {
             "application",
             true,
             |this, ui| {
+                let settings = this
+                    .settings
+                    .activator(ui, this.configuration.fault().is_some());
+                this.water.monoglyph(&settings);
+                ui.add_space(6.0);
                 let help = this.guide.activator(ui);
                 crate::witness::response(ui, abv_contract::Target::Help, &help);
             },
@@ -194,7 +199,7 @@ impl Bayonet {
             let _prior = self
                 .shutters
                 .insert(id.to_owned(), matches!(wake.flux, chrome::FoldFlux::Open));
-            self.save_config();
+            self.inscribe_durable_state();
         }
         self.water.fold(section.wake);
     }
@@ -329,7 +334,7 @@ impl Bayonet {
                     self.reset_retrieval_horizon();
                     self.thwack_pending = true;
                     let _restored = self.restore_hit();
-                    self.save_config();
+                    self.inscribe_durable_state();
                     self.strike(false, 0);
                 }
             }
@@ -345,7 +350,7 @@ impl Bayonet {
                     self.reset_retrieval_horizon();
                     self.thwack_pending = true;
                     let _restored = self.restore_hit();
-                    self.save_config();
+                    self.inscribe_durable_state();
                     // Keep the current tiles up; the strike reorders them in
                     // place when its result lands (and thwacks by how much the
                     // reorder shifts), rather than blanking first.
@@ -367,13 +372,13 @@ impl Bayonet {
         self.water.rail(&rail);
         if rail.changed() {
             self.advance_thumb_epoch();
-            self.save_config();
+            self.inscribe_durable_state();
         }
         let prefetch =
-            chrome::Checkbox::new(&mut self.prefetch_on_hover, "PREFETCH ON HOVER").show(ui);
+            chrome::Checkbox::new(&mut self.prefetch_on_hover, PREFETCH_SETTING.name()).show(ui);
         self.water.checkbox(&prefetch);
         if prefetch.changed() {
-            self.save_config();
+            self.inscribe_durable_state();
         }
     }
 
@@ -447,23 +452,15 @@ impl Bayonet {
 
     fn index_status_panel(&mut self, ui: &mut egui::Ui) {
         let mut active = self.mirror_policy.active();
-        let mirror = chrome::Checkbox::new(&mut active, "BACKGROUND MIRROR").show(ui);
+        let mirror = chrome::Checkbox::new(&mut active, MIRROR_SETTING.name()).show(ui);
         self.water.checkbox(&mirror);
         if mirror.changed() {
-            self.mirror_policy = if active {
+            self.install_mirror_policy(if active {
                 MirrorPolicy::Active
             } else {
                 MirrorPolicy::Paused
-            };
-            self.worker.set_mirror_policy(self.mirror_policy);
-            if self.mirror_policy.active() {
-                "crawl waking".clone_into(&mut self.crawl_status);
-                "family index waking".clone_into(&mut self.kin_status);
-            } else {
-                "paused".clone_into(&mut self.crawl_status);
-                "paused".clone_into(&mut self.kin_status);
-            }
-            self.save_config();
+            });
+            self.inscribe_durable_state();
         }
         let _contract = chrome::note(
             ui,
@@ -520,7 +517,7 @@ impl Bayonet {
             }
         });
         if changed {
-            self.save_config();
+            self.inscribe_durable_state();
             ui.ctx().request_repaint();
         }
     }
@@ -541,25 +538,25 @@ impl Bayonet {
                 }
                 SavedFilterAction::Moor { name, berth } => {
                     self.filters.moor(&name, &berth);
-                    self.save_config();
+                    self.inscribe_durable_state();
                 }
                 SavedFilterAction::MoorShelf { shelf, berth } => {
                     self.filters.moor_shelf(shelf, berth);
                     self.shelf_edit = None;
-                    self.save_config();
+                    self.inscribe_durable_state();
                 }
                 SavedFilterAction::NewShelf => {
                     self.filters.add_shelf();
-                    self.save_config();
+                    self.inscribe_durable_state();
                 }
                 SavedFilterAction::ToggleShelf(shelf) => {
                     self.filters.toggle_shelf(shelf);
-                    self.save_config();
+                    self.inscribe_durable_state();
                 }
                 SavedFilterAction::ScuttleShelf(shelf) => {
                     self.filters.scuttle_shelf(shelf);
                     self.shelf_edit = None;
-                    self.save_config();
+                    self.inscribe_durable_state();
                 }
                 SavedFilterAction::BeginShelfRename(shelf) => {
                     let name = self
@@ -577,7 +574,7 @@ impl Bayonet {
                 SavedFilterAction::CommitShelfRename => {
                     if let Some(edit) = self.shelf_edit.take() {
                         if self.filters.rename_shelf(edit.shelf, &edit.name) {
-                            self.save_config();
+                            self.inscribe_durable_state();
                         } else {
                             self.status = format!("folder `{}` already exists", edit.name.trim());
                         }
@@ -665,7 +662,7 @@ impl Bayonet {
                     self.active_group = path;
                     self.water.select(rect);
                     self.sync_active_filter();
-                    self.save_config();
+                    self.inscribe_durable_state();
                 }
             }
             QueryAction::SetOp { path, op } => {
