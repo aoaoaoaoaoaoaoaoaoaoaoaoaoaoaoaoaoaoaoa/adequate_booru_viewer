@@ -108,6 +108,14 @@ impl Bayonet {
 
     pub(super) fn left_panel(&mut self, ui: &mut egui::Ui, navigator: &mut PanelNavigator) {
         ui.set_width(ui.available_width());
+        let header = ApplicationHeader::new("ADEQUATE BOORU VIEWER").show(
+            ui,
+            &mut self.guide,
+            &mut self.settings,
+            &mut self.water,
+        );
+        crate::witness::response(ui, abv_contract::Target::Help, &header.help);
+        ui.add_space(5.0);
         let mut panels = navigator.frame(ui.ctx());
         if self.focus_tag_entry {
             let id = ui.make_persistent_id("reference-query");
@@ -157,22 +165,6 @@ impl Bayonet {
         self.panel_section(&mut panels, ui, "ui-controls", "ui", false, |this, ui| {
             this.ui_panel(ui);
         });
-        self.panel_section(
-            &mut panels,
-            ui,
-            "application",
-            "application",
-            true,
-            |this, ui| {
-                let settings = this
-                    .settings
-                    .activator(ui, this.configuration.fault().is_some());
-                this.water.monoglyph(&settings);
-                ui.add_space(6.0);
-                let help = this.guide.activator(ui);
-                crate::witness::response(ui, abv_contract::Target::Help, &help);
-            },
-        );
         self.panel_section(
             &mut panels,
             ui,

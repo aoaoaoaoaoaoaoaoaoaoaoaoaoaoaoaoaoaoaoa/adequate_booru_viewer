@@ -54,7 +54,7 @@ use scroll::ThumbCruise;
 use viewer::{FullWait, ViewerSurface, ZoomGate};
 
 use eternalist_apps::{
-    ScribeOutcome, SettledScribe,
+    ApplicationHeader, ScribeOutcome, SettledScribe,
     command_guide::CommandGuide,
     commands::{CommandDispatch, CommandStatus},
     configuration::ConfigurationLedger,

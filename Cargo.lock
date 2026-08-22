@@ -892,9 +892,9 @@ checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
 
 [[package]]
 name = "eternalist-apps"
-version = "0.9.0"
+version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13ad86c78234a33c52dd3807b3ae90b162e78b6705382200ca3b378a7d1cc172"
+checksum = "ce03203c86d68566edece196cb38986446cb5039a1f29de3a0ee48c9f837bb3f"
 dependencies = [
  "anyhow",
  "atomic-write-file",
@@ -909,6 +909,7 @@ dependencies = [
  "serde_ignored",
  "serde_json",
  "sha2",
+ "toml",
  "toml_edit",
  "tracing",
  "tracing-chrome",
