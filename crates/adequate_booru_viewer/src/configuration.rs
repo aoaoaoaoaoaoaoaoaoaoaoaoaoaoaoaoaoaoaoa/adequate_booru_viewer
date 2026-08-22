@@ -2,7 +2,7 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{Display, Formatter},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use crate::{
@@ -19,6 +19,7 @@ use crate::{
 pub struct Configuration {
     pub prefetch_on_hover: bool,
     pub mirror: MirrorConfig,
+    pub danbooru: DanbooruConfig,
 }
 
 impl Default for Configuration {
@@ -26,6 +27,7 @@ impl Default for Configuration {
         Self {
             prefetch_on_hover: true,
             mirror: MirrorConfig::default(),
+            danbooru: DanbooruConfig::default(),
         }
     }
 }
@@ -49,6 +51,35 @@ impl PartialEq for FilterLibrary {
                 .iter()
                 .zip(&other.shelves)
                 .all(|(left, right)| left.name == right.name && left.filters == right.filters)
+    }
+}
+
+/// Optional authenticated Danbooru surface. The API key remains outside the
+/// config file; its path is durable user intent, while readiness is runtime
+/// state established by loading the credential file.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DanbooruConfig {
+    pub account: Option<DanbooruAccountConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DanbooruAccountConfig {
+    pub login: String,
+    pub api_key_file: PathBuf,
+}
+
+impl DanbooruAccountConfig {
+    /// Relative secret paths are rooted beside `config.toml`. Deliberately no
+    /// shell-style tilde or environment expansion: config has one literal,
+    /// portable path law rather than a partial shell language.
+    pub fn resolve_api_key(&self, config_dir: &Path) -> PathBuf {
+        if self.api_key_file.is_absolute() {
+            self.api_key_file.clone()
+        } else {
+            config_dir.join(&self.api_key_file)
+        }
     }
 }
 
@@ -86,6 +117,7 @@ impl FilterLibrary {
 struct LegacyConfiguration {
     prefetch_on_hover: bool,
     mirror: MirrorConfig,
+    danbooru: DanbooruConfig,
     filters: FilterLibrary,
 }
 
@@ -94,6 +126,7 @@ impl Default for LegacyConfiguration {
         Self {
             prefetch_on_hover: true,
             mirror: MirrorConfig::default(),
+            danbooru: DanbooruConfig::default(),
             filters: FilterLibrary::default(),
         }
     }
@@ -124,6 +157,7 @@ pub fn migrate_legacy_configuration(config: &Path, filters: &Path) -> Result<boo
         &Configuration {
             prefetch_on_hover: legacy.prefetch_on_hover,
             mirror: legacy.mirror,
+            danbooru: legacy.danbooru,
         },
         config,
         "serialize migrated configuration",
@@ -458,6 +492,12 @@ mod tests {
             mirror: MirrorConfig {
                 policy: MirrorPolicy::Paused,
             },
+            danbooru: DanbooruConfig {
+                account: Some(DanbooruAccountConfig {
+                    login: "blade".to_owned(),
+                    api_key_file: PathBuf::from("secrets/danbooru.token"),
+                }),
+            },
             filters: FilterLibrary {
                 saved: vec![SavedFilter::new(
                     FilterName::forge("beach").context("filter name")?,
@@ -479,6 +519,7 @@ mod tests {
 
         assert!(!configuration.prefetch_on_hover);
         assert_eq!(configuration.mirror.policy, MirrorPolicy::Paused);
+        assert_eq!(configuration.danbooru, legacy.danbooru);
         assert_eq!(library.saved.len(), 1);
         assert_eq!(library.saved[0].name.as_str(), "beach");
         assert_eq!(library.saved[0].tree.to_text(), "solo");

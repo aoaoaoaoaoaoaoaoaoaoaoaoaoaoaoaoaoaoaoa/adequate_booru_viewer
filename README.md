@@ -34,6 +34,21 @@ first launch starts an anonymous, read-only, persistent danbooru mirror which ma
 grow to tens of gibibytes. pause it under `INDEX STATUS`; closing `abv` stops it.
 media bytes remain disposable cache.
 
+optional post-tag editing uses a Danbooru login and an API key stored in a
+separate file. On Linux, add this to
+`~/.config/adequate_booru_viewer/config.toml`:
+
+```toml
+[danbooru.account]
+login = "example_user"
+api_key_file = "/home/example/security/danbooru.token"
+```
+
+The file contains only the API key. ABV loads it at startup; the first push
+begins with a safe authenticated read and reports any rejected credential or
+permission. The anonymous mirror never receives the credential. Relative key
+paths resolve beside `config.toml`.
+
 the release-tested native coordinates are Linux/X11, Linux/Wayland, macOS on
 Apple and Intel silicon, and 64-bit Windows. `abv --pause-mirror` starts with
 the mirror valve closed for deterministic or disconnected work.

@@ -31,6 +31,7 @@ egui-test = ["dep:egui-tester-witness", "eternalist-apps/egui-test"]
 [dependencies]
 anyhow = "1.0.104"
 arboard = "3.6.1"
+base64 = "0.23.1"
 crossbeam-channel = "0.5.16"
 directories = "6.0.0"
 brass_poolrooms = "0.14.2"

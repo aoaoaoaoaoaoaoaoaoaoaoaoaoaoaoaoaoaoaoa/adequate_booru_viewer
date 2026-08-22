@@ -50,10 +50,6 @@ impl Bayonet {
         let groups = self.cached_viewer_groups(post);
         let mut strikes = Vec::new();
         let mut hovered_definition = None;
-        let definitions = self
-            .worker
-            .has_tag_definitions()
-            .then_some(&self.tag_definitions);
         let _slot = ui.allocate_ui_with_layout(
             egui::vec2(TAG_MENU_WIDTH, height),
             egui::Layout::top_down(egui::Align::Min),
@@ -65,12 +61,17 @@ impl Bayonet {
                 let content = egui::vec2(TAG_MENU_WIDTH, height) - frame.total_margin().sum();
                 let _frame = frame.show(ui, |ui| {
                     ui.set_min_width(content.x);
+                    let pusher_height = self.viewer_tag_pusher(ui, post);
+                    let definitions = self
+                        .worker
+                        .has_tag_definitions()
+                        .then_some(&self.tag_definitions);
                     palette_body(
                         ui,
                         &groups,
                         &self.query,
                         &mut self.water,
-                        content.y,
+                        (content.y - pusher_height).max(48.0),
                         &mut strikes,
                         definitions,
                         &mut hovered_definition,
@@ -84,6 +85,79 @@ impl Bayonet {
         }
         for strike in strikes {
             self.apply_tag_strike(strike);
+        }
+    }
+
+    fn viewer_tag_pusher(&mut self, ui: &mut egui::Ui, post: &PostRecord) -> f32 {
+        let denial = self.danbooru_account.push_denial().map(str::to_owned);
+        let pusher = ui.vertical(|ui| {
+            if matches!(self.danbooru_account, DanbooruAccountState::Unconfigured) {
+                let _setup = ui.label("set up creds to push tags").on_hover_text(
+                    "Add this to ~/.config/adequate_booru_viewer/config.toml, then restart:\n\n\
+                     [danbooru.account]\n\
+                     login = \"your_login\"\n\
+                     api_key_file = \"/path/to/danbooru.token\"\n\n\
+                     The token file must contain only the API key. Relative paths resolve beside \
+                     config.toml.",
+                );
+            } else {
+                let enabled = denial.is_none() && self.tag_push_inflight.is_none();
+                let mut submit = false;
+                let _row = ui.horizontal(|ui| {
+                    let entry_width = (ui.available_width() - 44.0).max(80.0);
+                    let response = ui.add_enabled(
+                        enabled,
+                        egui::TextEdit::singleline(&mut self.tag_push_entry)
+                            .hint_text("tag to push")
+                            .desired_width(entry_width),
+                    );
+                    let enter = response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    let button = ui.add_enabled(enabled, egui::Button::new("add"));
+                    if let Some(reason) = &denial {
+                        let _entry_reason = response.on_hover_text(reason);
+                        let _button_reason = button.clone().on_hover_text(reason);
+                    }
+                    submit = button.clicked() || enter;
+                });
+                if submit {
+                    self.submit_tag_push(post);
+                }
+            }
+            let _rule = ui.separator();
+        });
+        pusher.response.rect.height()
+    }
+
+    fn submit_tag_push(&mut self, post: &PostRecord) {
+        let Some(tag) = Tag::forge(&self.tag_push_entry) else {
+            "enter a tag to push".clone_into(&mut self.status);
+            return;
+        };
+        if post.tags.contains(&tag) {
+            self.status = format!("post already has {tag}");
+            return;
+        }
+        match self.index.contains_tag(&tag) {
+            Ok(false) => {
+                self.status = format!("{tag} is not in the known tag bank");
+                return;
+            }
+            Err(err) => {
+                self.status = format!("check tag before push: {err:#}");
+                return;
+            }
+            Ok(true) => {}
+        }
+        match self.worker.send(Command::AddPostTags {
+            id: post.id,
+            tags: vec![tag],
+        }) {
+            Ok(()) => {
+                self.tag_push_inflight = Some(post.id);
+                self.status = format!("pushing tag to post {}", post.id);
+            }
+            Err(err) => self.status = format!("start tag push: {err:#}"),
         }
     }
 

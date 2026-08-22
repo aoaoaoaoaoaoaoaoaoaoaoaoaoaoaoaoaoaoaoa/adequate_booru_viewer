@@ -3,7 +3,7 @@ use arboard::{Clipboard, ImageData};
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -13,8 +13,9 @@ use crate::{
     chrome,
     commands::{self, Edict},
     configuration::{
-        Configuration, FilterLibrary, FilterName, FilterSelection, MirrorConfig, MirrorPolicy,
-        QueryConfig, SavedFilter, SessionState, WaterMode, migrate_legacy_configuration,
+        Configuration, DanbooruConfig, FilterLibrary, FilterName, FilterSelection, MirrorConfig,
+        MirrorPolicy, QueryConfig, SavedFilter, SessionState, WaterMode,
+        migrate_legacy_configuration,
     },
     controls,
     date::{CreatedDay, DateRange},
@@ -203,6 +204,25 @@ enum TagDefinitionMemo {
     Fault { message: String, born: Instant },
 }
 
+#[derive(Clone, Debug)]
+enum DanbooruAccountState {
+    Unconfigured,
+    Loading,
+    Ready,
+    Unavailable(String),
+}
+
+impl DanbooruAccountState {
+    fn push_denial(&self) -> Option<&str> {
+        match self {
+            Self::Unconfigured => Some("set up creds to push tags"),
+            Self::Loading => Some("loading credentials"),
+            Self::Unavailable(message) => Some(message),
+            Self::Ready => None,
+        }
+    }
+}
+
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent app-state flags (UI toggles + a one-shot pending), not a state machine"
@@ -253,7 +273,12 @@ pub struct Bayonet {
     full_wait: HashMap<PostId, FullWait>,
     full_inflight: HashSet<PostId>,
     full_faults: HashSet<PostId>,
+    /// Current image and speculative successors. Unlike `full_recent`, this
+    /// set is rebuilt from the direction predictor every frame.
     full_residency: HashSet<PostId>,
+    /// Five most recently viewed images, retained as decoded originals and
+    /// prepared GPU textures until the viewer closes.
+    full_recent: VecDeque<PostId>,
     result_wake: ResultWake,
     zoom: Option<PostRecord>,
     /// The global-result tile from which the current family excursion began.
@@ -305,6 +330,10 @@ pub struct Bayonet {
     pattern_demand: Vec<TagPattern>,
     pattern_serial: u64,
     refetch_inflight: HashSet<PostId>,
+    danbooru_config: DanbooruConfig,
+    danbooru_account: DanbooruAccountState,
+    tag_push_entry: String,
+    tag_push_inflight: Option<PostId>,
     prefetch_on_hover: bool,
     mirror_policy: MirrorPolicy,
     prefetched: HashSet<PostId>,
@@ -405,7 +434,20 @@ impl Bayonet {
         startup("app.index.opened");
         let media = MediaCache::new(paths.media_dir())?;
         startup("app.media.opened");
-        let worker = Worker::spawn(index.clone(), media, ctx.clone(), mirror_policy);
+        let account_config = configuration_snapshot.danbooru.account.clone();
+        let danbooru_account = if account_config.is_some() {
+            DanbooruAccountState::Loading
+        } else {
+            DanbooruAccountState::Unconfigured
+        };
+        let worker = Worker::spawn(
+            index.clone(),
+            media,
+            ctx.clone(),
+            mirror_policy,
+            account_config,
+            paths.config.clone(),
+        );
         startup("app.worker.spawned");
         let filter_library = FilterLibrary::load(&filter_library_path, first_run)?;
         let mut filters = filter_bank::forge(&filter_library);
@@ -539,6 +581,7 @@ impl Bayonet {
             full_inflight: HashSet::new(),
             full_faults: HashSet::new(),
             full_residency: HashSet::new(),
+            full_recent: VecDeque::new(),
             result_wake: ResultWake::default(),
             zoom: None,
             viewer_gallery_anchor: None,
@@ -592,6 +635,10 @@ impl Bayonet {
             pattern_demand: Vec::new(),
             pattern_serial: 0,
             refetch_inflight: HashSet::new(),
+            danbooru_config: configuration_snapshot.danbooru.clone(),
+            danbooru_account,
+            tag_push_entry: String::new(),
+            tag_push_inflight: None,
             prefetch_on_hover: configuration_snapshot.prefetch_on_hover,
             mirror_policy,
             prefetched: HashSet::new(),
@@ -789,11 +836,23 @@ impl Bayonet {
             {
                 CommandStatus::Disabled("the family tree is not available yet")
             }
+            Edict::SaveViewerImage
+                if self
+                    .zoom
+                    .as_ref()
+                    .and_then(PostRecord::original_url)
+                    .is_none() =>
+            {
+                CommandStatus::Disabled("the original media is unavailable")
+            }
             Edict::FocusTagEntry
             | Edict::NextQueryGroup
             | Edict::PreviousQueryGroup
             | Edict::OpenViewerTree
-            | Edict::ToggleViewerTags => CommandStatus::Enabled,
+            | Edict::ToggleViewerTags
+            | Edict::ToggleViewerFavorite
+            | Edict::SaveViewerImage
+            | Edict::CopyViewerImage => CommandStatus::Enabled,
         }
     }
 
@@ -817,6 +876,21 @@ impl Bayonet {
                 let _opened = self.open_family_tree();
             }
             Edict::ToggleViewerTags => self.toggle_viewer_tags(ctx),
+            Edict::ToggleViewerFavorite => {
+                if let Some(id) = self.zoom.as_ref().map(|post| post.id) {
+                    self.toggle_viewer_favorite(id);
+                }
+            }
+            Edict::SaveViewerImage => {
+                if let Some(post) = self.zoom.clone() {
+                    self.save_full(&post);
+                }
+            }
+            Edict::CopyViewerImage => {
+                if let Some(id) = self.zoom.as_ref().map(|post| post.id) {
+                    self.copy_full(id);
+                }
+            }
         }
     }
 
@@ -1475,6 +1549,43 @@ impl Bayonet {
                         }
                     }
                 }
+                Event::AccountOpened { result } => {
+                    self.danbooru_account = match result {
+                        Ok(()) => DanbooruAccountState::Ready,
+                        Err(message) => DanbooruAccountState::Unavailable(message),
+                    };
+                    ctx.request_repaint();
+                }
+                Event::PostTagsEdited { id, post, result } => {
+                    if self.tag_push_inflight == Some(id) {
+                        self.tag_push_inflight = None;
+                    }
+                    if let Some(post) = post {
+                        if self.zoom.as_ref().is_some_and(|zoom| zoom.id == post.id) {
+                            self.zoom = Some(*post.clone());
+                            self.viewer_tag_groups = None;
+                        }
+                        if let Some(node) = self
+                            .viewer_family
+                            .as_mut()
+                            .and_then(|tree| tree.nodes.get_mut(&post.id))
+                        {
+                            node.post = Some(*post);
+                        }
+                    }
+                    match result {
+                        Ok(()) => {
+                            self.tag_push_entry.clear();
+                            self.status = format!("updated tags on post {id}");
+                        }
+                        Err(message) => {
+                            self.status = format!("tag edit failed: {message}");
+                        }
+                    }
+                    self.pattern_demand.clear();
+                    self.nudge_refresh();
+                    ctx.request_repaint();
+                }
                 Event::Suggested { serial, hits } => {
                     if serial == self.suggest_serial
                         && let Some((_, memo)) = &mut self.suggest_memo
@@ -1592,9 +1703,11 @@ impl Bayonet {
                 let _was_inflight = self.full_inflight.remove(&blade.id);
                 let _was_waiting = self.full_wait.remove(&blade.id);
                 let _was_faulted = self.full_faults.remove(&blade.id);
-                // A superseded prediction may land after the viewer turns;
-                // residency is the sole authority for GPU and decoded memory.
-                if !self.full_residency.contains(&blade.id) {
+                // A superseded prediction may land after the viewer turns.
+                // Admit it only if prediction or actual viewing still protects
+                // it from immediate eviction.
+                if !self.full_residency.contains(&blade.id) && !self.full_recent.contains(&blade.id)
+                {
                     return;
                 }
                 let texture_blade = display.as_ref().unwrap_or(&blade);
@@ -2001,6 +2114,7 @@ impl Bayonet {
             mirror: MirrorConfig {
                 policy: self.mirror_policy,
             },
+            danbooru: self.danbooru_config.clone(),
         }
     }
 

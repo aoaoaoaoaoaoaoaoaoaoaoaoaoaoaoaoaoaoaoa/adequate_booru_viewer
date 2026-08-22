@@ -15,6 +15,9 @@ pub enum Edict {
     PreviousQueryGroup,
     OpenViewerTree,
     ToggleViewerTags,
+    ToggleViewerFavorite,
+    SaveViewerImage,
+    CopyViewerImage,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,8 +38,20 @@ const TOGGLE_VIEWER_TAGS: [Shortcut; 1] = [Shortcut::new(
     ShortcutModifiers::NONE,
     ShortcutKey::Character('T'),
 )];
+const TOGGLE_VIEWER_FAVORITE: [Shortcut; 1] = [Shortcut::new(
+    ShortcutModifiers::NONE,
+    ShortcutKey::Character('F'),
+)];
+const SAVE_VIEWER_IMAGE: [Shortcut; 1] = [Shortcut::new(
+    ShortcutModifiers::NONE,
+    ShortcutKey::Character('S'),
+)];
+const COPY_VIEWER_IMAGE: [Shortcut; 1] = [Shortcut::new(
+    ShortcutModifiers::NONE,
+    ShortcutKey::Character('C'),
+)];
 
-const EDICTS: [CommandSpec<Edict, Context>; 5] = [
+const EDICTS: [CommandSpec<Edict, Context>; 8] = [
     CommandSpec::new(
         Edict::FocusTagEntry,
         "query.focus_tag_entry",
@@ -64,7 +79,7 @@ const EDICTS: [CommandSpec<Edict, Context>; 5] = [
     CommandSpec::new(
         Edict::OpenViewerTree,
         "viewer.open_tree",
-        "View tree",
+        "Tree",
         CommandScope::Context(Context::Viewer),
     )
     .with_detail(
@@ -79,6 +94,30 @@ const EDICTS: [CommandSpec<Edict, Context>; 5] = [
     )
     .with_detail("Shows or hides the open image's tag drawer.")
     .with_default_shortcuts(&TOGGLE_VIEWER_TAGS),
+    CommandSpec::new(
+        Edict::ToggleViewerFavorite,
+        "viewer.toggle_favorite",
+        "Toggle favorite",
+        CommandScope::Context(Context::Viewer),
+    )
+    .with_detail("Adds or removes the open image from local favorites.")
+    .with_default_shortcuts(&TOGGLE_VIEWER_FAVORITE),
+    CommandSpec::new(
+        Edict::SaveViewerImage,
+        "viewer.save_image",
+        "Save",
+        CommandScope::Context(Context::Viewer),
+    )
+    .with_detail("Saves the open image's original media.")
+    .with_default_shortcuts(&SAVE_VIEWER_IMAGE),
+    CommandSpec::new(
+        Edict::CopyViewerImage,
+        "viewer.copy_image",
+        "Copy",
+        CommandScope::Context(Context::Viewer),
+    )
+    .with_detail("Copies the open image to the system clipboard.")
+    .with_default_shortcuts(&COPY_VIEWER_IMAGE),
 ];
 
 const COMPLETION_KEYS: [Shortcut; 2] = [

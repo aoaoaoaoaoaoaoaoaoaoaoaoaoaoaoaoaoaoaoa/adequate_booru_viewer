@@ -655,6 +655,15 @@ impl Index {
         read_tag_kind(&kinds, tag)
     }
 
+    pub fn contains_tag(&self, tag: &Tag) -> Result<bool> {
+        let tx = self.db.begin_read().context("begin tag existence read")?;
+        let kinds = tx.open_table(TAG_KINDS).context("open tag kind table")?;
+        kinds
+            .get(tag.as_str())
+            .with_context(|| format!("read tag existence {tag}"))
+            .map(|kind| kind.is_some())
+    }
+
     pub fn tag_kinds(&self, tags: &[Tag]) -> Result<BTreeMap<Tag, TagKind>> {
         let tx = self.db.begin_read().context("begin tag kind batch read")?;
         let kinds = tx.open_table(TAG_KINDS).context("open tag kind table")?;

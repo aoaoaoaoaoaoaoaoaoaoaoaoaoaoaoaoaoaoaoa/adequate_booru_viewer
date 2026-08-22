@@ -6,15 +6,16 @@ use eternalist_apps::NativeWake;
 use roaring::RoaringBitmap;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
-    path::PathBuf,
+    fmt::Write as _,
+    path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, PoisonError},
     thread,
     time::{Duration, Instant},
 };
 
 use crate::{
-    booru::{Booru as _, Danbooru, TagDefinition},
-    configuration::MirrorPolicy,
+    booru::{Booru as _, Danbooru, DanbooruAccount, TagDefinition},
+    configuration::{DanbooruAccountConfig, MirrorPolicy},
     date::DateRange,
     index::{CacheStats, FactMergeBudget, Index, TagSuggestion},
     kin::Backfill,
@@ -26,12 +27,14 @@ use crate::{
 };
 
 const DANBOORU_READ_GAP: Duration = Duration::from_millis(150);
+const DANBOORU_WRITE_GAP: Duration = Duration::from_secs(1);
 const SUGGESTION_LIMIT: usize = 12;
 const EVENT_CAPACITY: usize = 32;
 const REFRESH_COMMAND_CAPACITY: usize = 64;
 const WARM_COMMAND_CAPACITY: usize = 16;
 const FAMILY_COMMAND_CAPACITY: usize = 4;
 const DEFINITION_COMMAND_CAPACITY: usize = 16;
+const ACCOUNT_COMMAND_CAPACITY: usize = 4;
 const MEDIA_COMMAND_CAPACITY: usize = 512;
 const MEDIA_PENDING_CAPACITY: usize = 512;
 const MEDIA_FETCHERS: usize = 3;
@@ -91,6 +94,10 @@ pub enum Command {
     TagDefinition {
         serial: u64,
         tag: Tag,
+    },
+    AddPostTags {
+        id: PostId,
+        tags: Vec<Tag>,
     },
     Blade {
         epoch: BladeEpoch,
@@ -185,6 +192,14 @@ pub enum Event {
         result: std::result::Result<Option<TagDefinition>, String>,
     },
     TagDefinitionsCancelled(Vec<(u64, Tag)>),
+    AccountOpened {
+        result: std::result::Result<(), String>,
+    },
+    PostTagsEdited {
+        id: PostId,
+        post: Option<Box<PostRecord>>,
+        result: std::result::Result<(), String>,
+    },
     Refetched {
         post: Option<Box<PostRecord>>,
     },
@@ -258,6 +273,7 @@ pub struct Worker {
     warm_tx: Sender<WarmCommand>,
     family_tx: Sender<FamilyCommand>,
     definition_tx: Option<Sender<DefinitionCommand>>,
+    account_tx: Option<Sender<AccountCommand>>,
     media_tx: Sender<MediaCommand>,
     mirror: MirrorValve,
     crier: Klaxon,
@@ -270,6 +286,8 @@ impl Worker {
         media: MediaCache,
         ctx: egui::Context,
         mirror_policy: MirrorPolicy,
+        account_config: Option<DanbooruAccountConfig>,
+        config_dir: PathBuf,
     ) -> Self {
         let (refresh_tx, refresh_rx) = bounded(REFRESH_COMMAND_CAPACITY);
         let (warm_tx, warm_rx) = bounded(WARM_COMMAND_CAPACITY);
@@ -322,6 +340,21 @@ impl Worker {
             });
             definition_tx
         });
+        let account_tx = account_config.map(|config| {
+            let (account_tx, account_rx) = bounded(ACCOUNT_COMMAND_CAPACITY);
+            let account_index = index.clone();
+            let account_events = event_tx.clone();
+            let _account = thread::spawn(move || {
+                account_loop(
+                    config,
+                    config_dir,
+                    account_index,
+                    account_rx,
+                    account_events,
+                );
+            });
+            account_tx
+        });
         // One dispatcher keeps epoch culling and full-blade priority coherent;
         // a small fetcher pool overlaps network latency so thumbnails land in
         // parallel instead of one per round trip.
@@ -357,6 +390,7 @@ impl Worker {
             warm_tx,
             family_tx,
             definition_tx,
+            account_tx,
             media_tx,
             mirror,
             crier,
@@ -415,6 +449,12 @@ impl Worker {
                 .context("provider has no tag-definition source")?
                 .try_send(DefinitionCommand { serial, tag })
                 .context("send tag-definition worker command"),
+            Command::AddPostTags { id, tags } => self
+                .account_tx
+                .as_ref()
+                .context("Danbooru account is not configured")?
+                .try_send(AccountCommand::AddPostTags { id, tags })
+                .context("send Danbooru tag edit"),
             Command::Warm {
                 query,
                 sort,
@@ -549,6 +589,11 @@ struct FamilyCommand {
 struct DefinitionCommand {
     serial: u64,
     tag: Tag,
+}
+
+#[derive(Debug)]
+enum AccountCommand {
+    AddPostTags { id: PostId, tags: Vec<Tag> },
 }
 
 #[derive(Debug)]
@@ -771,6 +816,80 @@ fn definition_loop(
             result,
         });
     }
+}
+
+fn account_loop(
+    config: DanbooruAccountConfig,
+    config_dir: PathBuf,
+    index: Index,
+    commands: Receiver<AccountCommand>,
+    events: Klaxon,
+) {
+    let account = open_account(&config, &config_dir, &events);
+    let write_gate = RateGate::new(DANBOORU_WRITE_GAP);
+    while let Ok(command) = commands.recv() {
+        match command {
+            AccountCommand::AddPostTags { id, tags } => {
+                let Some(account) = account.as_ref() else {
+                    events.send(Event::PostTagsEdited {
+                        id,
+                        post: None,
+                        result: Err("Danbooru account is not ready".to_owned()),
+                    });
+                    continue;
+                };
+                write_gate.wait();
+                let (post, result) = match account.add_post_tags(id, &tags) {
+                    Ok(harvest) => {
+                        let (post, stored) = absorb_account_harvest(&index, &harvest);
+                        let result =
+                            stored.map_err(|err| format!("store edited post {id}: {err:#}"));
+                        (Some(post), result)
+                    }
+                    Err(fault) => {
+                        let mut message = fault.message;
+                        let post = fault.harvest.as_deref().map(|harvest| {
+                            let (post, stored) = absorb_account_harvest(&index, harvest);
+                            if let Err(err) = stored {
+                                let _written = write!(message, "; store reconciled post: {err:#}");
+                            }
+                            post
+                        });
+                        (post, Err(message))
+                    }
+                };
+                events.send(Event::PostTagsEdited { id, post, result });
+            }
+        }
+    }
+}
+
+fn open_account(
+    config: &DanbooruAccountConfig,
+    config_dir: &Path,
+    events: &Klaxon,
+) -> Option<DanbooruAccount> {
+    match DanbooruAccount::open(config, config_dir) {
+        Ok(account) => {
+            events.send(Event::AccountOpened { result: Ok(()) });
+            Some(account)
+        }
+        Err(err) => {
+            events.send(Event::AccountOpened {
+                result: Err(format!("{err:#}")),
+            });
+            None
+        }
+    }
+}
+
+fn absorb_account_harvest(
+    index: &Index,
+    harvest: &crate::model::Harvest,
+) -> (Box<PostRecord>, Result<()>) {
+    let post = Box::new(harvest.post.clone());
+    let stored = index.absorb_harvest(std::slice::from_ref(harvest));
+    (post, stored)
 }
 
 fn hydrate_family(booru: &Danbooru, index: &Index, gate: &RateGate, focus: PostId) -> Result<bool> {

@@ -466,12 +466,13 @@ fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
         focus.wait_anchor(&app, &abv_contract::Target::ViewerSurface.to_string(), WAIT)?;
     let controls = [
         abv_contract::ViewerControl::Danbooru,
-        abv_contract::ViewerControl::Next,
         abv_contract::ViewerControl::Close,
         abv_contract::ViewerControl::Favorite,
         abv_contract::ViewerControl::Save,
         abv_contract::ViewerControl::Copy,
         abv_contract::ViewerControl::Tags,
+        abv_contract::ViewerControl::Tree,
+        abv_contract::ViewerControl::Next,
         abv_contract::ViewerControl::Danbooru,
     ];
     let first = abv_contract::Target::ViewerControl(controls[0]).to_string();
@@ -536,10 +537,10 @@ fn native_effects(harness: &Harness<'_>) -> Result<()> {
             detail: "initial viewer frame omitted its image surface".to_owned(),
         })?;
     let mut focus: Probe<Observation> = app.witness()?.typed();
-    let family_control =
-        abv_contract::Target::ViewerControl(abv_contract::ViewerControl::Previous).to_string();
-    let _family_ready = focus.wait_anchor(&app, &family_control, Duration::from_secs(5))?;
-    let _tree = story.key(Key::Character('r'))?.next_frame()?;
+    let tree_control =
+        abv_contract::Target::ViewerControl(abv_contract::ViewerControl::Tree).to_string();
+    let _tree_ready = focus.wait_anchor(&app, &tree_control, Duration::from_secs(5))?;
+    let _tree = story.click(&tree_control)?.next_frame()?;
     let family_node = format!("family-node:{EFFECT_POST}");
     let _tree_open = focus.wait_anchor(&app, &family_node, Duration::from_secs(5))?;
     let _tree_right = story.key(Key::Right)?.next_frame()?;

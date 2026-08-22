@@ -13,6 +13,7 @@ pub enum Water {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ViewerControl {
+    Tree,
     Tags,
     Copy,
     Save,
@@ -29,6 +30,7 @@ impl ViewerControl {
     #[must_use]
     pub const fn wire(self) -> &'static str {
         match self {
+            Self::Tree => "tree",
             Self::Tags => "tags",
             Self::Copy => "copy",
             Self::Save => "save",

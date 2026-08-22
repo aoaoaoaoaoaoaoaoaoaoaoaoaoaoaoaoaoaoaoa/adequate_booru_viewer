@@ -1,13 +1,19 @@
 use anyhow::{Context as _, Result};
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    path::Path,
     time::Duration,
 };
 use ureq::Agent;
 
-use crate::model::{
-    Harvest, Kin, PostId, PostRecord, Query, Rating, Sort, Tag, TagHint, TagKind, narrow_post_id,
+use crate::{
+    config::DanbooruAccountConfig,
+    model::{
+        Harvest, Kin, PostId, PostRecord, Query, Rating, Sort, Tag, TagHint, TagKind,
+        narrow_post_id,
+    },
 };
 
 const POST_LIMIT: &str = "200";
@@ -50,13 +56,11 @@ pub struct Danbooru {
 
 impl Danbooru {
     pub fn new() -> Self {
-        let config = Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(20)))
-            .max_idle_age(Duration::from_secs(90))
-            .user_agent("adequate_booru_viewer/0.1 anonymous-readonly")
-            .build();
         Self {
-            agent: config.into(),
+            agent: danbooru_agent(&format!(
+                "adequate_booru_viewer/{} anonymous-readonly",
+                env!("CARGO_PKG_VERSION")
+            )),
         }
     }
 
@@ -144,6 +148,187 @@ impl Danbooru {
             .read_json::<Vec<DanbooruPost>>()
             .context("decode Danbooru posts JSON")?;
         wire.into_iter().map(Harvest::try_from).collect()
+    }
+}
+
+fn danbooru_agent(user_agent: &str) -> Agent {
+    Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(20)))
+        .max_idle_age(Duration::from_secs(90))
+        .user_agent(user_agent)
+        .build()
+        .into()
+}
+
+pub struct DanbooruAccount {
+    agent: Agent,
+    authorization: String,
+}
+
+#[derive(Debug)]
+pub struct TagEditFault {
+    pub message: String,
+    /// Authoritative state recovered after an ambiguous mutation failure.
+    pub harvest: Option<Box<Harvest>>,
+}
+
+impl DanbooruAccount {
+    pub fn open(config: &DanbooruAccountConfig, config_dir: &Path) -> Result<Self> {
+        let login = config.login.trim();
+        anyhow::ensure!(!login.is_empty(), "Danbooru login is empty");
+        anyhow::ensure!(
+            !login.contains([':', '\r', '\n']),
+            "Danbooru login contains an invalid character"
+        );
+        let api_key_path = config.resolve_api_key(config_dir);
+        let metadata = std::fs::metadata(&api_key_path)
+            .with_context(|| format!("read API key metadata at {}", api_key_path.display()))?;
+        anyhow::ensure!(
+            metadata.is_file(),
+            "API key path is not a regular file: {}",
+            api_key_path.display()
+        );
+        let raw = std::fs::read_to_string(&api_key_path)
+            .with_context(|| format!("read API key at {}", api_key_path.display()))?;
+        let api_key = raw
+            .strip_suffix("\r\n")
+            .or_else(|| raw.strip_suffix('\n'))
+            .unwrap_or(&raw);
+        anyhow::ensure!(!api_key.is_empty(), "Danbooru API key is empty");
+        anyhow::ensure!(
+            !api_key.contains(['\r', '\n']),
+            "Danbooru API key file must contain exactly one line"
+        );
+        let authorization = format!(
+            "Basic {}",
+            BASE64_STANDARD.encode(format!("{login}:{api_key}"))
+        );
+        Ok(Self {
+            agent: danbooru_agent(&format!(
+                "adequate_booru_viewer/{} configured-account",
+                env!("CARGO_PKG_VERSION")
+            )),
+            authorization,
+        })
+    }
+
+    pub fn add_post_tags(
+        &self,
+        id: PostId,
+        additions: &[Tag],
+    ) -> std::result::Result<Harvest, TagEditFault> {
+        let current = self.fetch_post(id).map_err(|err| TagEditFault {
+            message: format!("fetch current post {id}: {err:#}"),
+            harvest: None,
+        })?;
+        let old_tag_string = current.tag_string.clone();
+        let mut tags = old_tag_string
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let mut known = tags.iter().cloned().collect::<BTreeSet<_>>();
+        let mut changed = false;
+        for tag in additions {
+            if known.insert(tag.as_str().to_owned()) {
+                tags.push(tag.as_str().to_owned());
+                changed = true;
+            }
+        }
+        if !changed {
+            return Harvest::try_from(current).map_err(|err| TagEditFault {
+                message: format!("decode current post {id}: {err:#}"),
+                harvest: None,
+            });
+        }
+        let tag_string = tags.join(" ");
+        let endpoint = format!("https://danbooru.donmai.us/posts/{id}.json");
+        let mutation = self
+            .agent
+            .patch(&endpoint)
+            .header("Authorization", &self.authorization)
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .send_form([
+                ("post[tag_string]", tag_string.as_str()),
+                ("post[old_tag_string]", old_tag_string.as_str()),
+            ]);
+        let failure = match mutation {
+            Ok(mut response) if response.status().is_success() => {
+                return response
+                    .body_mut()
+                    .read_json::<DanbooruPost>()
+                    .context("decode edited Danbooru post")
+                    .and_then(Harvest::try_from)
+                    .map_err(|err| TagEditFault {
+                        message: format!("edit post {id}: {err:#}"),
+                        harvest: None,
+                    });
+            }
+            Ok(mut response) => {
+                let status = response.status();
+                let detail = response
+                    .body_mut()
+                    .read_json::<DanbooruApiFault>()
+                    .ok()
+                    .and_then(DanbooruApiFault::detail);
+                detail.map_or_else(
+                    || format!("Danbooru rejected edit ({status})"),
+                    |detail| format!("Danbooru rejected edit ({status}): {detail}"),
+                )
+            }
+            Err(err) => format!("edit post {id}: {err}"),
+        };
+        let reconciled = self.fetch_post(id).ok().and_then(|post| {
+            let present = additions.iter().all(|tag| {
+                post.tag_string
+                    .split_whitespace()
+                    .any(|found| found == tag.as_str())
+            });
+            Harvest::try_from(post)
+                .ok()
+                .map(|harvest| (present, harvest))
+        });
+        match reconciled {
+            Some((true, harvest)) => Ok(harvest),
+            Some((false, harvest)) => Err(TagEditFault {
+                message: failure,
+                harvest: Some(Box::new(harvest)),
+            }),
+            None => Err(TagEditFault {
+                message: failure,
+                harvest: None,
+            }),
+        }
+    }
+
+    fn fetch_post(&self, id: PostId) -> Result<DanbooruPost> {
+        let mut response = self
+            .agent
+            .get(format!("https://danbooru.donmai.us/posts/{id}.json"))
+            .header("Authorization", &self.authorization)
+            .call()
+            .with_context(|| format!("GET Danbooru post {id}"))?;
+        response
+            .body_mut()
+            .read_json::<DanbooruPost>()
+            .with_context(|| format!("decode Danbooru post {id}"))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DanbooruApiFault {
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+impl DanbooruApiFault {
+    fn detail(self) -> Option<String> {
+        self.message
+            .or(self.error)
+            .filter(|detail| !detail.is_empty())
     }
 }
 

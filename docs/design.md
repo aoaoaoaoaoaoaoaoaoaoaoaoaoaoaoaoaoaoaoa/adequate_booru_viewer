@@ -1,6 +1,6 @@
 # adequate booru viewer — design
 
-Goal: a native, anonymous, read-only Danbooru reference workbench whose warm-cache interaction path is local index math, not live HTTP search.
+Goal: a native Danbooru reference workbench whose warm-cache interaction path is local index math, not live HTTP search. Its mirror is anonymous and read-only; a separately authenticated, explicitly configured lane may perform narrow user-requested edits.
 
 ## Storage Contract
 
@@ -37,7 +37,14 @@ filters between stores.
 
 Warm-cache filtering is recursive bitmap algebra over persisted `roaring` sets. The query is a tree of atom leaves (`tag` and `rating:*`) plus `AND`, `OR`, `XOR`/select, and unary `NOT`; textual `-tag` is only input sugar for `NOT tag`. `AND` intersects, `OR` unions, `XOR` keeps posts present in exactly one child, and `NOT` subtracts from the cached post universe. Sorting is either an ordered lane walk for broad sets or a bounded local candidate sort for smaller intersections. UI query changes do not hit the network.
 
-Danbooru HTTP is only an anonymous read-only ingress. The worker calls `GET /posts.json`; no login, API key, write endpoint, vote endpoint, or mutation primitive exists in the code.
+Danbooru indexing remains anonymous read-only ingress. The crawler and warmer
+call `GET /posts.json` through one credential-free client. An optional account
+configuration names a login and an external API-key file; startup validates it
+locally, then a separate single-consumer lane may add an existing tag to one
+post. That lane authenticates by fetching the current post, submits its full
+tag string plus `old_tag_string`, and absorbs the authoritative response. A
+failed mutation is refetched before its outcome is reported. Credentials never
+enter config, state, URLs, logs, or the mirror client.
 
 A passive crawler walks Danbooru newest-to-oldest with `page=b<id>` and a durable cursor. The active query warmer separately walks page 1, 2, 3, ... for the current query/sort until exhaustion or Danbooru's anonymous 1000-page search cap, then re-runs local search as pages are absorbed, so score/favorite sorts keep widening while the cache warms. Both paths share one 150 ms read gate, about 6.7 requests/sec against Danbooru's documented 10 requests/sec read ceiling.
 

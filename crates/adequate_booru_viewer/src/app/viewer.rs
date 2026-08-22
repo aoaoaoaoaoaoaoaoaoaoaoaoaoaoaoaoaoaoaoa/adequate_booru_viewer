@@ -17,6 +17,7 @@ const KIN_SPRING_OMEGA: f32 = 24.0;
 const KIN_SPRING_ZETA: f32 = 0.58;
 const VIEWER_RECOIL: f32 = 0.03;
 const VIEWER_ID: &str = "full-viewer";
+const FULL_RECENT_CAPACITY: usize = 5;
 /// Content inset which leaves roughly eight visible points after egui's
 /// six-point window frame margin is added.
 const VIEWER_FIT_MARGIN: f32 = 14.0;
@@ -45,6 +46,7 @@ pub(super) enum ViewerAction {
     Copy,
     Save,
     Favorite,
+    Tree,
     Tags,
     Kin(KinStep),
     Close,
@@ -204,20 +206,6 @@ fn viewer_title_bar(
                         .strong()
                         .color(chrome::TEXT),
                 );
-                if kin.present {
-                    for (step, help) in [
-                        (KinStep::Previous, "previous"),
-                        (KinStep::Parent, "parent"),
-                        (KinStep::Children, "children"),
-                        (KinStep::Next, "next"),
-                    ] {
-                        let response = kin_button(ui, step, kin.allows(step));
-                        record_control(ui, step.control(), &response);
-                        if response.on_hover_text(help).clicked() {
-                            actions.push(ViewerAction::Kin(step));
-                        }
-                    }
-                }
                 let _actions =
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let close = controls::symbol_sized(
@@ -254,19 +242,31 @@ fn viewer_title_bar(
                         {
                             actions.push(ViewerAction::Favorite);
                         }
-                        let save = controls::plate_enabled(
-                            ui,
-                            post.original_url().is_some(),
-                            "save",
-                            false,
-                        );
+                        let save = ui
+                            .add_enabled_ui(post.original_url().is_some(), |ui| {
+                                commands::canon().button_with(
+                                    Edict::SaveViewerImage,
+                                    ui,
+                                    |button| button.min_size(egui::vec2(24.0, 20.0)),
+                                )
+                            })
+                            .inner;
+                        let save_activated = save.clicked();
+                        let save = save.into_response();
+                        chrome::tension(ui, &save);
                         record_control(ui, abv_contract::ViewerControl::Save, &save);
-                        if save.clicked() {
+                        if save_activated {
                             actions.push(ViewerAction::Save);
                         }
-                        let copy = controls::plate(ui, "copy", false);
+                        let copy =
+                            commands::canon().button_with(Edict::CopyViewerImage, ui, |button| {
+                                button.min_size(egui::vec2(24.0, 20.0))
+                            });
+                        let copy_activated = copy.clicked();
+                        let copy = copy.into_response();
+                        chrome::tension(ui, &copy);
                         record_control(ui, abv_contract::ViewerControl::Copy, &copy);
-                        if copy.clicked() {
+                        if copy_activated {
                             actions.push(ViewerAction::Copy);
                         }
                         if surface == ViewerSurface::Image {
@@ -288,6 +288,35 @@ fn viewer_title_bar(
                             record_control(ui, abv_contract::ViewerControl::Tags, &response);
                             if activated {
                                 actions.push(ViewerAction::Tags);
+                            }
+                        }
+                        if surface == ViewerSurface::Image && kin.present {
+                            let command = commands::canon().button_with(
+                                Edict::OpenViewerTree,
+                                ui,
+                                |button| button.min_size(egui::vec2(24.0, 20.0)),
+                            );
+                            let activated = command.clicked();
+                            let response = command.into_response();
+                            chrome::tension(ui, &response);
+                            let response = response.on_hover_text("show family tree");
+                            record_control(ui, abv_contract::ViewerControl::Tree, &response);
+                            if activated {
+                                actions.push(ViewerAction::Tree);
+                            }
+                        }
+                        if kin.present {
+                            for (step, help) in [
+                                (KinStep::Next, "next"),
+                                (KinStep::Children, "children"),
+                                (KinStep::Parent, "parent"),
+                                (KinStep::Previous, "previous"),
+                            ] {
+                                let response = kin_button(ui, step, kin.allows(step));
+                                record_control(ui, step.control(), &response);
+                                if response.on_hover_text(help).clicked() {
+                                    actions.push(ViewerAction::Kin(step));
+                                }
                             }
                         }
                     });
@@ -676,6 +705,7 @@ impl Bayonet {
         let Some(current) = self.zoom.as_ref().map(|post| post.id) else {
             return;
         };
+        self.touch_full_recent(current);
         let slot = self.gallery_slot();
         let bearing = self.result_wake.bearing();
         let targets = if !self.prefetch_on_hover {
@@ -700,15 +730,18 @@ impl Bayonet {
         for id in targets.iter().flatten().copied() {
             let _successor = self.full_residency.insert(id);
         }
-        self.full.retain(|id, _| self.full_residency.contains(id));
+        let predicted = &self.full_residency;
+        let recent = &self.full_recent;
+        self.full
+            .retain(|id, _| predicted.contains(id) || recent.contains(id));
         self.full_rgba
-            .retain(|id, _| self.full_residency.contains(id));
+            .retain(|id, _| predicted.contains(id) || recent.contains(id));
         self.full_loaded_at
-            .retain(|id, _| self.full_residency.contains(id));
+            .retain(|id, _| predicted.contains(id) || recent.contains(id));
         self.full_wait
-            .retain(|id, _| self.full_residency.contains(id));
+            .retain(|id, _| predicted.contains(id) || recent.contains(id));
         self.full_faults
-            .retain(|id| self.full_residency.contains(id));
+            .retain(|id| predicted.contains(id) || recent.contains(id));
 
         for id in targets.into_iter().flatten() {
             let candidate = self
@@ -731,6 +764,19 @@ impl Bayonet {
         }
     }
 
+    fn touch_full_recent(&mut self, id: PostId) {
+        if self.full_recent.back().copied() == Some(id) {
+            return;
+        }
+        if let Some(slot) = self.full_recent.iter().position(|recent| *recent == id) {
+            let _old_position = self.full_recent.remove(slot);
+        }
+        self.full_recent.push_back(id);
+        if self.full_recent.len() > FULL_RECENT_CAPACITY {
+            let _evicted = self.full_recent.pop_front();
+        }
+    }
+
     fn prepare_full(&mut self, ctx: &egui::Context, id: PostId, url: String) {
         let _marked = self.prefetched.insert(id);
         let _inflight = self.full_inflight.insert(id);
@@ -745,7 +791,7 @@ impl Bayonet {
         }
     }
 
-    fn toggle_viewer_favorite(&mut self, id: PostId) {
+    pub(super) fn toggle_viewer_favorite(&mut self, id: PostId) {
         if self.viewer_result_seam.is_none_or(|seam| seam.origin != id)
             && let Some(slot) = self.gallery_slot()
         {
@@ -838,6 +884,9 @@ impl Bayonet {
                         ViewerAction::Copy => self.copy_full(post.id),
                         ViewerAction::Save => self.save_full(&post),
                         ViewerAction::Favorite => self.toggle_viewer_favorite(post.id),
+                        ViewerAction::Tree => {
+                            let _opened = self.open_family_tree();
+                        }
                         ViewerAction::Tags => self.toggle_viewer_tags(ctx),
                         ViewerAction::Kin(step) => self.navigate_kin(step),
                         ViewerAction::Close => close = true,
@@ -954,6 +1003,7 @@ impl Bayonet {
             self.full_wait.clear();
             self.full_faults.clear();
             self.full_residency.clear();
+            self.full_recent.clear();
             self.viewer_tag_groups = None;
             self.viewer_family = None;
             self.viewer_surface = ViewerSurface::Image;
@@ -1114,7 +1164,7 @@ impl Bayonet {
         promoted
     }
 
-    fn save_full(&mut self, post: &PostRecord) {
+    pub(super) fn save_full(&mut self, post: &PostRecord) {
         let Some(url) = post.original_url().map(ToOwned::to_owned) else {
             self.status = format!("#{id} has no original media URL", id = post.id);
             return;
@@ -1136,7 +1186,7 @@ impl Bayonet {
         }
     }
 
-    fn copy_full(&mut self, id: PostId) {
+    pub(super) fn copy_full(&mut self, id: PostId) {
         let Some(blade) = self.full_rgba.get(&id) else {
             "full image is not loaded yet".clone_into(&mut self.status);
             return;

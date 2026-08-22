@@ -44,6 +44,7 @@ dependencies = [
  "abv-contract",
  "anyhow",
  "arboard",
+ "base64",
  "brass_poolrooms",
  "crossbeam-channel",
  "directories",
