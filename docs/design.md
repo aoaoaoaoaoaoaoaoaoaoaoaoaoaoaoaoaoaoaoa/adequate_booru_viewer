@@ -9,12 +9,14 @@ The objection that long scraping work must survive restart is correct. The app t
 - durable index: `ProjectDirs::data_local_dir()/index.redb`
 - disposable media cache: `ProjectDirs::cache_dir()/media`
 - configuration: `ProjectDirs::config_dir()/config.toml` — small human-edited
-  settings such as hover prefetch and mirror policy
+  settings such as hover prefetch, mirror policy, and an optional account plus
+  external API-key path
 - Filter Library: `ProjectDirs::data_local_dir()/filters.toml` — saved filters
   and folders; user-owned product data, written independently and atomically
 - Session State: `ProjectDirs::state_dir()/slate.toml` (data dir fallback
-  off Linux) — scratch query, active filter, sort, density, folder
-  collapse; the app's snapshot of itself, free to decay to defaults
+  off Linux) — scratch query, active filter, sort, density, folder collapse,
+  and the open viewer's post/anchor/tree identity; the app's snapshot of
+  itself, free to decay to defaults
 
 The durable database persists both directions:
 
@@ -31,11 +33,13 @@ a contract: losing Session State must never lose user intent, so its loader
 decays silently to defaults; invalid configuration and a damaged Filter Library
 fail loudly. Upgrading from the former combined `config.toml` writes the Filter
 Library first, then rewrites configuration, so a crash cannot strand saved
-filters between stores.
+filters between stores. An open viewer is rebuilt from post ids against the
+canonical index; records, family projections, textures, navigation seams,
+predictor history, and viewport geometry never enter Session State.
 
 ## Query Path
 
-Warm-cache filtering is recursive bitmap algebra over persisted `roaring` sets. The query is a tree of atom leaves (`tag` and `rating:*`) plus `AND`, `OR`, `XOR`/select, and unary `NOT`; textual `-tag` is only input sugar for `NOT tag`. `AND` intersects, `OR` unions, `XOR` keeps posts present in exactly one child, and `NOT` subtracts from the cached post universe. Sorting is either an ordered lane walk for broad sets or a bounded local candidate sort for smaller intersections. UI query changes do not hit the network.
+Warm-cache filtering is recursive bitmap algebra over persisted `roaring` sets. The runtime query is a tree of tag, regexp, and `rating:*` atoms plus `AND`, `OR`, `XOR`/select, and unary `NOT`; textual `-tag` is only entry-field sugar for `NOT tag`. `AND` intersects, `OR` unions, `XOR` keeps posts present in exactly one child, and `NOT` subtracts from the cached post universe. Saved filters cross the Filter Library boundary as canonical Boolean expressions with `~ > AND > XOR > OR` precedence; editor paths and group-selection state never enter the library. Loading migrates the former serialized-tree schema atomically. Sorting is either an ordered lane walk for broad sets or a bounded local candidate sort for smaller intersections. UI query changes do not hit the network.
 
 Danbooru indexing remains anonymous read-only ingress. The crawler and warmer
 call `GET /posts.json` through one credential-free client. An optional account
@@ -43,8 +47,8 @@ configuration names a login and an external API-key file; startup validates it
 locally, then a separate single-consumer lane may add an existing tag to one
 post. That lane authenticates by fetching the current post, submits its full
 tag string plus `old_tag_string`, and absorbs the authoritative response. A
-failed mutation is refetched before its outcome is reported. Credentials never
-enter config, state, URLs, logs, or the mirror client.
+failed mutation is refetched before its outcome is reported. API-key bytes
+never enter configuration, state, URLs, logs, or the mirror client.
 
 A passive crawler walks Danbooru newest-to-oldest with `page=b<id>` and a durable cursor. The active query warmer separately walks page 1, 2, 3, ... for the current query/sort until exhaustion or Danbooru's anonymous 1000-page search cap, then re-runs local search as pages are absorbed, so score/favorite sorts keep widening while the cache warms. Both paths share one 150 ms read gate, about 6.7 requests/sec against Danbooru's documented 10 requests/sec read ceiling.
 

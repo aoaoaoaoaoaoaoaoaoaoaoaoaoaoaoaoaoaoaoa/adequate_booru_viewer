@@ -9,7 +9,7 @@ use std::{
 use ureq::Agent;
 
 use crate::{
-    config::DanbooruAccountConfig,
+    configuration::DanbooruAccountConfig,
     model::{
         Harvest, Kin, PostId, PostRecord, Query, Rating, Sort, Tag, TagHint, TagKind,
         narrow_post_id,

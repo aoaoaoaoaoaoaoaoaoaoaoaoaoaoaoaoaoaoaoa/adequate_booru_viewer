@@ -1,5 +1,5 @@
 use anyhow::{Context as _, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{
     fmt::{Display, Formatter},
     path::{Path, PathBuf},
@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     date::DateRange,
-    model::{Corpus, GalleryTopology, Query, QueryAtom, RatingClass, Sort, TagPolarity},
+    model::{Corpus, GalleryTopology, PostId, Query, QueryAtom, RatingClass, Sort, TagPolarity},
 };
 
 /// Small human-edited application configuration.
@@ -35,22 +35,119 @@ impl Default for Configuration {
 impl eternalist_apps::configuration::Configuration for Configuration {}
 
 /// Durable user-owned saved-filter collection.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FilterLibrary {
-    pub saved: Vec<SavedFilter>,
-    pub shelves: Vec<Shelf>,
+    pub unfiled: Vec<SavedFilter>,
+    pub folders: Vec<Folder>,
 }
 
-impl PartialEq for FilterLibrary {
-    fn eq(&self, other: &Self) -> bool {
-        self.saved == other.saved
-            && self.shelves.len() == other.shelves.len()
-            && self
+impl Serialize for FilterLibrary {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        FilterLibraryOut {
+            filter: &self.unfiled,
+            folder: &self.folders,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for FilterLibrary {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = FilterLibraryIn::deserialize(deserializer)?;
+        let legacy = wire.saved.is_some() || wire.shelves.is_some();
+        let current = wire.filter.is_some() || wire.folder.is_some();
+        if legacy && current {
+            return Err(D::Error::custom(
+                "legacy `saved`/`shelves` cannot be combined with `filter`/`folder`",
+            ));
+        }
+        Ok(if legacy {
+            LegacyFilterLibrary {
+                saved: wire.saved.unwrap_or_default(),
+                shelves: wire.shelves.unwrap_or_default(),
+            }
+            .into()
+        } else {
+            Self {
+                unfiled: wire.filter.unwrap_or_default(),
+                folders: wire.folder.unwrap_or_default(),
+            }
+        })
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FilterLibraryIn {
+    filter: Option<Vec<SavedFilter>>,
+    folder: Option<Vec<Folder>>,
+    saved: Option<Vec<LegacySavedFilter>>,
+    shelves: Option<Vec<LegacyFolder>>,
+}
+
+#[derive(Serialize)]
+struct FilterLibraryOut<'a> {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    filter: &'a Vec<SavedFilter>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    folder: &'a Vec<Folder>,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct LegacyFilterLibrary {
+    saved: Vec<LegacySavedFilter>,
+    shelves: Vec<LegacyFolder>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LegacySavedFilter {
+    name: FilterName,
+    tree: Query,
+    #[serde(default)]
+    active_group: Vec<usize>,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct LegacyFolder {
+    name: String,
+    filters: Vec<LegacySavedFilter>,
+}
+
+impl From<LegacyFilterLibrary> for FilterLibrary {
+    fn from(legacy: LegacyFilterLibrary) -> Self {
+        Self {
+            unfiled: legacy
+                .saved
+                .into_iter()
+                .map(LegacySavedFilter::migrate)
+                .collect(),
+            folders: legacy
                 .shelves
-                .iter()
-                .zip(&other.shelves)
-                .all(|(left, right)| left.name == right.name && left.filters == right.filters)
+                .into_iter()
+                .map(|folder| Folder {
+                    name: folder.name,
+                    filters: folder
+                        .filters
+                        .into_iter()
+                        .map(LegacySavedFilter::migrate)
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl LegacySavedFilter {
+    fn migrate(self) -> SavedFilter {
+        let Self {
+            name,
+            tree,
+            active_group: _,
+        } = self;
+        SavedFilter::new(name, tree)
     }
 }
 
@@ -89,7 +186,7 @@ impl FilterLibrary {
     pub(crate) fn first_run() -> Self {
         let mut library = Self::default();
         if let Some(filter) = safe_default_filter() {
-            library.saved.push(filter);
+            library.unfiled.push(filter);
         }
         library
     }
@@ -104,7 +201,16 @@ impl FilterLibrary {
         }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("read filter library {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parse filter library {}", path.display()))
+        let document = toml::from_str::<toml::Table>(&text)
+            .with_context(|| format!("parse filter library {}", path.display()))?;
+        let legacy = document.contains_key("saved") || document.contains_key("shelves");
+        let library = document
+            .try_into::<Self>()
+            .with_context(|| format!("decode filter library {}", path.display()))?;
+        if legacy {
+            library.save(path)?;
+        }
+        Ok(library)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -118,7 +224,7 @@ struct LegacyConfiguration {
     prefetch_on_hover: bool,
     mirror: MirrorConfig,
     danbooru: DanbooruConfig,
-    filters: FilterLibrary,
+    filters: LegacyFilterLibrary,
 }
 
 impl Default for LegacyConfiguration {
@@ -127,7 +233,7 @@ impl Default for LegacyConfiguration {
             prefetch_on_hover: true,
             mirror: MirrorConfig::default(),
             danbooru: DanbooruConfig::default(),
-            filters: FilterLibrary::default(),
+            filters: LegacyFilterLibrary::default(),
         }
     }
 }
@@ -151,7 +257,7 @@ pub fn migrate_legacy_configuration(config: &Path, filters: &Path) -> Result<boo
         return Ok(false);
     };
     if !filters.exists() {
-        legacy.filters.save(filters)?;
+        FilterLibrary::from(legacy.filters).save(filters)?;
     }
     save_toml(
         &Configuration {
@@ -177,7 +283,7 @@ fn safe_default_filter() -> Option<SavedFilter> {
         QueryAtom::Rating(RatingClass::General),
         TagPolarity::Positive,
     );
-    Some(SavedFilter::new(name, tree, Vec::new()))
+    Some(SavedFilter::new(name, tree))
 }
 
 fn save_toml(value: &impl Serialize, path: &Path, what: &'static str) -> Result<()> {
@@ -259,35 +365,44 @@ impl FilterSelection {
     }
 }
 
-/// A filter folder; ordered, like everything in the library.
-///
-/// `open` is view state, not product data: it lives in [`SessionState`] and is
-/// never serialized into the filter-library file.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+/// An ordered user-facing filter folder. Open/closed state belongs to
+/// [`SessionState`].
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Shelf {
+pub struct Folder {
     pub name: String,
-    #[serde(skip, default = "shelf_open_default")]
-    pub open: bool,
+    #[serde(rename = "filter", skip_serializing_if = "Vec::is_empty")]
     pub filters: Vec<SavedFilter>,
 }
 
-impl Default for Shelf {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            open: true,
-            filters: Vec::new(),
-        }
-    }
+/// The semantic view within one open image-viewer session. Geometry and
+/// animation remain runtime ephemera.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerView {
+    #[default]
+    Image,
+    Tree,
 }
 
-fn shelf_open_default() -> bool {
-    true
+/// Reconstructible identity for one open image-viewer session.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewerSession {
+    pub post: PostId,
+    pub gallery_anchor: PostId,
+    #[serde(default)]
+    pub view: ViewerView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_focus: Option<PostId>,
+    /// Result depth already paid for when this image was reached. This is a
+    /// reconstruction bound, never positional identity.
+    #[serde(default)]
+    pub result_horizon: usize,
 }
 
 /// Persistent workbench state (XDG state dir): the snapshot the app keeps of
-/// itself — scratch query, selections, sliders, folder collapse. Nothing here
+/// itself: scratch query, selections, sliders, folder collapse. Nothing here
 /// is user-authored; losing it must never lose user intent.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -306,6 +421,8 @@ pub struct SessionState {
     pub images_per_row: u16,
     pub water: WaterMode,
     pub viewer_tags_open: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub viewer: Option<ViewerSession>,
 }
 
 impl Default for SessionState {
@@ -321,6 +438,7 @@ impl Default for SessionState {
             images_per_row: 5,
             water: WaterMode::Wet,
             viewer_tags_open: false,
+            viewer: None,
         }
     }
 }
@@ -339,22 +457,32 @@ impl SessionState {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SavedFilter {
     pub name: FilterName,
-    pub tree: Query,
-    pub active_group: Vec<usize>,
+    #[serde(with = "query_text")]
+    pub query: Query,
 }
 
 impl SavedFilter {
-    pub fn new(name: FilterName, tree: Query, active_group: Vec<usize>) -> Self {
-        let active_group = tree.clamp_group_path(&active_group);
-        Self {
-            name,
-            tree,
-            active_group,
-        }
+    pub fn new(name: FilterName, query: Query) -> Self {
+        Self { name, query }
+    }
+}
+
+mod query_text {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(query: &Query, serializer: S) -> Result<S::Ok, S::Error> {
+        crate::filter_expression::render(query)
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Query, D::Error> {
+        let source = String::deserialize(deserializer)?;
+        crate::filter_expression::parse(&source).map_err(D::Error::custom)
     }
 }
 
@@ -448,35 +576,37 @@ mod tests {
         assert!(query.push_atom(&choice, tag("nude")?, TagPolarity::Positive));
 
         let library = FilterLibrary {
-            saved: vec![SavedFilter::new(
+            unfiled: vec![SavedFilter::new(
                 FilterName::forge("beach").context("filter name")?,
                 query.clone(),
-                choice.clone(),
             )],
-            shelves: vec![Shelf {
+            folders: vec![Folder {
                 name: "trips".to_owned(),
-                open: false,
-                filters: Vec::new(),
+                filters: vec![SavedFilter::new(
+                    FilterName::forge("shore").context("filter name")?,
+                    query.clone(),
+                )],
             }],
         };
         let text = toml::to_string_pretty(&library)?;
         let roundtrip = toml::from_str::<FilterLibrary>(&text)?;
-        assert_eq!(library.saved, roundtrip.saved);
-        assert_eq!(roundtrip.saved[0].name.as_str(), "beach");
-        assert_eq!(roundtrip.saved[0].tree, query);
-        assert_eq!(roundtrip.saved[0].active_group, choice);
-        // `open` is session state, never product data.
-        assert!(roundtrip.shelves[0].open);
+        assert_eq!(library, roundtrip);
+        assert!(text.contains("[[filter]]"));
+        assert!(text.contains("query = \"solo AND (bikini OR nude)\""));
+        assert!(text.contains("[[folder]]"));
+        assert!(text.contains("[[folder.filter]]"));
+        assert!(!text.contains("active_group"));
+        assert!(!text.contains(".tree"));
         Ok(())
     }
 
     #[test]
     fn first_run_seeds_only_the_absent_filter_library() -> Result<()> {
         let seeded = FilterLibrary::first_run();
-        assert_eq!(seeded.saved.len(), 1);
-        assert_eq!(seeded.saved[0].name.as_str(), SAFE_DEFAULT_FILTER);
-        assert!(toml::to_string(&seeded.saved[0])?.contains("general"));
-        assert!(FilterLibrary::default().saved.is_empty());
+        assert_eq!(seeded.unfiled.len(), 1);
+        assert_eq!(seeded.unfiled[0].name.as_str(), SAFE_DEFAULT_FILTER);
+        assert!(toml::to_string(&seeded.unfiled[0])?.contains("rating:g"));
+        assert!(FilterLibrary::default().unfiled.is_empty());
         Ok(())
     }
 
@@ -498,12 +628,18 @@ mod tests {
                     api_key_file: PathBuf::from("secrets/danbooru.token"),
                 }),
             },
-            filters: FilterLibrary {
+            filters: LegacyFilterLibrary {
                 saved: vec![SavedFilter::new(
                     FilterName::forge("beach").context("filter name")?,
-                    query,
-                    Vec::new(),
-                )],
+                    query.clone(),
+                )]
+                .into_iter()
+                .map(|filter| LegacySavedFilter {
+                    name: filter.name,
+                    tree: filter.query,
+                    active_group: Vec::new(),
+                })
+                .collect(),
                 shelves: Vec::new(),
             },
         };
@@ -520,9 +656,9 @@ mod tests {
         assert!(!configuration.prefetch_on_hover);
         assert_eq!(configuration.mirror.policy, MirrorPolicy::Paused);
         assert_eq!(configuration.danbooru, legacy.danbooru);
-        assert_eq!(library.saved.len(), 1);
-        assert_eq!(library.saved[0].name.as_str(), "beach");
-        assert_eq!(library.saved[0].tree.to_text(), "solo");
+        assert_eq!(library.unfiled.len(), 1);
+        assert_eq!(library.unfiled[0].name.as_str(), "beach");
+        assert_eq!(library.unfiled[0].query, query);
         Ok(())
     }
 
@@ -549,6 +685,13 @@ mod tests {
             images_per_row: 7,
             water: WaterMode::ReallyWet,
             viewer_tags_open: true,
+            viewer: Some(ViewerSession {
+                post: PostId(44),
+                gallery_anchor: PostId(42),
+                view: ViewerView::Tree,
+                tree_focus: Some(PostId(43)),
+                result_horizon: 1_440,
+            }),
         };
         let text = toml::to_string_pretty(&session_state)?;
         let roundtrip = toml::from_str::<SessionState>(&text)?;
@@ -559,6 +702,7 @@ mod tests {
         assert_eq!(roundtrip.dates, session_state.dates);
         assert_eq!(roundtrip.water, WaterMode::ReallyWet);
         assert!(roundtrip.viewer_tags_open);
+        assert_eq!(roundtrip.viewer, session_state.viewer);
 
         let legacy = toml::from_str::<SessionState>("[shutters]\ngallery-controls = true\n")?;
         assert_eq!(legacy.panel_folds.get("gallery-controls"), Some(&true));

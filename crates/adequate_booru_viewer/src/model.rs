@@ -264,6 +264,10 @@ pub struct Query {
 }
 
 impl Query {
+    pub(crate) fn from_root(root: QueryExpr) -> Self {
+        Self { root }
+    }
+
     #[cfg(test)]
     pub fn parse(raw: &str) -> Self {
         Self {
@@ -788,8 +792,8 @@ impl Default for BoolGroup {
 
 impl BoolGroup {
     /// Sorts atom terms across the atom-occupied slots, leaving every child's
-    /// index intact: group paths held by the UI and saved filters must never
-    /// shift. Display order (atoms before groups) is the renderer's concern.
+    /// index intact: group paths held by the live editor must never shift.
+    /// Display order (atoms before groups) is the renderer's concern.
     fn sort_atoms(&mut self) {
         let mut terms = self
             .children

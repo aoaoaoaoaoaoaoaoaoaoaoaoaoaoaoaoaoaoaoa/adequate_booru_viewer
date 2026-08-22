@@ -52,7 +52,9 @@ mod tag_palette;
 mod witness;
 mod worker;
 
-pub(crate) use adequate_booru_viewer::{application_paths, date, index, kin, model, trace};
+pub(crate) use adequate_booru_viewer::{
+    application_paths, date, filter_expression, index, kin, model, trace,
+};
 
 pub(crate) use brass_poolrooms::{chrome, water};
 

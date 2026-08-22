@@ -22,7 +22,10 @@ const EFFECT_POST: u32 = 9_000_001;
 const NEXT_POST: u32 = 9_000_000;
 const VIEWER_TOOLBAR: &str = "viewer:toolbar";
 const VIEWER_TAG_DRAWER: &str = "viewer:tag-drawer";
-const ACCEPTANCE_CONFIG: &[u8] = b"prefetch_on_hover = true\n\n[mirror]\npolicy = \"paused\"\n";
+const WAIT: Duration = Duration::from_secs(5);
+const ACCEPTANCE_CONFIG: &[u8] = b"prefetch_on_hover = true\n\n\
+    [mirror]\npolicy = \"paused\"\n\n\
+    [danbooru.account]\nlogin = \"acceptance\"\napi_key_file = \"danbooru.token\"\n";
 const DEMO_FILTERS: &[u8] = include_bytes!("../../../demo/wet/filters.toml");
 const DEMO_SESSION_STATE: &[u8] = include_bytes!("../../../demo/wet/slate.toml");
 
@@ -59,6 +62,8 @@ fn main() -> Result<()> {
             reset_durable_state(testbed)?;
             water_persists(&harness)?;
             reset_durable_state(testbed)?;
+            viewer_persists(&harness)?;
+            reset_durable_state(testbed)?;
             native_effects(&harness)?;
             println!("abv acceptance passed under {}", harness.testbed.id());
             Ok(())
@@ -86,6 +91,8 @@ struct Observation {
     prefetch_on_hover: bool,
     mirror_active: bool,
     viewer_tags_open: bool,
+    tag_push_ready: bool,
+    viewer_post: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,6 +146,10 @@ impl<'a> Harness<'a> {
                 abv_contract::UI_FINGERPRINT,
                 ready.state.contract
             ),
+        )?;
+        demand(
+            ready.state.tag_push_ready,
+            "configured Danbooru credentials did not arm tag pushing",
         )?;
         Ok(story)
     }
@@ -255,9 +266,50 @@ fn water_persists(harness: &Harness<'_>) -> Result<()> {
     Ok(())
 }
 
-fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
-    const WAIT: Duration = Duration::from_secs(5);
+fn viewer_persists(harness: &Harness<'_>) -> Result<()> {
+    let app = harness.launch(true)?;
+    let mut story = harness.story(&app)?;
+    let _posts = story.wait(Condition::new(
+        "seeded posts ready for viewer restoration",
+        |state: &Observation| state.result_posts == 2,
+    ))?;
+    let tile = story.anchor(format!("tile:{EFFECT_POST}"))?;
+    let (x, y) = tile.center();
+    let opened = story.session().click(x, y, Button::Primary)?;
+    let _viewer = story.reaction(opened).until(Condition::new(
+        "reference image open",
+        |state: &Observation| state.viewer_post == Some(EFFECT_POST),
+    ))?;
+    app.wait_until(WAIT, "open viewer identity to reach slate.toml", || {
+        Ok(harness
+            .testbed
+            .read_private_to_string(SESSION_STATE)
+            .is_ok_and(|text| text.contains(&format!("post = {EFFECT_POST}"))))
+    })?;
+    app.terminate()?;
+    drop(story);
+    drop(app);
 
+    let restarted = harness.launch(true)?;
+    let mut story = harness.story(&restarted)?;
+    let _restored = story.wait(Condition::new(
+        "image viewer restored by post identity",
+        |state: &Observation| state.viewer_post == Some(EFFECT_POST),
+    ))?;
+    let _closed = story.key(Key::Escape)?.until(Condition::new(
+        "restored image viewer closed",
+        |state: &Observation| state.viewer_post.is_none(),
+    ))?;
+    restarted.wait_until(WAIT, "closed viewer to leave slate.toml", || {
+        Ok(harness
+            .testbed
+            .read_private_to_string(SESSION_STATE)
+            .is_ok_and(|text| !text.contains("[viewer]")))
+    })?;
+    restarted.terminate()
+}
+
+fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
     let app = harness.launch(true)?;
     let mut focus: Probe<Observation> = app.witness()?.typed();
     let mut story = harness.story(&app)?;
@@ -746,6 +798,10 @@ fn reset_durable_state(testbed: &Testbed) -> Result<()> {
     let _config = testbed.write_private(
         "xdg/config/adequate_booru_viewer/config.toml",
         ACCEPTANCE_CONFIG,
+    )?;
+    let _token = testbed.write_private(
+        "xdg/config/adequate_booru_viewer/danbooru.token",
+        b"acceptance-token\n",
     )?;
     let _filters =
         testbed.write_private("xdg/data/adequate_booru_viewer/filters.toml", DEMO_FILTERS)?;

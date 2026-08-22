@@ -5,6 +5,7 @@
 
 pub mod application_paths;
 pub mod date;
+pub mod filter_expression;
 pub mod index;
 pub mod kin;
 pub mod model;

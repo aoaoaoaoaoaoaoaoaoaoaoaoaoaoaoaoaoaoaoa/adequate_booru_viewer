@@ -18,7 +18,7 @@ active-filter = false
 reference-query = false
 
 [query]
-active_group = []
+active_group = [0, 1]
 
 [query.tree.root]
 kind = "group"

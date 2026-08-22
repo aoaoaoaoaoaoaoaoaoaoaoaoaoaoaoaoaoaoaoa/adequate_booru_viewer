@@ -433,6 +433,25 @@ impl Index {
             .collect()
     }
 
+    /// Resolve one canonical post record without manufacturing a search result.
+    pub fn post(&self, id: PostId) -> Result<Option<PostRecord>> {
+        if let Some(post) = lock(&self.records).get(id) {
+            return Ok(Some(post));
+        }
+        let tx = self.db.begin_read().context("begin post read")?;
+        let posts = tx.open_table(POSTS).context("open posts")?;
+        let post = posts
+            .get(u64::from(id.0))
+            .context("read post")?
+            .map(|guard| decode_record(guard.value()))
+            .transpose()?
+            .filter(PostRecord::indexable);
+        if let Some(post) = &post {
+            lock(&self.records).put(post.clone());
+        }
+        Ok(post)
+    }
+
     pub fn family_tree(&self, focus: PostId) -> Result<FamilyTree> {
         let atlas = read(&self.kin);
         let tx = self.db.begin_read().context("begin family read")?;

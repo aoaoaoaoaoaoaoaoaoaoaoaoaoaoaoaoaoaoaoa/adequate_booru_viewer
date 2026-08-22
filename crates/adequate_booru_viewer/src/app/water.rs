@@ -16,12 +16,11 @@ impl Bayonet {
         self.family_water.set_wetness(wetness);
         *self.family_water.chemistry_mut() = *self.water.chemistry();
         *self.family_water.agitation_mut() = *self.water.agitation();
-        match self.viewer_surface {
-            ViewerSurface::Image => self.water.frame(ctx, pixels_per_point, tooltip_rects, veil),
-            ViewerSurface::Family => {
-                self.family_water
-                    .frame(ctx, pixels_per_point, tooltip_rects, veil)
-            }
+        match self.viewer_view {
+            ViewerView::Image => self.water.frame(ctx, pixels_per_point, tooltip_rects, veil),
+            ViewerView::Tree => self
+                .family_water
+                .frame(ctx, pixels_per_point, tooltip_rects, veil),
         }
     }
 }

@@ -7,7 +7,7 @@ use roaring::RoaringBitmap;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     fmt::Write as _,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Condvar, Mutex, PoisonError},
     thread,
     time::{Duration, Instant},
@@ -192,9 +192,6 @@ pub enum Event {
         result: std::result::Result<Option<TagDefinition>, String>,
     },
     TagDefinitionsCancelled(Vec<(u64, Tag)>),
-    AccountOpened {
-        result: std::result::Result<(), String>,
-    },
     PostTagsEdited {
         id: PostId,
         post: Option<Box<PostRecord>>,
@@ -280,6 +277,32 @@ pub struct Worker {
     rx: Receiver<Event>,
 }
 
+#[derive(Clone, Debug)]
+pub enum AccountReadiness {
+    Unconfigured,
+    Ready,
+    Unavailable(String),
+}
+
+impl AccountReadiness {
+    pub fn push_denial(&self) -> Option<&str> {
+        match self {
+            Self::Unconfigured => Some("set up creds to push tags"),
+            Self::Ready => None,
+            Self::Unavailable(message) => Some(message),
+        }
+    }
+
+    pub const fn is_unconfigured(&self) -> bool {
+        matches!(self, Self::Unconfigured)
+    }
+
+    #[cfg(feature = "egui-test")]
+    pub const fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
 impl Worker {
     pub fn spawn(
         index: Index,
@@ -288,7 +311,7 @@ impl Worker {
         mirror_policy: MirrorPolicy,
         account_config: Option<DanbooruAccountConfig>,
         config_dir: PathBuf,
-    ) -> Self {
+    ) -> (Self, AccountReadiness) {
         let (refresh_tx, refresh_rx) = bounded(REFRESH_COMMAND_CAPACITY);
         let (warm_tx, warm_rx) = bounded(WARM_COMMAND_CAPACITY);
         let (family_tx, family_rx) = bounded(FAMILY_COMMAND_CAPACITY);
@@ -340,21 +363,21 @@ impl Worker {
             });
             definition_tx
         });
-        let account_tx = account_config.map(|config| {
-            let (account_tx, account_rx) = bounded(ACCOUNT_COMMAND_CAPACITY);
-            let account_index = index.clone();
-            let account_events = event_tx.clone();
-            let _account = thread::spawn(move || {
-                account_loop(
-                    config,
-                    config_dir,
-                    account_index,
-                    account_rx,
-                    account_events,
-                );
-            });
-            account_tx
-        });
+        let (account_tx, account_readiness) = match account_config {
+            None => (None, AccountReadiness::Unconfigured),
+            Some(config) => match DanbooruAccount::open(&config, &config_dir) {
+                Ok(account) => {
+                    let (account_tx, account_rx) = bounded(ACCOUNT_COMMAND_CAPACITY);
+                    let account_index = index.clone();
+                    let account_events = event_tx.clone();
+                    let _account = thread::spawn(move || {
+                        account_loop(account, account_index, account_rx, account_events);
+                    });
+                    (Some(account_tx), AccountReadiness::Ready)
+                }
+                Err(error) => (None, AccountReadiness::Unavailable(format!("{error:#}"))),
+            },
+        };
         // One dispatcher keeps epoch culling and full-blade priority coherent;
         // a small fetcher pool overlaps network latency so thumbnails land in
         // parallel instead of one per round trip.
@@ -385,17 +408,20 @@ impl Worker {
         });
         let merge_events = event_tx.clone();
         let _merge = thread::spawn(move || merge_loop(index, merge_events));
-        Self {
-            refresh_tx,
-            warm_tx,
-            family_tx,
-            definition_tx,
-            account_tx,
-            media_tx,
-            mirror,
-            crier,
-            rx: event_rx,
-        }
+        (
+            Self {
+                refresh_tx,
+                warm_tx,
+                family_tx,
+                definition_tx,
+                account_tx,
+                media_tx,
+                mirror,
+                crier,
+                rx: event_rx,
+            },
+            account_readiness,
+        )
     }
 
     /// A handle for app-side threads (e.g. the clipboard) to report back.
@@ -819,25 +845,15 @@ fn definition_loop(
 }
 
 fn account_loop(
-    config: DanbooruAccountConfig,
-    config_dir: PathBuf,
+    account: DanbooruAccount,
     index: Index,
     commands: Receiver<AccountCommand>,
     events: Klaxon,
 ) {
-    let account = open_account(&config, &config_dir, &events);
     let write_gate = RateGate::new(DANBOORU_WRITE_GAP);
     while let Ok(command) = commands.recv() {
         match command {
             AccountCommand::AddPostTags { id, tags } => {
-                let Some(account) = account.as_ref() else {
-                    events.send(Event::PostTagsEdited {
-                        id,
-                        post: None,
-                        result: Err("Danbooru account is not ready".to_owned()),
-                    });
-                    continue;
-                };
                 write_gate.wait();
                 let (post, result) = match account.add_post_tags(id, &tags) {
                     Ok(harvest) => {
@@ -860,25 +876,6 @@ fn account_loop(
                 };
                 events.send(Event::PostTagsEdited { id, post, result });
             }
-        }
-    }
-}
-
-fn open_account(
-    config: &DanbooruAccountConfig,
-    config_dir: &Path,
-    events: &Klaxon,
-) -> Option<DanbooruAccount> {
-    match DanbooruAccount::open(config, config_dir) {
-        Ok(account) => {
-            events.send(Event::AccountOpened { result: Ok(()) });
-            Some(account)
-        }
-        Err(err) => {
-            events.send(Event::AccountOpened {
-                result: Err(format!("{err:#}")),
-            });
-            None
         }
     }
 }

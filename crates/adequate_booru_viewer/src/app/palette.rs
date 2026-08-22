@@ -91,7 +91,7 @@ impl Bayonet {
     fn viewer_tag_pusher(&mut self, ui: &mut egui::Ui, post: &PostRecord) -> f32 {
         let denial = self.danbooru_account.push_denial().map(str::to_owned);
         let pusher = ui.vertical(|ui| {
-            if matches!(self.danbooru_account, DanbooruAccountState::Unconfigured) {
+            if self.danbooru_account.is_unconfigured() {
                 let _setup = ui.label("set up creds to push tags").on_hover_text(
                     "Add this to ~/.config/adequate_booru_viewer/config.toml, then restart:\n\n\
                      [danbooru.account]\n\

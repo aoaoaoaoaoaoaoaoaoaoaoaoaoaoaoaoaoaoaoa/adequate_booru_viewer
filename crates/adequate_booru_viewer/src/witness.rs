@@ -44,6 +44,8 @@ mod active {
         pub prefetch_on_hover: bool,
         pub mirror_active: bool,
         pub viewer_tags_open: bool,
+        pub tag_push_ready: bool,
+        pub viewer_post: Option<u32>,
     }
 
     #[derive(Default, Serialize)]

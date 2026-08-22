@@ -87,7 +87,7 @@ pub struct State {
     pub refresh_in_flight: bool,
     pub status: String,
     pub warm_status: String,
-    pub zoom_post: Option<u32>,
+    pub viewer_post: Option<u32>,
     pub tag_menu_post: Option<u32>,
 }
 

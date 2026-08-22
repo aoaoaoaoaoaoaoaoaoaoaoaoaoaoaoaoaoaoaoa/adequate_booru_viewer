@@ -49,6 +49,29 @@ begins with a safe authenticated read and reports any rejected credential or
 permission. The anonymous mirror never receives the credential. Relative key
 paths resolve beside `config.toml`.
 
+Saved filters use a small Boolean language rather than exposing the editor's
+tree representation:
+
+```toml
+[[filter]]
+name = "general rating"
+query = "rating:g"
+
+[[folder]]
+name = "eyes"
+
+[[folder.filter]]
+name = "visible blue eyes"
+query = "blue_eyes AND ~(closed_eyes OR /(^|_)covered_eyes$/)"
+```
+
+`~`, `AND`, `XOR`, and `OR` bind in that order; parentheses override
+precedence. Operators are uppercase, while tags and `rating:*` atoms are
+lowercase. Regexp atoms use `/pattern/`. An empty query matches everything.
+`XOR` retains ABV's selection-group meaning: exactly one operand must match.
+Older generated filter trees migrate automatically; unrelated formatting and
+comments remain untouched.
+
 the release-tested native coordinates are Linux/X11, Linux/Wayland, macOS on
 Apple and Intel silicon, and 64-bit Windows. `abv --pause-mirror` starts with
 the mirror valve closed for deterministic or disconnected work.
@@ -85,7 +108,7 @@ one-window native lifecycle and the logical Inspector, Cabinet, LivingWait,
 CommandGuide, CommandCanon, and PanelNavigator assemblies. Brass Poolrooms
 owns the physical controls, material language, and living water. The
 saved-filter active card and immutable local-favorites row remain
-product-specific; the reorderable, one-level shelved filter collection uses
+product-specific; the reorderable, one-level foldered filter collection uses
 the shared Cabinet law.
 
 The Filter Library is user-owned product data under XDG data; configuration
@@ -102,8 +125,9 @@ uninstrumented launch, then drives the optimized witnessed binary in private
 X11, XDG, process, network, and software-graphics namespaces. It proves the
 seeded filter, generated help pixels, modal containment, keyboard-only panel
 and query movement, focused rail adjustment, rendered dry-to-wet transition,
-independent Filter Library and Session State recovery, native clipboard copy, and browser
-dispatch. `scripts/test-wayland` owns the narrower native launch,
+independent Filter Library and Session State recovery, water and open-viewer
+restoration across restart, explicit viewer dismissal, native clipboard copy,
+and browser dispatch. `scripts/test-wayland` owns the narrower native launch,
 first-present, typed-witness, and nonblack compositor-capture gate.
 
 For local release-candidate work:

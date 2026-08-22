@@ -14,7 +14,7 @@ use crate::{
     commands::{self, Edict},
     configuration::{
         Configuration, DanbooruConfig, FilterLibrary, FilterName, FilterSelection, MirrorConfig,
-        MirrorPolicy, QueryConfig, SavedFilter, SessionState, WaterMode,
+        MirrorPolicy, QueryConfig, SavedFilter, SessionState, ViewerSession, ViewerView, WaterMode,
         migrate_legacy_configuration,
     },
     controls,
@@ -38,7 +38,7 @@ use crate::{
     tag_palette,
     trace::startup,
     water::{Cut, Veil},
-    worker::{BladeEpoch, Command, Event, Worker},
+    worker::{AccountReadiness, BladeEpoch, Command, Event, Worker},
 };
 
 mod bench;
@@ -52,7 +52,7 @@ mod water;
 
 use refresh::{AsyncPulse, PulseGate};
 use scroll::ThumbCruise;
-use viewer::{FullWait, ViewerSurface, ZoomGate};
+use viewer::{FullWait, ViewerGate};
 
 use eternalist_apps::{
     ApplicationHeader, ScribeOutcome, SettledScribe,
@@ -66,6 +66,7 @@ use eternalist_apps::{
 
 const INITIAL_RESULT_HORIZON: usize = 360;
 const RESULT_HORIZON_GROWTH: usize = 2;
+const MAX_RESTORED_RESULT_HORIZON: usize = 100_000;
 const RESULT_TAIL_MARGIN: usize = 120;
 const HIT_CACHE_LIMIT: usize = 24;
 const EVENT_DRAIN: DrainBudget = DrainBudget::new(12, Duration::from_millis(3));
@@ -204,25 +205,6 @@ enum TagDefinitionMemo {
     Fault { message: String, born: Instant },
 }
 
-#[derive(Clone, Debug)]
-enum DanbooruAccountState {
-    Unconfigured,
-    Loading,
-    Ready,
-    Unavailable(String),
-}
-
-impl DanbooruAccountState {
-    fn push_denial(&self) -> Option<&str> {
-        match self {
-            Self::Unconfigured => Some("set up creds to push tags"),
-            Self::Loading => Some("loading credentials"),
-            Self::Unavailable(message) => Some(message),
-            Self::Ready => None,
-        }
-    }
-}
-
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent app-state flags (UI toggles + a one-shot pending), not a state machine"
@@ -280,18 +262,20 @@ pub struct Bayonet {
     /// prepared GPU textures until the viewer closes.
     full_recent: VecDeque<PostId>,
     result_wake: ResultWake,
-    zoom: Option<PostRecord>,
+    viewer_post: Option<PostRecord>,
     /// The global-result tile from which the current family excursion began.
     /// Family focus may leave `hit.posts`; this anchor must not.
     viewer_gallery_anchor: Option<PostId>,
     /// One departure through the result order that existed before favoriting
     /// moved the open image.
     viewer_result_seam: Option<ResultSeam>,
-    zoom_gate: ZoomGate,
-    zoom_rect: Option<egui::Rect>,
+    viewer_gate: ViewerGate,
+    viewer_rect: Option<egui::Rect>,
     family_serial: u64,
     viewer_family: Option<FamilyTree>,
-    viewer_surface: ViewerSurface,
+    /// A tree-view restoration remains armed until its family projection lands.
+    viewer_restore: Option<ViewerSession>,
+    viewer_view: ViewerView,
     viewer_drag: viewer::KinDrag,
     viewer_recoil: Option<Instant>,
     viewer_tree_zoom: f32,
@@ -331,7 +315,7 @@ pub struct Bayonet {
     pattern_serial: u64,
     refetch_inflight: HashSet<PostId>,
     danbooru_config: DanbooruConfig,
-    danbooru_account: DanbooruAccountState,
+    danbooru_account: AccountReadiness,
     tag_push_entry: String,
     tag_push_inflight: Option<PostId>,
     prefetch_on_hover: bool,
@@ -397,6 +381,8 @@ impl Bayonet {
             prefetch_on_hover: self.prefetch_on_hover,
             mirror_active: self.mirror_policy.active(),
             viewer_tags_open: self.viewer_tags_open,
+            tag_push_ready: self.danbooru_account.is_ready(),
+            viewer_post: self.viewer_post.as_ref().map(|post| post.id.0),
         }
     }
 
@@ -435,12 +421,7 @@ impl Bayonet {
         let media = MediaCache::new(paths.media_dir())?;
         startup("app.media.opened");
         let account_config = configuration_snapshot.danbooru.account.clone();
-        let danbooru_account = if account_config.is_some() {
-            DanbooruAccountState::Loading
-        } else {
-            DanbooruAccountState::Unconfigured
-        };
-        let worker = Worker::spawn(
+        let (worker, danbooru_account) = Worker::spawn(
             index.clone(),
             media,
             ctx.clone(),
@@ -452,6 +433,12 @@ impl Bayonet {
         let filter_library = FilterLibrary::load(&filter_library_path, first_run)?;
         let mut filters = filter_bank::forge(&filter_library);
         let mut session_state = SessionState::load(&paths.session_state_path());
+        let viewer_session = session_state.viewer;
+        let retrieval_horizon = viewer_session.map_or(INITIAL_RESULT_HORIZON, |viewer| {
+            viewer
+                .result_horizon
+                .clamp(INITIAL_RESULT_HORIZON, MAX_RESTORED_RESULT_HORIZON)
+        });
         if first_run {
             let _prior = session_state
                 .panel_folds
@@ -484,24 +471,18 @@ impl Bayonet {
                         Query::default()
                     }
                 },
-                |filter| filter.tree.clone(),
+                |filter| filter.query.clone(),
             );
         query.sort_atoms();
         let sort = session_state.sort;
         let date_range = clean_dates(session_state.dates);
         let scrubbed_dates = date_range != session_state.dates.normalized();
-        let active_group = filter_selection
-            .saved()
-            .and_then(|active| filters.get(active))
-            .map_or_else(
-                || match filter_selection {
-                    FilterSelection::LocalFavorites => Vec::new(),
-                    FilterSelection::Scratch | FilterSelection::Saved { .. } => {
-                        query.clamp_group_path(&session_state.query.active_group)
-                    }
-                },
-                |filter| query.clamp_group_path(&filter.active_group),
-            );
+        let active_group = match filter_selection {
+            FilterSelection::LocalFavorites => Vec::new(),
+            FilterSelection::Scratch | FilterSelection::Saved { .. } => {
+                query.clamp_group_path(&session_state.query.active_group)
+            }
+        };
         let hit_key = HitKey::new(
             &query,
             filter_selection.corpus(),
@@ -566,7 +547,7 @@ impl Bayonet {
             hit_key,
             hit_cache: HitCache::default(),
             parked_hit: None,
-            retrieval_horizon: INITIAL_RESULT_HORIZON,
+            retrieval_horizon,
             horizon_pending: false,
             thwack_pending: false,
             thumbs: HashMap::new(),
@@ -583,14 +564,15 @@ impl Bayonet {
             full_residency: HashSet::new(),
             full_recent: VecDeque::new(),
             result_wake: ResultWake::default(),
-            zoom: None,
+            viewer_post: None,
             viewer_gallery_anchor: None,
             viewer_result_seam: None,
-            zoom_gate: ZoomGate::Fresh,
-            zoom_rect: None,
+            viewer_gate: ViewerGate::Fresh,
+            viewer_rect: None,
             family_serial: 0,
             viewer_family: None,
-            viewer_surface: ViewerSurface::Image,
+            viewer_restore: None,
+            viewer_view: ViewerView::Image,
             viewer_drag: viewer::KinDrag::default(),
             viewer_recoil: None,
             viewer_tree_zoom: viewer::TREE_ZOOM_DEFAULT,
@@ -668,6 +650,7 @@ impl Bayonet {
         if scrubbed_dates {
             app.inscribe_durable_state();
         }
+        app.restore_viewer(viewer_session);
         app.strike(true, AUTO_WARM_PAGES);
         startup("app.initial.reap.done");
         Ok(app)
@@ -703,7 +686,7 @@ impl Bayonet {
                 refresh_in_flight: self.refresh_pulse.inflight_serial().is_some(),
                 status: self.status.clone(),
                 warm_status: self.warm_status.clone(),
-                zoom_post: self.zoom.as_ref().map(|post| post.id.0),
+                viewer_post: self.viewer_post.as_ref().map(|post| post.id.0),
                 tag_menu_post: self.tag_menu.post_id().map(|id| id.0),
             },
         );
@@ -737,12 +720,12 @@ impl Bayonet {
             && !self.tag_menu.is_open()
             && !self.bench_open
         {
-            let context = if self.zoom.is_some() {
+            let context = if self.viewer_post.is_some() {
                 commands::Context::Viewer
             } else {
                 commands::Context::Workbench
             };
-            let dispatch = if self.zoom.is_some() {
+            let dispatch = if self.viewer_post.is_some() {
                 commands::canon().route_in_modal(&ctx, viewer::layer(), &[context], |edict| {
                     self.edict_status(edict)
                 })
@@ -820,13 +803,11 @@ impl Bayonet {
                 CommandStatus::Disabled("the query has only one group")
             }
             Edict::ToggleViewerTags
-                if self.zoom.is_some() && self.viewer_surface == ViewerSurface::Family =>
+                if self.viewer_post.is_some() && self.viewer_view == ViewerView::Tree =>
             {
                 CommandStatus::Hidden
             }
-            Edict::OpenViewerTree if self.viewer_surface == ViewerSurface::Family => {
-                CommandStatus::Hidden
-            }
+            Edict::OpenViewerTree if self.viewer_view == ViewerView::Tree => CommandStatus::Hidden,
             Edict::OpenViewerTree
                 if self
                     .viewer_family
@@ -838,7 +819,7 @@ impl Bayonet {
             }
             Edict::SaveViewerImage
                 if self
-                    .zoom
+                    .viewer_post
                     .as_ref()
                     .and_then(PostRecord::original_url)
                     .is_none() =>
@@ -877,17 +858,17 @@ impl Bayonet {
             }
             Edict::ToggleViewerTags => self.toggle_viewer_tags(ctx),
             Edict::ToggleViewerFavorite => {
-                if let Some(id) = self.zoom.as_ref().map(|post| post.id) {
+                if let Some(id) = self.viewer_post.as_ref().map(|post| post.id) {
                     self.toggle_viewer_favorite(id);
                 }
             }
             Edict::SaveViewerImage => {
-                if let Some(post) = self.zoom.clone() {
+                if let Some(post) = self.viewer_post.clone() {
                     self.save_full(&post);
                 }
             }
             Edict::CopyViewerImage => {
-                if let Some(id) = self.zoom.as_ref().map(|post| post.id) {
+                if let Some(id) = self.viewer_post.as_ref().map(|post| post.id) {
                     self.copy_full(id);
                 }
             }
@@ -910,13 +891,13 @@ impl Bayonet {
     /// While a veil is fading out its cutouts are dropped, so the blur turns
     /// uniform and recedes evenly instead of leaving sharp negative space.
     pub fn water_veil(&self, ctx: &egui::Context, tooltip_rects: &[egui::Rect]) -> Option<Veil> {
-        let zoom_open = self.zoom.is_some();
-        let zoom_strength = veil_strength(ctx, "water-zoom", zoom_open);
-        if zoom_strength > 0.0 {
-            let cuts = if zoom_open && let Some(rect) = self.zoom_rect {
-                let cut = match self.viewer_surface {
-                    ViewerSurface::Image => Cut::barrier(rect, VEIL_RADIUS),
-                    ViewerSurface::Family => Cut::aperture(rect, VEIL_RADIUS),
+        let viewer_open = self.viewer_post.is_some();
+        let viewer_strength = veil_strength(ctx, "water-viewer", viewer_open);
+        if viewer_strength > 0.0 {
+            let cuts = if viewer_open && let Some(rect) = self.viewer_rect {
+                let cut = match self.viewer_view {
+                    ViewerView::Image => Cut::barrier(rect, VEIL_RADIUS),
+                    ViewerView::Tree => Cut::aperture(rect, VEIL_RADIUS),
                 };
                 // Tooltip plates remain shallow water obstacles, but belong to
                 // the modal foreground and therefore escape its optical veil.
@@ -929,7 +910,7 @@ impl Bayonet {
             };
             return Some(Veil {
                 cuts,
-                strength: zoom_strength,
+                strength: viewer_strength,
                 dim: ZOOM_DIM,
                 blur: 1.0,
             });
@@ -1032,7 +1013,7 @@ impl Bayonet {
             self.date_range,
             self.gallery,
         );
-        if self.tag_menu.is_open() || self.zoom.is_some() {
+        if self.tag_menu.is_open() || self.viewer_post.is_some() {
             self.parked_hit = Some((key, hit));
             return;
         }
@@ -1079,7 +1060,7 @@ impl Bayonet {
     }
 
     fn release_parked_hit(&mut self) {
-        if self.tag_menu.is_open() || self.zoom.is_some() {
+        if self.tag_menu.is_open() || self.viewer_post.is_some() {
             return;
         }
         if let Some((key, hit)) = self.parked_hit.take() {
@@ -1176,7 +1157,7 @@ impl Bayonet {
                 .cloned()
                 .unwrap_or_else(|| filter_bank::spare(&self.filters, &self.query))
         });
-        self.upsert_filter(name.clone(), self.query.clone(), self.active_group.clone());
+        self.upsert_filter(name.clone(), self.query.clone());
         self.filter_selection = FilterSelection::Saved { name: name.clone() };
         self.filter_name_entry.clear();
         self.name_edit = NameEdit::Idle;
@@ -1191,7 +1172,7 @@ impl Bayonet {
         self.filter_name_entry.clear();
         self.name_edit = NameEdit::Idle;
         self.status = format!("active filter `{}`", filter.name);
-        self.install_query_at(filter.tree, filter.active_group);
+        self.install_query_at(filter.query, Vec::new());
     }
 
     fn load_local_favorites(&mut self) {
@@ -1242,7 +1223,7 @@ impl Bayonet {
             return false;
         }
         if self.filter_selection.saved() == Some(old) {
-            self.upsert_filter(new.clone(), self.query.clone(), self.active_group.clone());
+            self.upsert_filter(new.clone(), self.query.clone());
             self.filter_selection = FilterSelection::Saved { name: new.clone() };
         }
         self.status = format!("renamed filter `{old}` → `{new}`");
@@ -1271,16 +1252,12 @@ impl Bayonet {
         let name = self.filters.spare_named(&source);
         self.filters.adopt_beside(
             &source,
-            SavedFilter::new(
-                name.clone(),
-                filter.tree.clone(),
-                filter.active_group.clone(),
-            ),
+            SavedFilter::new(name.clone(), filter.query.clone()),
         );
         self.filter_selection = FilterSelection::Saved { name: name.clone() };
         self.filter_name_entry.clear();
         self.status = format!("cloned filter `{name}`");
-        self.install_query_at(filter.tree, filter.active_group);
+        self.install_query_at(filter.query, Vec::new());
     }
 
     fn delete_filter(&mut self, name: &FilterName) {
@@ -1298,12 +1275,11 @@ impl Bayonet {
         let Some(name) = self.filter_selection.saved().cloned() else {
             return;
         };
-        self.upsert_filter(name, self.query.clone(), self.active_group.clone());
+        self.upsert_filter(name, self.query.clone());
     }
 
-    fn upsert_filter(&mut self, name: FilterName, tree: Query, active_group: Vec<usize>) {
-        self.filters
-            .upsert(SavedFilter::new(name, tree, active_group));
+    fn upsert_filter(&mut self, name: FilterName, query: Query) {
+        self.filters.upsert(SavedFilter::new(name, query));
     }
 
     fn align_warm(&mut self, query: &Query) {
@@ -1497,25 +1473,43 @@ impl Bayonet {
                 }
                 Event::Family { serial, mut tree } => {
                     self.pattern_demand.clear();
-                    let focus = self
+                    if serial != self.family_serial {
+                        continue;
+                    }
+                    let restore = self.viewer_restore.take();
+                    let restored = restore.is_some();
+                    let reopen_tree = restore.is_some_and(|session| {
+                        session.view == ViewerView::Tree && tree.badge().is_some()
+                    });
+                    let live_focus = self
                         .viewer_family
                         .as_ref()
                         .map(|family| family.focus)
-                        .or_else(|| self.zoom.as_ref().map(|post| post.id));
-                    if serial == self.family_serial
-                        && let Some(focus) = focus
-                        && tree.node(focus).is_some()
-                    {
+                        .or_else(|| self.viewer_post.as_ref().map(|post| post.id));
+                    let focus = restore
+                        .and_then(|session| session.tree_focus)
+                        .filter(|focus| tree.node(*focus).is_some())
+                        .or(live_focus);
+                    if let Some(focus) = focus.filter(|focus| tree.node(*focus).is_some()) {
                         tree.focus = focus;
                         self.viewer_family = Some(tree);
-                        if self.viewer_surface == ViewerSurface::Family {
+                        if reopen_tree {
+                            self.viewer_view = ViewerView::Tree;
+                        }
+                        if self.viewer_view == ViewerView::Tree {
                             self.viewer_tree_fresh = true;
                         }
                         ctx.request_repaint();
                     }
+                    if restored {
+                        self.inscribe_session_state();
+                    }
                 }
                 Event::FamilyFault { serial, fault } => {
                     if serial == self.family_serial {
+                        if self.viewer_restore.take().is_some() {
+                            self.inscribe_session_state();
+                        }
                         self.status = format!("family lookup failed: {fault}");
                     }
                 }
@@ -1549,20 +1543,17 @@ impl Bayonet {
                         }
                     }
                 }
-                Event::AccountOpened { result } => {
-                    self.danbooru_account = match result {
-                        Ok(()) => DanbooruAccountState::Ready,
-                        Err(message) => DanbooruAccountState::Unavailable(message),
-                    };
-                    ctx.request_repaint();
-                }
                 Event::PostTagsEdited { id, post, result } => {
                     if self.tag_push_inflight == Some(id) {
                         self.tag_push_inflight = None;
                     }
                     if let Some(post) = post {
-                        if self.zoom.as_ref().is_some_and(|zoom| zoom.id == post.id) {
-                            self.zoom = Some(*post.clone());
+                        if self
+                            .viewer_post
+                            .as_ref()
+                            .is_some_and(|current| current.id == post.id)
+                        {
+                            self.viewer_post = Some(*post.clone());
                             self.viewer_tag_groups = None;
                         }
                         if let Some(node) = self
@@ -1613,8 +1604,12 @@ impl Bayonet {
                     if let Some(post) = post {
                         self.pattern_demand.clear();
                         let _was_inflight = self.refetch_inflight.remove(&post.id);
-                        if self.zoom.as_ref().is_some_and(|zoom| zoom.id == post.id) {
-                            self.zoom = Some(*post.clone());
+                        if self
+                            .viewer_post
+                            .as_ref()
+                            .is_some_and(|current| current.id == post.id)
+                        {
+                            self.viewer_post = Some(*post.clone());
                             self.viewer_tag_groups = None;
                         }
                         // A menu open on this post re-derives its tag groups
@@ -1646,7 +1641,7 @@ impl Bayonet {
                     let _was_inflight = self.full_inflight.remove(&id);
                     let _was_waiting = self.full_wait.remove(&id);
                     let _faulted = self.full_faults.insert(id);
-                    if self.zoom.as_ref().is_some_and(|post| post.id == id) {
+                    if self.viewer_post.as_ref().is_some_and(|post| post.id == id) {
                         self.status = fault;
                     }
                     ctx.request_repaint();
@@ -1742,7 +1737,7 @@ impl Bayonet {
                 let row = slot / cols;
                 ((row as f32).mul_add(row_height, (tile - arena.height()) * 0.5)).max(0.0)
             });
-        let navigate = self.zoom.is_none()
+        let navigate = self.viewer_post.is_none()
             && !self.guide.is_open()
             && !self.tag_menu.is_open()
             && !self.bench_open
@@ -1841,17 +1836,17 @@ impl Bayonet {
             self.arm_prefetch(ui.ctx(), post);
             // The lift follows the cursor; the menu's own dim owns the grid
             // while it's open, so don't fight it.
-            if !self.tag_menu.is_open() && self.zoom.is_none() {
+            if !self.tag_menu.is_open() && self.viewer_post.is_none() {
                 self.water.hover(post.id, rect);
             }
         }
         // With the tag menu up, a click anywhere only dismisses it; opening
         // the viewer underneath would make the menu feel clingy.
-        if response.clicked() && !self.tag_menu.is_open() && self.zoom.is_none() {
+        if response.clicked() && !self.tag_menu.is_open() && self.viewer_post.is_none() {
             self.water.click(rect);
             self.open_full(post);
         }
-        if response.secondary_clicked() && self.zoom.is_none() {
+        if response.secondary_clicked() && self.viewer_post.is_none() {
             if self.tag_menu.post_id() == Some(post.id) {
                 // Right-click on the same image toggles its menu away.
                 self.close_tag_menu();
@@ -2108,6 +2103,11 @@ impl Bayonet {
         self.session_state_scribe.mark();
     }
 
+    /// Restart only the disposable session-state settlement clock.
+    fn inscribe_session_state(&mut self) {
+        self.session_state_scribe.mark();
+    }
+
     fn configuration_projection(&self) -> Configuration {
         Configuration {
             prefetch_on_hover: self.prefetch_on_hover,
@@ -2139,6 +2139,7 @@ impl Bayonet {
             images_per_row: self.images_per_row,
             water: self.water_mode,
             viewer_tags_open: self.viewer_tags_open,
+            viewer: self.viewer_session(),
         }
     }
 
@@ -2740,16 +2741,16 @@ impl Bayonet {
     }
 
     fn command_guide(&mut self, ui: &egui::Ui) {
-        let context = if self.zoom.is_some() {
+        let context = if self.viewer_post.is_some() {
             commands::Context::Viewer
         } else {
             commands::Context::Workbench
         };
-        let guide_groups = match (context, self.viewer_surface) {
-            (commands::Context::Viewer, ViewerSurface::Image) => {
+        let guide_groups = match (context, self.viewer_view) {
+            (commands::Context::Viewer, ViewerView::Image) => {
                 &commands::IMAGE_VIEWER_GUIDE_GROUPS[..]
             }
-            (commands::Context::Viewer, ViewerSurface::Family) => {
+            (commands::Context::Viewer, ViewerView::Tree) => {
                 &commands::FAMILY_VIEWER_GUIDE_GROUPS[..]
             }
             (commands::Context::Workbench, _) => &commands::WORKBENCH_GUIDE_GROUPS[..],

@@ -160,10 +160,10 @@ fn kin_motion(input: &egui::InputState, lateral: egui::Modifiers) -> Option<KinS
     .find_map(|(modifiers, key, motion)| exact_key_pressed(input, modifiers, key).then_some(motion))
 }
 
-fn viewer_motion(input: &egui::InputState, surface: ViewerSurface) -> Option<ViewerMotion> {
-    let (result_modifiers, kin_modifiers) = match surface {
-        ViewerSurface::Image => (egui::Modifiers::NONE, egui::Modifiers::ALT),
-        ViewerSurface::Family => (egui::Modifiers::ALT, egui::Modifiers::NONE),
+fn viewer_motion(input: &egui::InputState, view: ViewerView) -> Option<ViewerMotion> {
+    let (result_modifiers, kin_modifiers) = match view {
+        ViewerView::Image => (egui::Modifiers::NONE, egui::Modifiers::ALT),
+        ViewerView::Tree => (egui::Modifiers::ALT, egui::Modifiers::NONE),
     };
     lateral_result_motion(input, result_modifiers)
         .map(ViewerMotion::Result)
@@ -180,7 +180,7 @@ fn viewer_title_bar(
     post: &PostRecord,
     favorite: bool,
     tags_open: bool,
-    surface: ViewerSurface,
+    view: ViewerView,
     kin: KinNav,
 ) -> Vec<ViewerAction> {
     let mut actions = Vec::new();
@@ -269,7 +269,7 @@ fn viewer_title_bar(
                         if copy_activated {
                             actions.push(ViewerAction::Copy);
                         }
-                        if surface == ViewerSurface::Image {
+                        if view == ViewerView::Image {
                             let command = commands::canon().button_with(
                                 Edict::ToggleViewerTags,
                                 ui,
@@ -290,7 +290,7 @@ fn viewer_title_bar(
                                 actions.push(ViewerAction::Tags);
                             }
                         }
-                        if surface == ViewerSurface::Image && kin.present {
+                        if view == ViewerView::Image && kin.present {
                             let command = commands::canon().button_with(
                                 Edict::OpenViewerTree,
                                 ui,
@@ -364,26 +364,65 @@ fn viewer_id_date(post: &PostRecord) -> String {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ZoomGate {
+pub(super) enum ViewerGate {
     Fresh,
     Settling,
     Armed,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) enum ViewerSurface {
-    #[default]
-    Image,
-    Family,
-}
-
 impl Bayonet {
+    pub(super) fn restore_viewer(&mut self, session: Option<ViewerSession>) {
+        let Some(session) = session else {
+            return;
+        };
+        match self.index.post(session.post) {
+            Ok(Some(post)) => {
+                self.open_full(&post);
+                self.viewer_gallery_anchor = Some(session.gallery_anchor);
+                self.viewer_restore = (session.view == ViewerView::Tree).then_some(session);
+                self.inscribe_session_state();
+            }
+            Ok(None) => {
+                self.gallery_center = Some(session.gallery_anchor);
+                self.status = format!("previous image #{} is no longer indexed", session.post);
+                self.inscribe_session_state();
+            }
+            Err(error) => {
+                self.gallery_center = Some(session.gallery_anchor);
+                self.status = format!("restore image #{}: {error:#}", session.post);
+                self.inscribe_session_state();
+            }
+        }
+    }
+
+    pub(super) fn viewer_session(&self) -> Option<ViewerSession> {
+        if let Some(mut session) = self.viewer_restore {
+            session.result_horizon = self.retrieval_horizon.max(self.hit.horizon);
+            return Some(session);
+        }
+        let post = self.viewer_post.as_ref()?.id;
+        let gallery_anchor = self.viewer_gallery_anchor.unwrap_or(post);
+        let tree_focus = if self.viewer_view == ViewerView::Tree {
+            self.viewer_family.as_ref().map(|tree| tree.focus)
+        } else {
+            None
+        };
+        Some(ViewerSession {
+            post,
+            gallery_anchor,
+            view: self.viewer_view,
+            tree_focus,
+            result_horizon: self.retrieval_horizon.max(self.hit.horizon),
+        })
+    }
+
     pub(super) fn open_full(&mut self, post: &PostRecord) {
-        self.zoom = Some(post.clone());
+        self.viewer_restore = None;
+        self.viewer_post = Some(post.clone());
         self.viewer_gallery_anchor = Some(post.id);
         self.viewer_result_seam = None;
-        self.zoom_gate = ZoomGate::Fresh;
-        self.viewer_surface = ViewerSurface::Image;
+        self.viewer_gate = ViewerGate::Fresh;
+        self.viewer_view = ViewerView::Image;
         self.viewer_drag = KinDrag::default();
         self.viewer_recoil = None;
         self.viewer_tree_zoom = TREE_ZOOM_DEFAULT;
@@ -396,6 +435,7 @@ impl Bayonet {
         let _old_fault = self.full_faults.remove(&post.id);
         let _old_fade = self.full_loaded_at.remove(&post.id);
         self.request_family(post.id);
+        self.inscribe_session_state();
     }
 
     fn request_family(&mut self, id: PostId) {
@@ -432,19 +472,23 @@ impl Bayonet {
             },
         };
         let post = self.hit.posts[target].clone();
-        if self.zoom.as_ref().is_some_and(|zoom| post.id == zoom.id) {
+        if self
+            .viewer_post
+            .as_ref()
+            .is_some_and(|current| post.id == current.id)
+        {
             return;
         }
         self.open_full(&post);
     }
 
     fn gallery_slot(&self) -> Option<usize> {
-        let current = self.zoom.as_ref()?.id;
+        let current = self.viewer_post.as_ref()?.id;
         gallery_slot(&self.hit.posts, current, self.viewer_gallery_anchor)
     }
 
     fn seam_passage(&self, motion: ResultMotion) -> SeamPassage {
-        let Some(current) = self.zoom.as_ref().map(|post| post.id) else {
+        let Some(current) = self.viewer_post.as_ref().map(|post| post.id) else {
             return SeamPassage::Ordinary;
         };
         let Some(seam) = self
@@ -516,13 +560,17 @@ impl Bayonet {
         {
             return false;
         }
-        if self.viewer_surface != ViewerSurface::Family {
+        let changed = self.viewer_view != ViewerView::Tree;
+        if changed {
             self.family_water.reset();
         }
-        self.viewer_surface = ViewerSurface::Family;
+        self.viewer_view = ViewerView::Tree;
         self.viewer_tree_fresh = true;
         self.viewer_recoil = None;
         self.water.close_pond();
+        if changed {
+            self.inscribe_session_state();
+        }
         true
     }
 
@@ -548,7 +596,7 @@ impl Bayonet {
     }
 
     fn navigate_kin(&mut self, step: KinStep) {
-        let Some(id) = self.zoom.as_ref().map(|post| post.id) else {
+        let Some(id) = self.viewer_post.as_ref().map(|post| post.id) else {
             return;
         };
         let root = self
@@ -567,7 +615,7 @@ impl Bayonet {
 
     fn step_kin(&mut self, step: KinStep) -> bool {
         let target = self.viewer_family.as_ref().and_then(|tree| {
-            let id = self.zoom.as_ref()?.id;
+            let id = self.viewer_post.as_ref()?.id;
             direct_kin_target(tree, id, step)
         });
         if let Some(post) = target {
@@ -579,9 +627,9 @@ impl Bayonet {
     }
 
     fn focus_family_post(&mut self, post: PostRecord) {
-        self.zoom = Some(post.clone());
+        self.viewer_post = Some(post.clone());
         self.viewer_result_seam = None;
-        self.viewer_surface = ViewerSurface::Image;
+        self.viewer_view = ViewerView::Image;
         self.viewer_drag = KinDrag::default();
         self.viewer_recoil = None;
         self.viewer_tag_groups = None;
@@ -591,6 +639,7 @@ impl Bayonet {
         self.water.close_pond();
         let _old_fault = self.full_faults.remove(&post.id);
         let _old_fade = self.full_loaded_at.remove(&post.id);
+        self.inscribe_session_state();
     }
 
     fn select_tree_kin(&mut self, step: KinStep) {
@@ -602,6 +651,7 @@ impl Bayonet {
         };
         tree.focus = target.id;
         self.viewer_tree_fresh = true;
+        self.inscribe_session_state();
     }
 
     fn promote_tree_focus(&mut self) {
@@ -702,7 +752,7 @@ impl Bayonet {
     }
 
     fn prepare_viewer_wake(&mut self, ctx: &egui::Context) {
-        let Some(current) = self.zoom.as_ref().map(|post| post.id) else {
+        let Some(current) = self.viewer_post.as_ref().map(|post| post.id) else {
             return;
         };
         self.touch_full_recent(current);
@@ -801,18 +851,18 @@ impl Bayonet {
     }
 
     pub(super) fn full_frame(&mut self, ctx: &egui::Context) {
-        let input_surface = self.viewer_surface;
+        let input_view = self.viewer_view;
         self.water
-            .begin_pond(self.zoom.is_some() && input_surface == ViewerSurface::Image);
+            .begin_pond(self.viewer_post.is_some() && input_view == ViewerView::Image);
         let inputs_blocked = self.guide.is_open() || obscured(ctx);
-        if !inputs_blocked && self.zoom.is_some() && !ctx.text_edit_focused() {
-            let motion = ctx.input(|input| viewer_motion(input, input_surface));
+        if !inputs_blocked && self.viewer_post.is_some() && !ctx.text_edit_focused() {
+            let motion = ctx.input(|input| viewer_motion(input, input_view));
             if let Some(ViewerMotion::Result(step)) = motion {
                 if let Some(direction) = step.direction() {
                     self.result_wake.record(direction);
                 }
                 self.navigate_result(step);
-            } else if input_surface == ViewerSurface::Family {
+            } else if input_view == ViewerView::Tree {
                 if let Some(ViewerMotion::Kin(step)) = motion {
                     self.select_tree_kin(step);
                 } else if ctx.input(|input| {
@@ -826,10 +876,10 @@ impl Bayonet {
                 let _moved = self.step_kin(step);
             }
         }
-        let Some(post) = self.zoom.clone() else {
+        let Some(post) = self.viewer_post.clone() else {
             return;
         };
-        if self.zoom_gate == ZoomGate::Fresh
+        if self.viewer_gate == ViewerGate::Fresh
             && let Some(focused) = ctx.memory(egui::Memory::focused)
         {
             ctx.memory_mut(|memory| memory.surrender_focus(focused));
@@ -840,21 +890,21 @@ impl Bayonet {
         self.prepare_viewer_wake(ctx);
         let mut close = false;
         let screen = ctx.content_rect();
-        let surface = self.viewer_surface;
-        let tags = self.viewer_tags_open && surface == ViewerSurface::Image;
+        let view = self.viewer_view;
+        let tags = self.viewer_tags_open && view == ViewerView::Image;
         let gutter = if tags { GUTTER } else { 0.0 };
         let drawer = if tags { TAG_MENU_WIDTH + gutter } else { 0.0 };
-        let image_box = match surface {
-            ViewerSurface::Image => {
+        let image_box = match view {
+            ViewerView::Image => {
                 full_image_box(&post, self.full.get(&post.id), screen.size(), drawer)
             }
-            ViewerSurface::Family => egui::vec2(screen.width() * 0.88, screen.height() * 0.82),
+            ViewerView::Tree => egui::vec2(screen.width() * 0.88, screen.height() * 0.82),
         };
         let body = egui::vec2(image_box.x + drawer, image_box.y + VIEWER_CHROME);
         let window_frame = egui::Frame::window(&ctx.global_style());
         let window_size = body + window_frame.total_margin().sum();
         let kin_nav = self.kin_nav(post.id);
-        let recoil = if surface == ViewerSurface::Image {
+        let recoil = if view == ViewerView::Image {
             self.viewer_recoil_scale(ctx)
         } else {
             1.0
@@ -877,7 +927,7 @@ impl Bayonet {
                     &post,
                     self.local_favorites.contains(post.id),
                     self.viewer_tags_open,
-                    surface,
+                    view,
                     kin_nav,
                 ) {
                     match action {
@@ -892,8 +942,8 @@ impl Bayonet {
                         ViewerAction::Close => close = true,
                     }
                 }
-                match surface {
-                    ViewerSurface::Image => {
+                match view {
+                    ViewerView::Image => {
                         let _row = ui.allocate_ui_with_layout(
                             egui::vec2(body.x, image_box.y),
                             egui::Layout::left_to_right(egui::Align::Min),
@@ -969,7 +1019,7 @@ impl Bayonet {
                             },
                         );
                     }
-                    ViewerSurface::Family => {
+                    ViewerView::Tree => {
                         if let Some(post) = self.family_tree_view(ui, image_box) {
                             self.focus_family_post(post);
                         }
@@ -977,26 +1027,27 @@ impl Bayonet {
                 }
             });
         if let Some(window) = &window {
-            self.zoom_rect = Some(window.response.rect);
+            self.viewer_rect = Some(window.response.rect);
         }
         let clicked_outside = !inputs_blocked
             && window
                 .as_ref()
                 .is_some_and(|window| outside_click(ctx, window.response.rect));
         close |= !inputs_blocked
-            && input_surface == ViewerSurface::Image
+            && input_view == ViewerView::Image
             && !self.tag_menu.is_open()
             && ctx
                 .input(|input| exact_key_pressed(input, egui::Modifiers::NONE, egui::Key::Escape));
-        if close || (self.zoom_gate == ZoomGate::Armed && clicked_outside) {
+        if close || (self.viewer_gate == ViewerGate::Armed && clicked_outside) {
             self.gallery_center = self
                 .gallery_slot()
                 .and_then(|slot| self.hit.posts.get(slot))
                 .map(|post| post.id);
-            self.zoom = None;
+            self.viewer_post = None;
             self.viewer_gallery_anchor = None;
             self.viewer_result_seam = None;
-            self.zoom_gate = ZoomGate::Fresh;
+            self.viewer_restore = None;
+            self.viewer_gate = ViewerGate::Fresh;
             self.full.clear();
             self.full_rgba.clear();
             self.full_loaded_at.clear();
@@ -1006,7 +1057,7 @@ impl Bayonet {
             self.full_recent.clear();
             self.viewer_tag_groups = None;
             self.viewer_family = None;
-            self.viewer_surface = ViewerSurface::Image;
+            self.viewer_view = ViewerView::Image;
             self.viewer_drag = KinDrag::default();
             self.viewer_recoil = None;
             self.viewer_tree_zoom = TREE_ZOOM_DEFAULT;
@@ -1014,15 +1065,16 @@ impl Bayonet {
             self.viewer_tree_fresh = true;
             self.water.close_pond();
             self.release_parked_hit();
+            self.inscribe_session_state();
             ctx.request_repaint();
         } else {
             // A newly materialized fixed-size egui window settles its size and
             // centered position on successive passes. Drive both passes now;
             // otherwise its final placement waits for the user's next input.
-            let settling = self.zoom_gate != ZoomGate::Armed;
-            self.zoom_gate = match self.zoom_gate {
-                ZoomGate::Fresh => ZoomGate::Settling,
-                ZoomGate::Settling | ZoomGate::Armed => ZoomGate::Armed,
+            let settling = self.viewer_gate != ViewerGate::Armed;
+            self.viewer_gate = match self.viewer_gate {
+                ViewerGate::Fresh => ViewerGate::Settling,
+                ViewerGate::Settling | ViewerGate::Armed => ViewerGate::Armed,
             };
             if settling {
                 ctx.request_repaint();
@@ -1217,7 +1269,7 @@ impl Bayonet {
 
     pub(super) fn toggle_viewer_tags(&mut self, ctx: &egui::Context) {
         self.viewer_tags_open = !self.viewer_tags_open;
-        self.inscribe_durable_state();
+        self.inscribe_session_state();
         ctx.request_repaint();
     }
 }

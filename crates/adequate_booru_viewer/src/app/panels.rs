@@ -288,7 +288,7 @@ impl Bayonet {
 
     fn seed_tag_entry(&mut self, ui: &mut egui::Ui) -> bool {
         if self.guide.is_open()
-            || self.zoom.is_some()
+            || self.viewer_post.is_some()
             || self.tag_menu.is_open()
             || ui.ctx().text_edit_focused()
             || ui.ctx().memory(|memory| memory.top_modal_layer().is_some())
