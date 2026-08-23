@@ -17,17 +17,6 @@ pub fn response(ui: &egui::Ui, name: impl Display, response: &egui::Response) {
     }
 }
 
-#[inline]
-pub fn rect(ctx: &egui::Context, name: impl Display, rect: egui::Rect) {
-    #[cfg(feature = "egui-test")]
-    egui_tester_witness::egui::record_rect(ctx, name.to_string(), rect);
-    #[cfg(not(feature = "egui-test"))]
-    {
-        let _ = (ctx, rect);
-        drop(name);
-    }
-}
-
 #[cfg(feature = "egui-test")]
 pub use active::{Settings, State};
 
@@ -46,7 +35,7 @@ mod active {
         pub filter: String,
         pub result_posts: usize,
         pub text_edit_focused: bool,
-        pub ui_open: bool,
+        pub ui_panel_open: bool,
         pub query_open: bool,
         pub active_group: Vec<usize>,
         pub images_per_row: u16,

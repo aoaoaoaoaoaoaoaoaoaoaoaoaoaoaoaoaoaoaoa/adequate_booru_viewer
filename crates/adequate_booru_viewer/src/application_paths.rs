@@ -3,14 +3,14 @@ use directories::ProjectDirs;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
-pub struct Lair {
+pub struct ApplicationPaths {
     pub config: PathBuf,
     pub data: PathBuf,
     pub cache: PathBuf,
     pub state: PathBuf,
 }
 
-impl Lair {
+impl ApplicationPaths {
     pub fn claim() -> Result<Self> {
         let Some(dirs) = ProjectDirs::from("moe", "swarm", "adequate_booru_viewer") else {
             bail!("could not resolve platform project directories");
@@ -19,17 +19,19 @@ impl Lair {
         let state = dirs
             .state_dir()
             .map_or_else(|| dirs.data_local_dir().join("state"), Path::to_path_buf);
-        let lair = Self {
+        let paths = Self {
             config: dirs.config_dir().to_path_buf(),
             data: dirs.data_local_dir().to_path_buf(),
             cache: dirs.cache_dir().to_path_buf(),
             state,
         };
-        lair.mkdir()?;
-        Ok(lair)
+        paths.mkdir()?;
+        Ok(paths)
     }
 
-    pub fn slate_path(&self) -> PathBuf {
+    pub fn session_state_path(&self) -> PathBuf {
+        // Filename is a durable compatibility boundary predating the type's
+        // rectified name.
         self.state.join("slate.toml")
     }
 
@@ -43,6 +45,10 @@ impl Lair {
 
     pub fn config_path(&self) -> PathBuf {
         self.config.join("config.toml")
+    }
+
+    pub fn filter_library_path(&self) -> PathBuf {
+        self.data.join("filters.toml")
     }
 
     pub fn media_dir(&self) -> PathBuf {

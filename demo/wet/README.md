@@ -1,8 +1,8 @@
 # wet demo
 
 `cargo xtask wet-demo` — the canonical "exercise the features, show off the
-liquid" take. The demo stages only `config.toml` and `slate.toml` (the pinned
-fixture: a `work`/`play` library and the pre-record slate); the durable
+liquid" take. The demo stages `config.toml`, `filters.toml`, and `slate.toml`
+(the pinned `work`/`play` Filter Library and pre-recorded Session State); the durable
 Danbooru index and media cache come from the operator's normal XDG data/cache
 roots. That is the intended covenant: reproducible choreography, not a fake
 aquarium.
@@ -12,12 +12,11 @@ aquarium.
 The take is cut into independently-reproducible segments, listed in order by
 `segments.toml` and stored under `segments/<name>.toml`. Each seam is a rest
 point (nothing zoomed, entry field empty, scroll at the top), so a segment's
-entry state is an exact relaunch — that is what `shutters` (persisted recess
-folds) buys us.
+entry state is an exact relaunch, including persisted panel folds.
 
 - `--scaffold` — replay every segment in order and, at each seam, snapshot the
-  app's live `slate`+`config` into the next segment's entry state
-  (`segments/<name>.{slate,config}.toml`). Run this first; it regenerates all
+  app's live configuration, Filter Library, and Session State into the next
+  segment's entry state (`segments/<name>.{config,filters,slate}.toml`). Run this first; it regenerates all
   downstream entry states from the app's own writer. A divergence between a
   `--segment` replay and the continuous run is a hole in our serialization.
 - `--segment <name>` — record one segment in isolation from its (scaffolded)
@@ -29,5 +28,6 @@ folds) buys us.
 `--dry-run` prints the plan (per-segment step counts and durations) without
 launching anything.
 
-Segment 01's entry is the hand-authored base (`config.toml` + `slate.toml`);
-segments 02+ entries are scaffold-generated and not hand-edited.
+Segment 01's entry is the hand-authored base (`config.toml`, `filters.toml`,
+and `slate.toml`); segments 02+ entries are scaffold-generated and not
+hand-edited.

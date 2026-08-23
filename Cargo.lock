@@ -60,6 +60,7 @@ dependencies = [
  "roaring",
  "serde",
  "serde_json",
+ "tempfile",
  "toml",
  "tracing",
  "ureq",
@@ -4227,6 +4228,7 @@ name = "xtask"
 version = "1.3.13"
 dependencies = [
  "anyhow",
+ "directories",
  "serde",
  "serde_json",
  "toml",

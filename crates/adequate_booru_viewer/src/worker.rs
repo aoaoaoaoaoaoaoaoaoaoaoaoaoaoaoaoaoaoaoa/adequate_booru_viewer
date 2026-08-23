@@ -14,7 +14,7 @@ use std::{
 
 use crate::{
     booru::{Booru as _, Danbooru, TagDefinition},
-    config::MirrorPolicy,
+    configuration::MirrorPolicy,
     date::DateRange,
     index::{CacheStats, FactMergeBudget, Index, TagSuggestion},
     kin::Backfill,

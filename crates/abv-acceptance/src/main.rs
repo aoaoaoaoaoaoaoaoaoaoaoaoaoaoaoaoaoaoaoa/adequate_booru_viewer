@@ -16,14 +16,15 @@ use egui_tester::{
 use serde::Deserialize;
 
 const TITLE: &str = "adequate booru viewer";
-const SLATE: &str = "xdg/state/adequate_booru_viewer/slate.toml";
+const SESSION_STATE: &str = "xdg/state/adequate_booru_viewer/slate.toml";
 const BROWSER_RECORD: &str = "effects/danbooru-url";
 const EFFECT_POST: u32 = 9_000_001;
 const NEXT_POST: u32 = 9_000_000;
 const VIEWER_TOOLBAR: &str = "viewer:toolbar";
 const VIEWER_TAG_DRAWER: &str = "viewer:tag-drawer";
-const DEMO_CONFIG: &[u8] = include_bytes!("../../../demo/wet/config.toml");
-const DEMO_SLATE: &[u8] = include_bytes!("../../../demo/wet/slate.toml");
+const ACCEPTANCE_CONFIG: &[u8] = b"prefetch_on_hover = true\n\n[mirror]\npolicy = \"paused\"\n";
+const DEMO_FILTERS: &[u8] = include_bytes!("../../../demo/wet/filters.toml");
+const DEMO_SESSION_STATE: &[u8] = include_bytes!("../../../demo/wet/slate.toml");
 
 fn main() -> Result<()> {
     match env::args().nth(1).as_deref() {
@@ -55,9 +56,9 @@ fn main() -> Result<()> {
             smoke(&harness, cli.backend)
         } else {
             keyboard_contract(&harness)?;
-            reset_slate(testbed)?;
+            reset_durable_state(testbed)?;
             water_persists(&harness)?;
-            reset_slate(testbed)?;
+            reset_durable_state(testbed)?;
             native_effects(&harness)?;
             println!("abv acceptance passed under {}", harness.testbed.id());
             Ok(())
@@ -76,7 +77,7 @@ struct Observation {
     filter: String,
     result_posts: usize,
     text_edit_focused: bool,
-    ui_open: bool,
+    ui_panel_open: bool,
     query_open: bool,
     active_group: Vec<usize>,
     images_per_row: u16,
@@ -204,13 +205,13 @@ fn water_persists(harness: &Harness<'_>) -> Result<()> {
         "cold ABV witness began in an incoherent state",
     )?;
 
-    let recess = story.anchor(abv_contract::Target::UiRecess)?;
-    let (x, y) = recess.center();
+    let panel = story.anchor(abv_contract::Target::Panel("ui-controls"))?;
+    let (x, y) = panel.center();
     let opened = story.session().click(x, y, Button::Primary)?;
     let _open = story
         .reaction(opened)
         .until(Condition::new("UI recess open", |state: &Observation| {
-            state.ui_open
+            state.ui_panel_open
         }))?;
     let dry_frame = story.capture()?;
 
@@ -227,11 +228,11 @@ fn water_persists(harness: &Harness<'_>) -> Result<()> {
     )?;
     app.wait_until(
         Duration::from_secs(5),
-        "wet mode to reach slate.toml",
+        "wet mode to reach Session State",
         || {
             Ok(harness
                 .testbed
-                .read_private_to_string(SLATE)
+                .read_private_to_string(SESSION_STATE)
                 .is_ok_and(|text| text.contains("water = \"wet\"")))
         },
     )?;
@@ -286,7 +287,7 @@ fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
         "command guide open",
         |state: &Observation| state.guide_open,
     ))?;
-    let guide = focus.wait_anchor(&app, &abv_contract::Target::CommandGuide.to_string(), WAIT)?;
+    let guide = focus.wait_anchor(&app, "eternalist.command-guide.body", WAIT)?;
     let _presented_after_guide = focus.wait_fresh(&app, WAIT)?;
     let _compositor_margin = focus.wait_fresh(&app, WAIT)?;
     let guide_region = PixelRegion::anchor(&guide);
@@ -671,7 +672,7 @@ fn visible(frame: &Frame) -> bool {
 }
 
 fn seed(testbed: &Testbed) -> Result<()> {
-    reset_slate(testbed)?;
+    reset_durable_state(testbed)?;
     let data = testbed.create_private_dir("xdg/data/adequate_booru_viewer")?;
     let index = Index::open(&data.join("index.redb")).map_err(|error| Error::Verdict {
         detail: format!("create acceptance index: {error:#}"),
@@ -740,11 +741,14 @@ fn seed(testbed: &Testbed) -> Result<()> {
     Ok(())
 }
 
-fn reset_slate(testbed: &Testbed) -> Result<()> {
-    let mut config = DEMO_CONFIG.to_vec();
-    config.extend_from_slice(b"\n[mirror]\npolicy = \"paused\"\n");
-    let _config = testbed.write_private("xdg/config/adequate_booru_viewer/config.toml", &config)?;
-    let _slate = testbed.write_private(SLATE, DEMO_SLATE)?;
+fn reset_durable_state(testbed: &Testbed) -> Result<()> {
+    let _config = testbed.write_private(
+        "xdg/config/adequate_booru_viewer/config.toml",
+        ACCEPTANCE_CONFIG,
+    )?;
+    let _filters =
+        testbed.write_private("xdg/data/adequate_booru_viewer/filters.toml", DEMO_FILTERS)?;
+    let _session_state = testbed.write_private(SESSION_STATE, DEMO_SESSION_STATE)?;
     Ok(())
 }
 

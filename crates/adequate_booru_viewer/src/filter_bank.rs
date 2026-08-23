@@ -1,5 +1,5 @@
 use crate::{
-    config::{FilterConfig, FilterName, SavedFilter, Shelf},
+    configuration::{FilterLibrary, FilterName, SavedFilter, Shelf},
     model::Query,
 };
 
@@ -7,7 +7,7 @@ pub type Bank = eternalist_apps::Cabinet<SavedFilter>;
 pub type Berth = eternalist_apps::CabinetBerth<FilterName>;
 pub type ShelfBerth = eternalist_apps::CabinetShelfBerth;
 
-pub fn forge(config: &FilterConfig) -> Bank {
+pub fn forge(config: &FilterLibrary) -> Bank {
     let shelves = config
         .shelves
         .iter()
@@ -20,8 +20,8 @@ pub fn forge(config: &FilterConfig) -> Bank {
     Bank::forge(config.saved.clone(), shelves)
 }
 
-pub fn project(bank: &Bank) -> FilterConfig {
-    FilterConfig {
+pub fn project(bank: &Bank) -> FilterLibrary {
+    FilterLibrary {
         saved: bank.saved.clone(),
         shelves: bank
             .shelves

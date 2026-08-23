@@ -8,12 +8,13 @@ use std::{
 };
 
 use crate::{
+    application_paths::ApplicationPaths,
     booru::TagDefinition,
     chrome,
     commands::{self, Edict},
-    config::{
-        Config, FilterName, FilterSelection, MirrorConfig, MirrorPolicy, QueryConfig, SavedFilter,
-        Slate, WaterMode,
+    configuration::{
+        Configuration, FilterLibrary, FilterName, FilterSelection, MirrorConfig, MirrorPolicy,
+        QueryConfig, SavedFilter, SessionState, WaterMode, migrate_legacy_configuration,
     },
     controls,
     date::{CreatedDay, DateRange},
@@ -37,7 +38,6 @@ use crate::{
     trace::startup,
     water::{Cut, Veil},
     worker::{BladeEpoch, Command, Event, Worker},
-    xdg::Lair,
 };
 
 mod bench;
@@ -208,7 +208,7 @@ enum TagDefinitionMemo {
     reason = "independent app-state flags (UI toggles + a one-shot pending), not a state machine"
 )]
 pub struct Bayonet {
-    lair: Lair,
+    paths: ApplicationPaths,
     index: Index,
     worker: Worker,
     query: Query,
@@ -282,10 +282,9 @@ pub struct Bayonet {
     gallery_columns: usize,
     gallery_scroll_offset: f32,
     gallery_center: Option<PostId>,
-    /// Left-rail recess fold state, the running truth written back to the
-    /// slate; keyed by section id, `true` ⇒ open. Seeded from the slate and
-    /// updated whenever a recess is thrown.
-    shutters: BTreeMap<String, bool>,
+    /// Inspector panel-fold state written to the session-state file. Seeded
+    /// from that file and updated whenever a panel is folded or unfolded.
+    panel_folds: BTreeMap<String, bool>,
     panels: PanelNavigator,
     guide: CommandGuide,
     settings: SettingsSheet,
@@ -311,8 +310,10 @@ pub struct Bayonet {
     prefetched: HashSet<PostId>,
     hover_arm: Option<(PostId, Instant)>,
     empty_since: Option<Instant>,
-    configuration: ConfigurationLedger<Config>,
-    slate_scribe: SettledScribe<Slate>,
+    observed_filter_library: FilterLibrary,
+    filter_library_scribe: SettledScribe<FilterLibrary>,
+    configuration: ConfigurationLedger<Configuration>,
+    session_state_scribe: SettledScribe<SessionState>,
     cache_status: String,
     warm_status: String,
     crawl_status: String,
@@ -346,9 +347,13 @@ impl Bayonet {
             filter,
             result_posts: self.hit.posts.len(),
             text_edit_focused,
-            ui_open: self.shutters.get("ui-controls").copied().unwrap_or(false),
+            ui_panel_open: self
+                .panel_folds
+                .get("ui-controls")
+                .copied()
+                .unwrap_or(false),
             query_open: self
-                .shutters
+                .panel_folds
                 .get("reference-query")
                 .copied()
                 .unwrap_or(true),
@@ -368,20 +373,22 @@ impl Bayonet {
 
     pub fn open(ctx: &egui::Context, pause_mirror: bool) -> Result<Self> {
         startup("app.open.enter");
-        let lair = Lair::claim()?;
-        startup("app.lair.claimed");
-        // First-run-ever is the absence of the config file (not an empty
-        // library): the seed below is written on first launch, so the file then
-        // persists and deleting the seed never brings it back.
-        let first_run = !lair.config_path().exists();
-        let configuration = ConfigurationLedger::raise_with_fallback(
+        let paths = ApplicationPaths::claim()?;
+        startup("app.paths.claimed");
+        let configuration_path = paths.config_path();
+        let filter_library_path = paths.filter_library_path();
+        // The library file is the first-run marker. Its contents may lawfully
+        // be empty after the user deletes the shipped seed.
+        let first_run = !configuration_path.exists() && !filter_library_path.exists();
+        let _migrated = migrate_legacy_configuration(&configuration_path, &filter_library_path)?;
+        let filter_library_missing = !filter_library_path.exists();
+        let configuration: ConfigurationLedger<Configuration> = ConfigurationLedger::raise(
             "abv-configuration-scribe",
             ctx,
-            lair.config_path(),
+            configuration_path,
             CONFIG_SETTLE,
-            Config::first_run(),
         )?;
-        let config = configuration.live().clone();
+        let configuration_snapshot = configuration.live().clone();
         let mut settings = SettingsSheet::default();
         if configuration.fault().is_some() {
             settings.require_attention(ctx);
@@ -389,26 +396,29 @@ impl Bayonet {
         let mirror_policy = if pause_mirror {
             MirrorPolicy::Paused
         } else {
-            config.mirror.policy
+            configuration_snapshot.mirror.policy
         };
         startup("app.config.loaded");
-        let local_favorites = LocalFavorites::load(lair.favorites_path())?;
+        let local_favorites = LocalFavorites::load(paths.favorites_path())?;
         startup("app.favorites.loaded");
-        let index = Index::open(&lair.index_path())?;
+        let index = Index::open(&paths.index_path())?;
         startup("app.index.opened");
-        let media = MediaCache::new(lair.media_dir())?;
+        let media = MediaCache::new(paths.media_dir())?;
         startup("app.media.opened");
         let worker = Worker::spawn(index.clone(), media, ctx.clone(), mirror_policy);
         startup("app.worker.spawned");
-        let mut filters = filter_bank::forge(&config.filters);
-        let mut slate = Slate::load(&lair.slate_path());
+        let filter_library = FilterLibrary::load(&filter_library_path, first_run)?;
+        let mut filters = filter_bank::forge(&filter_library);
+        let mut session_state = SessionState::load(&paths.session_state_path());
         if first_run {
-            let _prior = slate.shutters.insert("index-status".to_owned(), true);
+            let _prior = session_state
+                .panel_folds
+                .insert("index-status".to_owned(), true);
         }
         for shelf in &mut filters.shelves {
-            shelf.open = !slate.closed_folders.contains(&shelf.name);
+            shelf.open = !session_state.closed_folders.contains(&shelf.name);
         }
-        let mut filter_selection = match slate.filter.clone() {
+        let mut filter_selection = match session_state.filter.clone() {
             FilterSelection::Saved { name } if filters.taken(&name) => {
                 FilterSelection::Saved { name }
             }
@@ -417,7 +427,7 @@ impl Bayonet {
         };
         if first_run
             && filter_selection == FilterSelection::Scratch
-            && let Some(name) = FilterName::forge(crate::config::SAFE_DEFAULT_FILTER)
+            && let Some(name) = FilterName::forge(crate::configuration::SAFE_DEFAULT_FILTER)
             && filters.taken(&name)
         {
             filter_selection = FilterSelection::Saved { name };
@@ -427,7 +437,7 @@ impl Bayonet {
             .and_then(|active| filters.get(active))
             .map_or_else(
                 || match filter_selection {
-                    FilterSelection::Scratch => slate.query.tree.clone(),
+                    FilterSelection::Scratch => session_state.query.tree.clone(),
                     FilterSelection::LocalFavorites | FilterSelection::Saved { .. } => {
                         Query::default()
                     }
@@ -435,9 +445,9 @@ impl Bayonet {
                 |filter| filter.tree.clone(),
             );
         query.sort_atoms();
-        let sort = slate.sort;
-        let date_range = clean_dates(slate.dates);
-        let scrubbed_dates = date_range != slate.dates.normalized();
+        let sort = session_state.sort;
+        let date_range = clean_dates(session_state.dates);
+        let scrubbed_dates = date_range != session_state.dates.normalized();
         let active_group = filter_selection
             .saved()
             .and_then(|active| filters.get(active))
@@ -445,7 +455,7 @@ impl Bayonet {
                 || match filter_selection {
                     FilterSelection::LocalFavorites => Vec::new(),
                     FilterSelection::Scratch | FilterSelection::Saved { .. } => {
-                        query.clamp_group_path(&slate.query.active_group)
+                        query.clamp_group_path(&session_state.query.active_group)
                     }
                 },
                 |filter| query.clamp_group_path(&filter.active_group),
@@ -455,17 +465,26 @@ impl Bayonet {
             filter_selection.corpus(),
             sort,
             date_range,
-            slate.gallery,
+            session_state.gallery,
         );
-        let slate_path = lair.slate_path();
-        let slate_scribe = SettledScribe::spawn(
-            "abv-slate-scribe",
+        let session_state_path = paths.session_state_path();
+        let session_state_scribe = SettledScribe::spawn(
+            "abv-session-state-scribe",
             ctx,
             CONFIG_SETTLE,
-            move |slate: Slate| slate.save(&slate_path),
+            move |session_state: SessionState| session_state.save(&session_state_path),
         )?;
+        let mut filter_library_scribe = SettledScribe::spawn(
+            "abv-filter-library-scribe",
+            ctx,
+            CONFIG_SETTLE,
+            move |library: FilterLibrary| library.save(&filter_library_path),
+        )?;
+        if filter_library_missing {
+            filter_library_scribe.mark();
+        }
         let mut app = Self {
-            status: format!("index {}", lair.index_path().display()),
+            status: format!("index {}", paths.index_path().display()),
             crawl_status: if mirror_policy.active() {
                 "crawl waking"
             } else {
@@ -478,7 +497,7 @@ impl Bayonet {
                 "paused"
             }
             .to_owned(),
-            lair,
+            paths,
             index,
             worker,
             query: query.clone(),
@@ -493,7 +512,7 @@ impl Bayonet {
             shelf_edit: None,
             entry_edit: None,
             sort,
-            gallery: slate.gallery,
+            gallery: session_state.gallery,
             date_range,
             refresh_serial: 0,
             refresh_pulse: AsyncPulse::Idle,
@@ -534,17 +553,17 @@ impl Bayonet {
             viewer_tree_zoom: viewer::TREE_ZOOM_DEFAULT,
             viewer_tree_pan: egui::Vec2::ZERO,
             viewer_tree_fresh: true,
-            viewer_tags_open: slate.viewer_tags_open,
+            viewer_tags_open: session_state.viewer_tags_open,
             viewer_tag_groups: None,
             tag_definitions: HashMap::new(),
             tag_definition_serial: 0,
-            images_per_row: slate
+            images_per_row: session_state
                 .images_per_row
                 .clamp(MIN_IMAGES_PER_ROW, MAX_IMAGES_PER_ROW),
             gallery_columns: 1,
             gallery_scroll_offset: 0.0,
             gallery_center: None,
-            shutters: slate.shutters,
+            panel_folds: session_state.panel_folds,
             panels: PanelNavigator::default(),
             guide: CommandGuide::default(),
             settings,
@@ -552,17 +571,17 @@ impl Bayonet {
             tag_menu: TagMenu::Closed,
             tag_menu_rect: None,
             menu_cuts: None,
-            water: crate::water::Surface::new(match slate.water {
+            water: crate::water::Surface::new(match session_state.water {
                 WaterMode::Dry => crate::water::Wetness::Dry,
                 WaterMode::Wet => crate::water::Wetness::Wet,
                 WaterMode::ReallyWet => crate::water::Wetness::Deluge,
             }),
-            family_water: crate::water::Surface::new(match slate.water {
+            family_water: crate::water::Surface::new(match session_state.water {
                 WaterMode::Dry => crate::water::Wetness::Dry,
                 WaterMode::Wet => crate::water::Wetness::Wet,
                 WaterMode::ReallyWet => crate::water::Wetness::Deluge,
             }),
-            water_mode: slate.water,
+            water_mode: session_state.water,
             thumb_cruise: ThumbCruise::default(),
             bench_open: false,
             tag_kinds: HashMap::new(),
@@ -573,13 +592,15 @@ impl Bayonet {
             pattern_demand: Vec::new(),
             pattern_serial: 0,
             refetch_inflight: HashSet::new(),
-            prefetch_on_hover: config.prefetch_on_hover,
+            prefetch_on_hover: configuration_snapshot.prefetch_on_hover,
             mirror_policy,
             prefetched: HashSet::new(),
             hover_arm: None,
             empty_since: None,
+            observed_filter_library: filter_library,
+            filter_library_scribe,
             configuration,
-            slate_scribe,
+            session_state_scribe,
             cache_status: "cache measuring".to_owned(),
             warm_status: "query warm idle".to_owned(),
             living_wait: eternalist_apps::LivingWait::default(),
@@ -593,8 +614,7 @@ impl Bayonet {
         startup("app.state.built");
         #[cfg(feature = "devtools")]
         crate::probe::arm();
-        // Persist the first-run seed so the file's presence becomes the
-        // first-run-ever marker.
+        // Persist the first-run seed and its initial selection.
         if first_run {
             app.inscribe_durable_state();
         }
@@ -697,9 +717,10 @@ impl Bayonet {
     }
 
     pub fn service_deadline(&self, _now: Instant) -> Option<Instant> {
-        self.slate_scribe
+        self.session_state_scribe
             .deadline()
             .into_iter()
+            .chain(self.filter_library_scribe.deadline())
             .chain(self.configuration.deadline())
             .chain(self.pulse_gate_deadline())
             .min()
@@ -709,13 +730,24 @@ impl Bayonet {
         let mut changed = self.configuration.service_deadline_reached(now);
         changed |= self.flush_pulse_gates(now);
         if self
-            .slate_scribe
+            .session_state_scribe
             .deadline()
             .is_some_and(|deadline| deadline <= now)
         {
-            let slate = self.slate_projection();
-            if let Err(error) = self.slate_scribe.tend(now, || slate) {
-                self.status = format!("slate scribe failed: {error:#}");
+            let session_state = self.session_state_projection();
+            if let Err(error) = self.session_state_scribe.tend(now, || session_state) {
+                self.status = format!("session-state scribe failed: {error:#}");
+                changed = true;
+            }
+        }
+        if self
+            .filter_library_scribe
+            .deadline()
+            .is_some_and(|deadline| deadline <= now)
+        {
+            let library = filter_bank::project(&self.filters);
+            if let Err(error) = self.filter_library_scribe.tend(now, || library) {
+                self.status = format!("filter-library scribe failed: {error:#}");
                 changed = true;
             }
         }
@@ -775,7 +807,7 @@ impl Bayonet {
         };
         match edict {
             Edict::FocusTagEntry => {
-                let _prior = self.shutters.insert("reference-query".to_owned(), true);
+                let _prior = self.panel_folds.insert("reference-query".to_owned(), true);
                 self.focus_tag_entry = true;
                 self.inscribe_durable_state();
             }
@@ -1947,28 +1979,33 @@ impl Bayonet {
         ctx.request_repaint();
     }
 
-    /// Project both durable domains and restart their settlement clocks.
+    /// Project every durable domain and restart only the clocks whose source
+    /// value changed.
     fn inscribe_durable_state(&mut self) {
         self.sync_active_filter();
-        let config = self.config_projection();
-        if let Err(error) = self.configuration.revise(|live| *live = config) {
+        let configuration = self.configuration_projection();
+        if let Err(error) = self.configuration.revise(|live| *live = configuration) {
             self.status = format!("configuration change failed: {error:#}");
         }
-        self.slate_scribe.mark();
+        let library = filter_bank::project(&self.filters);
+        if library != self.observed_filter_library {
+            self.observed_filter_library = library;
+            self.filter_library_scribe.mark();
+        }
+        self.session_state_scribe.mark();
     }
 
-    fn config_projection(&self) -> Config {
-        Config {
+    fn configuration_projection(&self) -> Configuration {
+        Configuration {
             prefetch_on_hover: self.prefetch_on_hover,
             mirror: MirrorConfig {
                 policy: self.mirror_policy,
             },
-            filters: filter_bank::project(&self.filters),
         }
     }
 
-    fn slate_projection(&self) -> Slate {
-        Slate {
+    fn session_state_projection(&self) -> SessionState {
+        SessionState {
             closed_folders: self
                 .filters
                 .shelves
@@ -1976,7 +2013,7 @@ impl Bayonet {
                 .filter(|shelf| !shelf.open)
                 .map(|shelf| shelf.name.clone())
                 .collect(),
-            shutters: self.shutters.clone(),
+            panel_folds: self.panel_folds.clone(),
             filter: self.filter_selection.clone(),
             query: QueryConfig {
                 tree: self.query.clone(),
@@ -1992,15 +2029,25 @@ impl Bayonet {
     }
 
     fn absorb_persistence(&mut self) {
-        if let Some(ScribeOutcome::Fault { message, .. }) = self.slate_scribe.take_outcome() {
-            self.status = format!("slate save failed: {message}");
+        if let Some(ScribeOutcome::Fault { message, .. }) = self.session_state_scribe.take_outcome()
+        {
+            self.status = format!("session-state save failed: {message}");
+        }
+        if let Some(ScribeOutcome::Fault { message, .. }) =
+            self.filter_library_scribe.take_outcome()
+        {
+            self.status = format!("filter-library save failed: {message}");
         }
     }
 
     fn retire_persistence(&mut self) {
-        let slate = self.slate_projection();
-        if let Err(error) = self.slate_scribe.flush(slate) {
-            self.status = format!("slate save failed: {error:#}");
+        let library = filter_bank::project(&self.filters);
+        if let Err(error) = self.filter_library_scribe.flush(library) {
+            self.status = format!("filter-library save failed: {error:#}");
+        }
+        let session_state = self.session_state_projection();
+        if let Err(error) = self.session_state_scribe.flush(session_state) {
+            self.status = format!("session-state save failed: {error:#}");
         }
     }
 
@@ -2028,39 +2075,9 @@ impl Bayonet {
     }
 
     fn adopt_configuration(&mut self) {
-        let config = self.configuration.live().clone();
-        self.prefetch_on_hover = config.prefetch_on_hover;
-        self.install_mirror_policy(config.mirror.policy);
-        if self.config_projection() == config {
-            return;
-        }
-        let closed = self
-            .filters
-            .shelves
-            .iter()
-            .filter(|shelf| !shelf.open)
-            .map(|shelf| shelf.name.clone())
-            .collect::<HashSet<_>>();
-        let mut filters = filter_bank::forge(&config.filters);
-        for shelf in &mut filters.shelves {
-            shelf.open = !closed.contains(&shelf.name);
-        }
-        let selected = self
-            .filter_selection
-            .saved()
-            .and_then(|name| filters.get(name))
-            .cloned();
-        let selection_removed = self.filter_selection.saved().is_some() && selected.is_none();
-        if selection_removed {
-            self.filter_selection = FilterSelection::Scratch;
-        }
-        self.filters = filters;
-        if let Some(filter) = selected {
-            self.install_query_at(filter.tree, filter.active_group);
-        } else if selection_removed {
-            self.slate_scribe.mark();
-            "active filter was removed by configuration reload".clone_into(&mut self.status);
-        }
+        let configuration = self.configuration.live().clone();
+        self.prefetch_on_hover = configuration.prefetch_on_hover;
+        self.install_mirror_policy(configuration.mirror.policy);
     }
 
     fn show_settings(&mut self, ctx: &egui::Context) {
@@ -2614,12 +2631,14 @@ impl Bayonet {
         } else {
             commands::Context::Workbench
         };
-        let idioms = match (context, self.viewer_surface) {
-            (commands::Context::Viewer, ViewerSurface::Image) => &commands::IMAGE_VIEWER_IDIOMS[..],
-            (commands::Context::Viewer, ViewerSurface::Family) => {
-                &commands::FAMILY_VIEWER_IDIOMS[..]
+        let guide_groups = match (context, self.viewer_surface) {
+            (commands::Context::Viewer, ViewerSurface::Image) => {
+                &commands::IMAGE_VIEWER_GUIDE_GROUPS[..]
             }
-            (commands::Context::Workbench, _) => &commands::WORKBENCH_IDIOMS[..],
+            (commands::Context::Viewer, ViewerSurface::Family) => {
+                &commands::FAMILY_VIEWER_GUIDE_GROUPS[..]
+            }
+            (commands::Context::Workbench, _) => &commands::WORKBENCH_GUIDE_GROUPS[..],
         };
         let mut guide = std::mem::take(&mut self.guide);
         guide.show(
@@ -2631,11 +2650,8 @@ impl Bayonet {
                 commands::Context::Viewer => "IMAGE VIEWER",
             },
             |edict| self.edict_status(edict),
-            idioms,
+            guide_groups,
         );
-        if let Some(rect) = guide.rect() {
-            crate::witness::rect(ui.ctx(), abv_contract::Target::CommandGuide, rect);
-        }
         self.guide = guide;
     }
 }

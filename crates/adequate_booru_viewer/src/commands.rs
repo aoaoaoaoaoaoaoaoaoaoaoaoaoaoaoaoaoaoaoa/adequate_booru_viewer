@@ -117,13 +117,13 @@ const RESULT_ROWS: [Shortcut; 2] = [
 ];
 const RESULT_HOME: [Shortcut; 1] = [Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Home)];
 const ESCAPE: [Shortcut; 1] = [Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::Escape)];
-const TOGGLE_SIDEBAR: [Shortcut; 1] = [Shortcut::new(
+const TOGGLE_INSPECTOR: [Shortcut; 1] = [Shortcut::new(
     ShortcutModifiers::NONE,
     ShortcutKey::Function(9),
 )];
-const NEXT_SIDEBAR_SECTION: [Shortcut; 1] =
+const NEXT_INSPECTOR_PANEL: [Shortcut; 1] =
     [Shortcut::new(ShortcutModifiers::CONTROL, ShortcutKey::Tab)];
-const PREVIOUS_SIDEBAR_SECTION: [Shortcut; 1] = [Shortcut::new(
+const PREVIOUS_INSPECTOR_PANEL: [Shortcut; 1] = [Shortcut::new(
     ShortcutModifiers::CONTROL.plus(ShortcutModifiers::SHIFT),
     ShortcutKey::Tab,
 )];
@@ -136,21 +136,21 @@ const VALUE_BOUNDS: [Shortcut; 2] = [
     Shortcut::new(ShortcutModifiers::NONE, ShortcutKey::End),
 ];
 
-const SIDEBAR_GESTURES: [GuideGesture; 5] = [
+const INSPECTOR_GESTURES: [GuideGesture; 5] = [
     GuideGesture::new(
-        "Show or hide sidebar",
+        "Show or hide Inspector",
         "Conceals or reveals the filter and gallery controls.",
-        &TOGGLE_SIDEBAR,
+        &TOGGLE_INSPECTOR,
     ),
     GuideGesture::new(
-        "Next sidebar section",
-        "Moves focus to the next section of the sidebar.",
-        &NEXT_SIDEBAR_SECTION,
+        "Next Inspector panel",
+        "Moves focus to the next Inspector panel.",
+        &NEXT_INSPECTOR_PANEL,
     ),
     GuideGesture::new(
-        "Previous sidebar section",
-        "Moves focus to the previous section of the sidebar.",
-        &PREVIOUS_SIDEBAR_SECTION,
+        "Previous Inspector panel",
+        "Moves focus to the previous Inspector panel.",
+        &PREVIOUS_INSPECTOR_PANEL,
     ),
     GuideGesture::new(
         "Adjust value",
@@ -252,22 +252,26 @@ const APPLICATION_GESTURES: [GuideGesture; 1] = [GuideGesture::new(
     &SETTINGS_SHORTCUTS,
 )];
 
-const SIDEBAR_IDIOMS: GuideSection = GuideSection::new("SIDEBAR", &SIDEBAR_GESTURES);
-const QUERY_IDIOMS: GuideSection = GuideSection::new("REFERENCE QUERY", &QUERY_GESTURES);
-const GALLERY_IDIOMS: GuideSection = GuideSection::new("GALLERY", &GALLERY_GESTURES);
-const IMAGE_NAVIGATION_IDIOMS: GuideSection =
+const INSPECTOR_GUIDE_GROUP: GuideSection = GuideSection::new("INSPECTOR", &INSPECTOR_GESTURES);
+const QUERY_GUIDE_GROUP: GuideSection = GuideSection::new("REFERENCE QUERY", &QUERY_GESTURES);
+const GALLERY_GUIDE_GROUP: GuideSection = GuideSection::new("GALLERY", &GALLERY_GESTURES);
+const IMAGE_NAVIGATION_GUIDE_GROUP: GuideSection =
     GuideSection::new("NAVIGATION", &IMAGE_NAVIGATION_GESTURES);
-const FAMILY_TREE_IDIOMS: GuideSection = GuideSection::new("FAMILY TREE", &FAMILY_TREE_GESTURES);
-const APPLICATION_IDIOMS: GuideSection = GuideSection::new("APPLICATION", &APPLICATION_GESTURES);
+const FAMILY_TREE_GUIDE_GROUP: GuideSection =
+    GuideSection::new("FAMILY TREE", &FAMILY_TREE_GESTURES);
+const APPLICATION_GUIDE_GROUP: GuideSection =
+    GuideSection::new("APPLICATION", &APPLICATION_GESTURES);
 
-pub const WORKBENCH_IDIOMS: [GuideSection; 4] = [
-    SIDEBAR_IDIOMS,
-    QUERY_IDIOMS,
-    GALLERY_IDIOMS,
-    APPLICATION_IDIOMS,
+pub const WORKBENCH_GUIDE_GROUPS: [GuideSection; 4] = [
+    INSPECTOR_GUIDE_GROUP,
+    QUERY_GUIDE_GROUP,
+    GALLERY_GUIDE_GROUP,
+    APPLICATION_GUIDE_GROUP,
 ];
-pub const IMAGE_VIEWER_IDIOMS: [GuideSection; 2] = [IMAGE_NAVIGATION_IDIOMS, APPLICATION_IDIOMS];
-pub const FAMILY_VIEWER_IDIOMS: [GuideSection; 2] = [FAMILY_TREE_IDIOMS, APPLICATION_IDIOMS];
+pub const IMAGE_VIEWER_GUIDE_GROUPS: [GuideSection; 2] =
+    [IMAGE_NAVIGATION_GUIDE_GROUP, APPLICATION_GUIDE_GROUP];
+pub const FAMILY_VIEWER_GUIDE_GROUPS: [GuideSection; 2] =
+    [FAMILY_TREE_GUIDE_GROUP, APPLICATION_GUIDE_GROUP];
 
 pub fn canon() -> &'static CommandCanon<Edict, Context> {
     static CANON: OnceLock<CommandCanon<Edict, Context>> = OnceLock::new();

@@ -10,56 +10,126 @@ use crate::{
     model::{Corpus, GalleryTopology, Query, QueryAtom, RatingClass, Sort, TagPolarity},
 };
 
-/// User-authored intent only: everything here is something a person could
-/// reasonably write into the file by hand. View ephemera live in [`Slate`].
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// Small human-edited application configuration.
+///
+/// Saved filters are product data owned separately by [`FilterLibrary`]. View
+/// ephemera live in [`SessionState`].
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Config {
+pub struct Configuration {
     pub prefetch_on_hover: bool,
     pub mirror: MirrorConfig,
-    pub filters: FilterConfig,
 }
 
-impl Default for Config {
+impl Default for Configuration {
     fn default() -> Self {
         Self {
             prefetch_on_hover: true,
             mirror: MirrorConfig::default(),
-            filters: FilterConfig::default(),
         }
     }
 }
 
-impl PartialEq for Config {
+impl eternalist_apps::configuration::Configuration for Configuration {}
+
+/// Durable user-owned saved-filter collection.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FilterLibrary {
+    pub saved: Vec<SavedFilter>,
+    pub shelves: Vec<Shelf>,
+}
+
+impl PartialEq for FilterLibrary {
     fn eq(&self, other: &Self) -> bool {
-        // Shelf openness is deliberately skipped by Serde and belongs to the
-        // slate. It cannot make two user-authored configurations unequal.
-        self.prefetch_on_hover == other.prefetch_on_hover
-            && self.mirror == other.mirror
-            && self.filters.saved == other.filters.saved
-            && self.filters.shelves.len() == other.filters.shelves.len()
+        self.saved == other.saved
+            && self.shelves.len() == other.shelves.len()
             && self
-                .filters
                 .shelves
                 .iter()
-                .zip(&other.filters.shelves)
+                .zip(&other.shelves)
                 .all(|(left, right)| left.name == right.name && left.filters == right.filters)
     }
 }
 
-impl Config {
+impl FilterLibrary {
     /// The shipped first-launch library: one deletable `general rating` filter,
     /// so a new user is not dropped straight into the full firehose.
     pub(crate) fn first_run() -> Self {
-        let mut config = Self::default();
+        let mut library = Self::default();
         if let Some(filter) = safe_default_filter() {
-            config.filters.saved.push(filter);
+            library.saved.push(filter);
         }
-        config
+        library
+    }
+
+    pub fn load(path: &Path, first_run: bool) -> Result<Self> {
+        if !path.exists() {
+            return Ok(if first_run {
+                Self::first_run()
+            } else {
+                Self::default()
+            });
+        }
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("read filter library {}", path.display()))?;
+        toml::from_str(&text).with_context(|| format!("parse filter library {}", path.display()))
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        save_toml(self, path, "serialize filter library")
     }
 }
 
-impl eternalist_apps::configuration::Configuration for Config {}
+#[derive(Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct LegacyConfiguration {
+    prefetch_on_hover: bool,
+    mirror: MirrorConfig,
+    filters: FilterLibrary,
+}
+
+impl Default for LegacyConfiguration {
+    fn default() -> Self {
+        Self {
+            prefetch_on_hover: true,
+            mirror: MirrorConfig::default(),
+            filters: FilterLibrary::default(),
+        }
+    }
+}
+
+/// Split the former combined configuration without risking saved-filter loss.
+pub fn migrate_legacy_configuration(config: &Path, filters: &Path) -> Result<bool> {
+    let text = match std::fs::read_to_string(config) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read configuration {}", config.display()));
+        }
+    };
+    let Ok(document) = toml::from_str::<toml::Table>(&text) else {
+        return Ok(false);
+    };
+    if !document.contains_key("filters") {
+        return Ok(false);
+    }
+    let Ok(legacy) = toml::from_str::<LegacyConfiguration>(&text) else {
+        return Ok(false);
+    };
+    if !filters.exists() {
+        legacy.filters.save(filters)?;
+    }
+    save_toml(
+        &Configuration {
+            prefetch_on_hover: legacy.prefetch_on_hover,
+            mirror: legacy.mirror,
+        },
+        config,
+        "serialize migrated configuration",
+    )?;
+    Ok(true)
+}
 
 /// The canonical name of the seeded first-run filter; the app activates it on a
 /// first launch (see `Bayonet::open`).
@@ -155,17 +225,10 @@ impl FilterSelection {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct FilterConfig {
-    pub saved: Vec<SavedFilter>,
-    pub shelves: Vec<Shelf>,
-}
-
 /// A filter folder; ordered, like everything in the library.
 ///
-/// `open` is view state, not configuration: it lives in the [`Slate`] and is
-/// never serialized into config.toml.
+/// `open` is view state, not product data: it lives in [`SessionState`] and is
+/// never serialized into the filter-library file.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Shelf {
@@ -194,13 +257,13 @@ fn shelf_open_default() -> bool {
 /// is user-authored; losing it must never lose user intent.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Slate {
+pub struct SessionState {
     pub closed_folders: std::collections::BTreeSet<String>,
-    /// Per-section fold state, keyed by panel id; presence overrides the
-    /// section's compiled-in default. Absent ⇒ that default. Mirrors
-    /// `closed_folders` but for the left-rail recesses, which carry mixed
-    /// defaults so a bare set cannot say which way a section was thrown.
-    pub shutters: std::collections::BTreeMap<String, bool>,
+    /// Per-Panel fold state; presence overrides the Panel's compiled-in
+    /// default. Absent ⇒ that default. Mirrors `closed_folders`, but mixed
+    /// Panel defaults require an explicit boolean rather than a bare set.
+    #[serde(alias = "shutters")]
+    pub panel_folds: std::collections::BTreeMap<String, bool>,
     pub filter: FilterSelection,
     pub query: QueryConfig,
     pub sort: Sort,
@@ -211,11 +274,11 @@ pub struct Slate {
     pub viewer_tags_open: bool,
 }
 
-impl Default for Slate {
+impl Default for SessionState {
     fn default() -> Self {
         Self {
             closed_folders: std::collections::BTreeSet::new(),
-            shutters: std::collections::BTreeMap::new(),
+            panel_folds: std::collections::BTreeMap::new(),
             filter: FilterSelection::Scratch,
             query: QueryConfig::default(),
             sort: Sort::Score,
@@ -228,7 +291,7 @@ impl Default for Slate {
     }
 }
 
-impl Slate {
+impl SessionState {
     /// State is disposable: any read or parse failure decays to defaults.
     pub fn load(path: &Path) -> Self {
         std::fs::read_to_string(path)
@@ -238,7 +301,7 @@ impl Slate {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        save_toml(self, path, "serialize slate")
+        save_toml(self, path, "serialize session state")
     }
 }
 
@@ -343,64 +406,92 @@ mod tests {
     use crate::model::{BoolOp, QueryAtom, Tag, TagPolarity};
 
     #[test]
-    fn config_roundtrips_filter_library() -> Result<()> {
+    fn filter_library_roundtrips_without_session_folds() -> Result<()> {
         let mut query = Query::default();
         assert!(query.push_atom(&[], tag("solo")?, TagPolarity::Positive));
         let choice = query.push_group(&[], BoolOp::Or).context("push OR")?;
         assert!(query.push_atom(&choice, tag("bikini")?, TagPolarity::Positive));
         assert!(query.push_atom(&choice, tag("nude")?, TagPolarity::Positive));
 
-        let config = Config {
+        let library = FilterLibrary {
+            saved: vec![SavedFilter::new(
+                FilterName::forge("beach").context("filter name")?,
+                query.clone(),
+                choice.clone(),
+            )],
+            shelves: vec![Shelf {
+                name: "trips".to_owned(),
+                open: false,
+                filters: Vec::new(),
+            }],
+        };
+        let text = toml::to_string_pretty(&library)?;
+        let roundtrip = toml::from_str::<FilterLibrary>(&text)?;
+        assert_eq!(library.saved, roundtrip.saved);
+        assert_eq!(roundtrip.saved[0].name.as_str(), "beach");
+        assert_eq!(roundtrip.saved[0].tree, query);
+        assert_eq!(roundtrip.saved[0].active_group, choice);
+        // `open` is session state, never product data.
+        assert!(roundtrip.shelves[0].open);
+        Ok(())
+    }
+
+    #[test]
+    fn first_run_seeds_only_the_absent_filter_library() -> Result<()> {
+        let seeded = FilterLibrary::first_run();
+        assert_eq!(seeded.saved.len(), 1);
+        assert_eq!(seeded.saved[0].name.as_str(), SAFE_DEFAULT_FILTER);
+        assert!(toml::to_string(&seeded.saved[0])?.contains("general"));
+        assert!(FilterLibrary::default().saved.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_configuration_migration_preserves_saved_filters() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let configuration_path = directory.path().join("config.toml");
+        let library_path = directory.path().join("filters.toml");
+        let mut query = Query::default();
+        assert!(query.push_atom(&[], tag("solo")?, TagPolarity::Positive));
+        let legacy = LegacyConfiguration {
             prefetch_on_hover: false,
             mirror: MirrorConfig {
                 policy: MirrorPolicy::Paused,
             },
-            filters: FilterConfig {
+            filters: FilterLibrary {
                 saved: vec![SavedFilter::new(
                     FilterName::forge("beach").context("filter name")?,
-                    query.clone(),
-                    choice.clone(),
+                    query,
+                    Vec::new(),
                 )],
-                shelves: vec![Shelf {
-                    name: "trips".to_owned(),
-                    open: false,
-                    filters: Vec::new(),
-                }],
+                shelves: Vec::new(),
             },
         };
-        let text = toml::to_string_pretty(&config)?;
-        let roundtrip = toml::from_str::<Config>(&text)?;
-        assert_eq!(config, roundtrip);
-        assert!(!roundtrip.prefetch_on_hover);
-        assert_eq!(roundtrip.mirror.policy, MirrorPolicy::Paused);
-        assert_eq!(roundtrip.filters.saved[0].name.as_str(), "beach");
-        assert_eq!(roundtrip.filters.saved[0].tree, query);
-        assert_eq!(roundtrip.filters.saved[0].active_group, choice);
-        // `open` is slate state, never config: it must not survive the trip.
-        assert!(roundtrip.filters.shelves[0].open);
+        std::fs::write(&configuration_path, toml::to_string_pretty(&legacy)?)?;
+
+        assert!(migrate_legacy_configuration(
+            &configuration_path,
+            &library_path
+        )?);
+        let configuration: Configuration =
+            toml::from_str(&std::fs::read_to_string(&configuration_path)?)?;
+        let library = FilterLibrary::load(&library_path, false)?;
+
+        assert!(!configuration.prefetch_on_hover);
+        assert_eq!(configuration.mirror.policy, MirrorPolicy::Paused);
+        assert_eq!(library.saved.len(), 1);
+        assert_eq!(library.saved[0].name.as_str(), "beach");
+        assert_eq!(library.saved[0].tree.to_text(), "solo");
         Ok(())
     }
 
     #[test]
-    fn first_run_seeds_safe_filter_only_when_config_absent() -> Result<()> {
-        // Absent config ⇒ first launch ⇒ seed the deletable safe default.
-        let seeded = Config::first_run();
-        assert_eq!(seeded.filters.saved.len(), 1);
-        assert_eq!(seeded.filters.saved[0].name.as_str(), SAFE_DEFAULT_FILTER);
-        assert!(toml::to_string(&seeded.filters.saved[0])?.contains("general"));
-        // A present-but-empty config must NOT re-seed — deleting the filter sticks.
-        let empty: Config = toml::from_str("prefetch_on_hover = true\n")?;
-        assert!(empty.filters.saved.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn slate_roundtrips_workbench_identity() -> Result<()> {
+    fn session_state_roundtrips_workbench_identity() -> Result<()> {
         let mut query = Query::default();
         assert!(query.push_atom(&[], tag("solo")?, TagPolarity::Positive));
-        let slate = Slate {
+        let session_state = SessionState {
             closed_folders: std::collections::BTreeSet::from(["trips".to_owned()]),
-            shutters: std::collections::BTreeMap::from([("gallery-controls".to_owned(), true)]),
+            panel_folds: std::collections::BTreeMap::from([("gallery-controls".to_owned(), true)]),
             filter: FilterSelection::Saved {
                 name: FilterName::forge("beach").context("filter name")?,
             },
@@ -418,21 +509,24 @@ mod tests {
             water: WaterMode::ReallyWet,
             viewer_tags_open: true,
         };
-        let text = toml::to_string_pretty(&slate)?;
-        let roundtrip = toml::from_str::<Slate>(&text)?;
+        let text = toml::to_string_pretty(&session_state)?;
+        let roundtrip = toml::from_str::<SessionState>(&text)?;
         assert_eq!(roundtrip.query.tree, query);
         assert!(roundtrip.closed_folders.contains("trips"));
-        assert_eq!(roundtrip.shutters.get("gallery-controls"), Some(&true));
+        assert_eq!(roundtrip.panel_folds.get("gallery-controls"), Some(&true));
         assert_eq!(roundtrip.images_per_row, 7);
-        assert_eq!(roundtrip.dates, slate.dates);
+        assert_eq!(roundtrip.dates, session_state.dates);
         assert_eq!(roundtrip.water, WaterMode::ReallyWet);
         assert!(roundtrip.viewer_tags_open);
 
-        let favorites = Slate {
+        let legacy = toml::from_str::<SessionState>("[shutters]\ngallery-controls = true\n")?;
+        assert_eq!(legacy.panel_folds.get("gallery-controls"), Some(&true));
+
+        let favorites = SessionState {
             filter: FilterSelection::LocalFavorites,
-            ..Slate::default()
+            ..SessionState::default()
         };
-        let favorites = toml::from_str::<Slate>(&toml::to_string_pretty(&favorites)?)?;
+        let favorites = toml::from_str::<SessionState>(&toml::to_string_pretty(&favorites)?)?;
         assert_eq!(favorites.filter, FilterSelection::LocalFavorites);
         assert!(favorites.query.tree.is_empty());
         Ok(())

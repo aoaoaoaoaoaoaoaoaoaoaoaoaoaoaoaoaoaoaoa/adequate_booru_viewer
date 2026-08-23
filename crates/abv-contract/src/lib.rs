@@ -2,7 +2,7 @@
 
 use std::{borrow::Cow, fmt};
 
-pub const UI_FINGERPRINT: &str = "abv.ui/3";
+pub const UI_FINGERPRINT: &str = "abv.ui/4";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Water {
@@ -56,14 +56,11 @@ impl Water {
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Target {
-    CommandGuide,
-    Help,
     ImagesPerRow,
     Panel(&'static str),
     TagEntry,
     ViewerControl(ViewerControl),
     ViewerSurface,
-    UiRecess,
     Water(Water),
     Filter(Cow<'static, str>),
     LocalFavorites,
@@ -73,21 +70,35 @@ impl Target {
     #[must_use]
     pub fn wire(&self) -> Cow<'static, str> {
         match self {
-            Self::CommandGuide => Cow::Borrowed("application.command-guide"),
-            Self::Help => Cow::Borrowed("application.help"),
-            Self::ImagesPerRow => Cow::Borrowed("gallery.images-per-row"),
-            Self::Panel(name) => Cow::Owned(format!("panel/{name}")),
-            Self::TagEntry => Cow::Borrowed("query.tag-entry"),
+            Self::ImagesPerRow => Cow::Borrowed("abv.gallery.images-per-row"),
+            Self::Panel(name) => Cow::Owned(format!("abv.inspector.panel/{name}")),
+            Self::TagEntry => Cow::Borrowed("abv.query.tag-entry"),
             Self::ViewerControl(control) => {
-                Cow::Owned(format!("viewer.control/{}", control.wire()))
+                Cow::Owned(format!("abv.viewer.control.{}", control.wire()))
             }
-            Self::ViewerSurface => Cow::Borrowed("viewer.surface"),
-            Self::UiRecess => Cow::Borrowed("recess:ui"),
-            Self::Water(mode) => Cow::Owned(format!("water:{}", mode.wire())),
-            Self::Filter(name) => Cow::Owned(format!("cabinet.filters.entry/{name}")),
-            Self::LocalFavorites => Cow::Borrowed("filter:local-favorites"),
+            Self::ViewerSurface => Cow::Borrowed("abv.viewer.surface"),
+            Self::Water(mode) => Cow::Owned(format!("abv.water.mode.{}", mode.wire())),
+            Self::Filter(name) => Cow::Owned(format!(
+                "abv.cabinet.filter.entry/{}",
+                encode_identity(name)
+            )),
+            Self::LocalFavorites => Cow::Borrowed("abv.filter.local-favorites"),
         }
     }
+}
+
+fn encode_identity(identity: &str) -> String {
+    use fmt::Write as _;
+
+    let mut encoded = String::with_capacity(identity.len());
+    for byte in identity.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            let _escape = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
 }
 
 impl fmt::Display for Target {

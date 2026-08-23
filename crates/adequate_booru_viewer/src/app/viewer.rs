@@ -651,7 +651,7 @@ impl Bayonet {
             self.status = format!("#{id} has no viewable image URL", id = post.id);
             return;
         };
-        let media_dir = self.lair.media_dir();
+        let media_dir = self.paths.media_dir();
         let born = Instant::now();
         let wait = if crate::media::cached(&media_dir, post.id, &url) {
             FullWait::LocalDecode

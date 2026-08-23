@@ -6,3 +6,4 @@
 # Scaffold-generated demo entry states (regenerate: cargo xtask wet-demo --scaffold)
 /demo/wet/segments/*.slate.toml
 /demo/wet/segments/*.config.toml
+/demo/wet/segments/*.filters.toml

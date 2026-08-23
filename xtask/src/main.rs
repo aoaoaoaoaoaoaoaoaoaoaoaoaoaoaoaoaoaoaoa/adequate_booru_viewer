@@ -1,4 +1,6 @@
 use anyhow::{Context as _, Result, bail};
+#[cfg(unix)]
+use directories::ProjectDirs;
 use serde::Deserialize;
 use std::{
     env,
@@ -145,7 +147,8 @@ enum Mode {
     /// loop for tuning a single beat's mouse work.
     Segment(String),
     /// Replay every segment in order and, at each seam, snapshot the app's live
-    /// slate+config into the next segment's entry state. Regenerates entry
+    /// Session State, Configuration, and Filter Library into the next segment's entry state.
+    /// Regenerates entry
     /// states from the app's own writer; this is the state-faithfulness test.
     Scaffold,
 }
@@ -310,19 +313,21 @@ impl WetDemo {
         }
     }
 
-    /// Segment 0's entry is the hand-authored base (`demo/wet/{config,slate}`);
-    /// every later segment's entry is regenerated under `segments/` by scaffold.
+    /// Segment 0's entry is the hand-authored configuration, Filter Library,
+    /// and Session State; scaffold regenerates every later entry.
     fn entry_paths(demo: &Path, manifest: &Manifest, index: usize) -> EntryState {
         if index == 0 {
             EntryState {
                 config: demo.join("config.toml"),
-                slate: demo.join("slate.toml"),
+                filters: demo.join("filters.toml"),
+                session_state: demo.join("slate.toml"),
             }
         } else {
             let name = &manifest.order[index];
             EntryState {
                 config: demo.join(SEGMENTS).join(format!("{name}.config.toml")),
-                slate: demo.join(SEGMENTS).join(format!("{name}.slate.toml")),
+                filters: demo.join(SEGMENTS).join(format!("{name}.filters.toml")),
+                session_state: demo.join(SEGMENTS).join(format!("{name}.slate.toml")),
             }
         }
     }
@@ -382,9 +387,9 @@ impl WetDemo {
     }
 
     /// Play every segment continuously and, at each seam, snapshot the app's
-    /// live slate+config into the next segment's entry state. The app is the
-    /// sole author of those files, so a divergence between a `--segment` replay
-    /// and this continuous run is a hole in our serialization.
+    /// live durable projections into the next segment's entry state. The app
+    /// is their sole author, so a divergence between a `--segment` replay and
+    /// this continuous run is a hole in serialization.
     fn scaffold(
         plan: &[Segment],
         manifest: &Manifest,
@@ -405,8 +410,16 @@ impl WetDemo {
             thread::sleep(Duration::from_millis(800));
             let _bytes = fs::copy(camp.live_config(), seam.join(format!("{next}.config.toml")))
                 .with_context(|| format!("snapshot config for {next}"))?;
-            let _bytes = fs::copy(camp.live_slate(), seam.join(format!("{next}.slate.toml")))
-                .with_context(|| format!("snapshot slate for {next}"))?;
+            let _bytes = fs::copy(
+                camp.live_filter_library(),
+                seam.join(format!("{next}.filters.toml")),
+            )
+            .with_context(|| format!("snapshot Filter Library for {next}"))?;
+            let _bytes = fs::copy(
+                camp.live_session_state(),
+                seam.join(format!("{next}.slate.toml")),
+            )
+            .with_context(|| format!("snapshot Session State for {next}"))?;
             println!("scaffolded entry state for `{next}`");
         }
         Ok(())
@@ -422,10 +435,11 @@ struct Segment {
     timeline: Timeline,
 }
 
-/// A segment's entry state: the config+slate pair the app boots from.
+/// A segment's complete durable entry state.
 struct EntryState {
     config: PathBuf,
-    slate: PathBuf,
+    filters: PathBuf,
+    session_state: PathBuf,
 }
 
 /// The ordered roster of segments under `demo/wet/segments.toml`.
@@ -508,21 +522,31 @@ impl Camp {
             policy,
         };
         fs::create_dir_all(camp.config_app()).context("create demo config dir")?;
+        fs::create_dir_all(camp.data_app()).context("create demo data dir")?;
         fs::create_dir_all(camp.state_app()).context("create demo state dir")?;
         let _bytes = fs::copy(&entry.config, camp.live_config())
             .with_context(|| format!("copy entry config {}", entry.config.display()))?;
-        let _bytes = fs::copy(&entry.slate, camp.live_slate())
-            .with_context(|| format!("copy entry slate {}", entry.slate.display()))?;
+        let _bytes = fs::copy(&entry.filters, camp.live_filter_library())
+            .with_context(|| format!("copy entry Filter Library {}", entry.filters.display()))?;
+        let _bytes =
+            fs::copy(&entry.session_state, camp.live_session_state()).with_context(|| {
+                format!("copy entry Session State {}", entry.session_state.display())
+            })?;
+        camp.link_operator_data()?;
         Ok(camp)
     }
 
-    /// The slate the running app writes back; scaffold snapshots it at seams.
-    fn live_slate(&self) -> PathBuf {
+    /// The Session State the running app writes back.
+    fn live_session_state(&self) -> PathBuf {
         self.state_app().join("slate.toml")
     }
 
     fn live_config(&self) -> PathBuf {
         self.config_app().join("config.toml")
+    }
+
+    fn live_filter_library(&self) -> PathBuf {
+        self.data_app().join("filters.toml")
     }
 
     fn config_home(&self) -> PathBuf {
@@ -533,6 +557,10 @@ impl Camp {
         self.root.join("state")
     }
 
+    fn data_home(&self) -> PathBuf {
+        self.root.join("data")
+    }
+
     fn config_app(&self) -> PathBuf {
         self.config_home().join(APP)
     }
@@ -541,14 +569,38 @@ impl Camp {
         self.state_home().join(APP)
     }
 
+    fn data_app(&self) -> PathBuf {
+        self.data_home().join(APP)
+    }
+
+    #[cfg(unix)]
+    fn link_operator_data(&self) -> Result<()> {
+        let operator = ProjectDirs::from("moe", "swarm", APP)
+            .context("resolve operator ABV data for the wet demo")?;
+        for name in ["index.redb", "favorites.roar", "models"] {
+            let source = operator.data_local_dir().join(name);
+            if source.exists() {
+                std::os::unix::fs::symlink(&source, self.data_app().join(name))
+                    .with_context(|| format!("link demo data {}", source.display()))?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn link_operator_data(&self) -> Result<()> {
+        bail!("the wet demo requires Unix symlink semantics")
+    }
+
     /// Where the running app drops its anchor-probe JSON (devtools build).
     fn probe_path(&self) -> PathBuf {
         self.root.join("anchors.json")
     }
 
-    fn env(&self) -> [(OsString, OsString); 2] {
+    fn env(&self) -> [(OsString, OsString); 3] {
         [
             (OsString::from("XDG_CONFIG_HOME"), self.config_home().into()),
+            (OsString::from("XDG_DATA_HOME"), self.data_home().into()),
             (OsString::from("XDG_STATE_HOME"), self.state_home().into()),
         ]
     }

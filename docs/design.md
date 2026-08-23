@@ -8,9 +8,11 @@ The objection that long scraping work must survive restart is correct. The app t
 
 - durable index: `ProjectDirs::data_local_dir()/index.redb`
 - disposable media cache: `ProjectDirs::cache_dir()/media`
-- user intent: `ProjectDirs::config_dir()/config.toml` — saved filters,
-  folders, preferences; only things a person would write by hand
-- workbench state: `ProjectDirs::state_dir()/slate.toml` (data dir fallback
+- configuration: `ProjectDirs::config_dir()/config.toml` — small human-edited
+  settings such as hover prefetch and mirror policy
+- Filter Library: `ProjectDirs::data_local_dir()/filters.toml` — saved filters
+  and folders; user-owned product data, written independently and atomically
+- Session State: `ProjectDirs::state_dir()/slate.toml` (data dir fallback
   off Linux) — scratch query, active filter, sort, density, folder
   collapse; the app's snapshot of itself, free to decay to defaults
 
@@ -24,7 +26,12 @@ The durable database persists both directions:
 
 Posts tagged `animated` are outside the reference-workbench contract, as are posts the API serves with every media URL stripped (gold-walled or banned). The ingestion path refuses to insert either, re-absorption purges already-cached offenders from the forward table and tag/rating/sort lanes, and search hydration skips any media-less stragglers in the meantime.
 
-Startup restores both files before the first local search. The split is a contract: losing the slate must never lose user intent, so the slate loader decays silently to defaults while a corrupt config fails loudly.
+Startup restores all three domains before the first local search. The split is
+a contract: losing Session State must never lose user intent, so its loader
+decays silently to defaults; invalid configuration and a damaged Filter Library
+fail loudly. Upgrading from the former combined `config.toml` writes the Filter
+Library first, then rewrites configuration, so a crash cannot strand saved
+filters between stores.
 
 ## Query Path
 
@@ -42,9 +49,22 @@ Danbooru is the ingestion oracle, but not the interaction engine. Live anonymous
 
 ## Pure Rust UI
 
-The UI is `egui` on a bespoke `winit`/`wgpu` integration (`boiler.rs`) — no eframe. Owning the event loop means worker events wake the UI directly, and owning the render graph means arbitrary GPU passes: when the full-image viewer opens, the UI renders to an offscreen texture, the `brass_poolrooms` compositor runs its dual-Kawase veil and persistent water field, and an SDF-masked composite keeps the viewer window sharp. With water disabled, egui rasterizes straight into the swapchain at zero added cost. There is no JavaScript surface. Background threads perform network and decode work, then send decoded RGBA blades to the UI thread for texture upload.
+The UI is `egui` on Eternalist Apps' native `winit`/`wgpu` lifecycle. Worker
+events wake the native event loop directly. When the full-image viewer opens,
+the UI renders to an offscreen texture, the Brass Poolrooms compositor runs its
+dual-Kawase veil and persistent water field, and an SDF-masked composite keeps
+the viewer window sharp. With water disabled, egui rasterizes straight into
+the swapchain at zero added cost. There is no JavaScript surface. Background
+threads perform network and decode work, then send decoded RGBA images to the
+UI thread for texture upload.
 
-The main grid is image-only for scan speed. Filter state lives in a left boolean-tree panel. One group is active; tag entry, autocomplete, and hover-palette mutations target that group. Group frames are color coded, selectable, nest arbitrarily, and expose `AND`/`OR`/`XOR`/`NOT` controls. Thumbnails expose tag mutation on hover (`-` inserts `NOT tag`, `+` inserts `tag`, `×` removes existing occurrences). Clicking a thumbnail opens a scaled full-image frame with copy and right-click-close.
+The main grid is image-only for scan speed. Filter state lives in the
+Inspector's boolean-tree panel. One group is active; tag entry, autocomplete,
+and hover-palette mutations target that group. Group frames are color coded,
+selectable, nest arbitrarily, and expose `AND`/`OR`/`XOR`/`NOT` controls.
+Thumbnails expose tag mutation on hover (`-` inserts `NOT tag`, `+` inserts
+`tag`, `×` removes existing occurrences). Clicking a thumbnail opens a scaled
+full-image frame with copy and right-click-close.
 
 `Ctrl` + mouse-wheel scales the grid from half-size to triple-size. Danbooru currently exposes media variants named `180x180`, `360x360`, `720x720`, `sample`, and `original`; the viewer stores the 180/360/720 URLs when present and chooses the thumbnail bucket from the current tile edge. The full-image frame uses sample/original fallbacks.
 

@@ -4,10 +4,10 @@
 )]
 
 use adequate_booru_viewer::{
+    application_paths::ApplicationPaths,
     date::DateRange,
     index::Index,
     model::{BoolOp, GalleryTopology, PostId, Query, QueryAtom, SearchHit, Sort, TagPolarity},
-    xdg::Lair,
 };
 use anyhow::{Context as _, Result, bail};
 use roaring::RoaringBitmap;
@@ -31,8 +31,8 @@ fn no_local_favorites() -> &'static Arc<RoaringBitmap> {
 
 fn main() -> Result<()> {
     let args = Args::parse()?;
-    let lair = Lair::claim()?;
-    let index_path = args.index.unwrap_or_else(|| lair.index_path());
+    let paths = ApplicationPaths::claim()?;
+    let index_path = args.index.unwrap_or_else(|| paths.index_path());
     let index = Index::open(&index_path)?;
     let stats = index.stats()?;
     let snapshot = Snapshot {

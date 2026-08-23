@@ -38,7 +38,7 @@ mod probe;
 mod app;
 mod booru;
 mod commands;
-mod config;
+mod configuration;
 mod controls;
 mod favorites;
 mod filter_bank;
@@ -52,7 +52,7 @@ mod tag_palette;
 mod witness;
 mod worker;
 
-pub(crate) use adequate_booru_viewer::{date, index, kin, model, trace, xdg};
+pub(crate) use adequate_booru_viewer::{application_paths, date, index, kin, model, trace};
 
 pub(crate) use brass_poolrooms::{chrome, water};
 

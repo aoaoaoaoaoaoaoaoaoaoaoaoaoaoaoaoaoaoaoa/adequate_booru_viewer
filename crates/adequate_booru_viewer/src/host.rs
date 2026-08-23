@@ -1,4 +1,4 @@
-use crate::{app::Bayonet, xdg::Lair};
+use crate::{app::Bayonet, application_paths::ApplicationPaths};
 use anyhow::Result;
 use eternalist_apps::{CrashProduct, CrashReportSpec, NativeApp, WindowSpec};
 use std::time::Instant;
@@ -11,11 +11,11 @@ impl NativeApp for Bayonet {
     const WINDOW: WindowSpec = WindowSpec::new("adequate booru viewer", [1_440.0, 920.0]);
 
     fn crash_reports() -> Option<CrashReportSpec> {
-        Lair::claim().ok().map(|lair| {
+        ApplicationPaths::claim().ok().map(|paths| {
             CrashReportSpec::new(
                 CrashProduct::BooruViewer,
                 env!("CARGO_PKG_VERSION"),
-                lair.state,
+                paths.state,
             )
         })
     }

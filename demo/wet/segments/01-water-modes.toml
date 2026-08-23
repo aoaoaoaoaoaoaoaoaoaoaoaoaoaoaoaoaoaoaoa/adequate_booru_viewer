@@ -1,7 +1,7 @@
 # 01 water-modes — open the UI recess, hover DRY, then briefly SELECT REALLY WET
 # so the big water actually surges (the tease — a hover alone shows nothing),
 # then pull back and settle on WET; trail over the grid lingering on a third-row
-# tile. Entry: base slate. Seam out: UI recess open, WET, scroll top.
+# tile. Entry: base Session State. Seam out: UI recess open, WET, scroll top.
 #
 # Left-rail controls use named anchors (resolved live from the devtools probe);
 # generic grid hovers keep coordinates — the content region is stable.

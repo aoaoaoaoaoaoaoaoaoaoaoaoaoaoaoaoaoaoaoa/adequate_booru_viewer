@@ -46,7 +46,7 @@ within the active inspector panel; physical `Control+Tab` and
 the next Boolean group, and `Alt+Shift+G` selects the previous one. Completion
 suggestions retain local `Tab` and `Shift+Tab` while the tag entry owns them.
 
-`F9` conceals or reveals the sidebar. In the gallery, `PageUp` and `PageDown`
+`F9` conceals or reveals the Inspector. In the gallery, `PageUp` and `PageDown`
 move exactly one row and `Home` returns to the first row. The full viewer uses
 `T` for its tag drawer, `R` for the family tree, Left and Right for global
 results, Alt+Left and Alt+Right for family peers, and Up and Down for the parent
@@ -64,8 +64,8 @@ overwriting their source, and offers an explicit reload after repair.
 
 ### architecture
 
-ABV owns booru semantics, indexing, workers, configuration, typed command
-consequences, and its gallery and viewer. `eternalist-apps` supplies the
+ABV owns booru semantics, indexing, workers, configuration, its Filter Library,
+typed command consequences, and its gallery and viewer. `eternalist-apps` supplies the
 one-window native lifecycle and the logical Inspector, Cabinet, LivingWait,
 CommandGuide, CommandCanon, and PanelNavigator assemblies. Brass Poolrooms
 owns the physical controls, material language, and living water. The
@@ -73,7 +73,9 @@ saved-filter active card and immutable local-favorites row remain
 product-specific; the reorderable, one-level shelved filter collection uses
 the shared Cabinet law.
 
-Persistence settlement and the crawl refresh gates are semantic service
+The Filter Library is user-owned product data under XDG data; configuration
+contains only small human-edited settings, and Session State contains disposable
+workbench ephemera. Persistence settlement and the crawl refresh gates are semantic service
 deadlines, independent of rendering. Strict, format-preserving configuration
 crosses the Eternalist configuration ledger; disposable workbench state crosses
 its own background scribe. Visual fades, recoils, and hover dwell alone retain
@@ -85,7 +87,7 @@ uninstrumented launch, then drives the optimized witnessed binary in private
 X11, XDG, process, network, and software-graphics namespaces. It proves the
 seeded filter, generated help pixels, modal containment, keyboard-only panel
 and query movement, focused rail adjustment, rendered dry-to-wet transition,
-durable slate update, restart restoration, native clipboard copy, and browser
+independent Filter Library and Session State recovery, native clipboard copy, and browser
 dispatch. `scripts/test-wayland` owns the narrower native launch,
 first-present, typed-witness, and nonblack compositor-capture gate.
 

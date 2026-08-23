@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::MirrorPolicy;
+use crate::configuration::MirrorPolicy;
 
 impl Bayonet {
     fn autocomplete(&mut self, ui: &mut egui::Ui, focused: bool) -> bool {
@@ -108,13 +108,12 @@ impl Bayonet {
 
     pub(super) fn left_panel(&mut self, ui: &mut egui::Ui, navigator: &mut PanelNavigator) {
         ui.set_width(ui.available_width());
-        let header = ApplicationHeader::new("ADEQUATE BOORU VIEWER").show(
+        let _header = ApplicationHeader::new("ADEQUATE BOORU VIEWER").show(
             ui,
             &mut self.guide,
             &mut self.settings,
             &mut self.water,
         );
-        crate::witness::response(ui, abv_contract::Target::Help, &header.help);
         ui.add_space(5.0);
         let mut panels = navigator.frame(ui.ctx());
         if self.focus_tag_entry {
@@ -128,7 +127,7 @@ impl Bayonet {
             state.store(ui.ctx());
             panels.activate(ui, "reference-query");
         }
-        self.panel_section(
+        self.panel(
             &mut panels,
             ui,
             "filter-library",
@@ -136,7 +135,7 @@ impl Bayonet {
             true,
             |this, ui| this.filter_library_panel(ui),
         );
-        self.panel_section(
+        self.panel(
             &mut panels,
             ui,
             "active-filter",
@@ -144,7 +143,7 @@ impl Bayonet {
             true,
             |this, ui| this.active_filter_panel(ui),
         );
-        self.panel_section(
+        self.panel(
             &mut panels,
             ui,
             "reference-query",
@@ -154,7 +153,7 @@ impl Bayonet {
                 this.query_panel(ui);
             },
         );
-        self.panel_section(
+        self.panel(
             &mut panels,
             ui,
             "gallery-controls",
@@ -162,10 +161,10 @@ impl Bayonet {
             false,
             |this, ui| this.gallery_panel(ui),
         );
-        self.panel_section(&mut panels, ui, "ui-controls", "ui", false, |this, ui| {
+        self.panel(&mut panels, ui, "ui-controls", "ui", false, |this, ui| {
             this.ui_panel(ui);
         });
-        self.panel_section(
+        self.panel(
             &mut panels,
             ui,
             "index-status",
@@ -175,7 +174,7 @@ impl Bayonet {
         );
     }
 
-    fn panel_section(
+    fn panel(
         &mut self,
         panels: &mut eternalist_apps::panel_navigation::PanelFrame<'_>,
         ui: &mut egui::Ui,
@@ -184,12 +183,12 @@ impl Bayonet {
         default_open: bool,
         add: impl FnOnce(&mut Self, &mut egui::Ui),
     ) {
-        let open = self.shutters.get(id).copied().unwrap_or(default_open);
+        let open = self.panel_folds.get(id).copied().unwrap_or(default_open);
         let section = panels.section(ui, id, title, open, |ui| add(self, ui));
         crate::witness::response(ui, abv_contract::Target::Panel(id), &section.header);
         if let Some(wake) = section.wake.as_ref() {
             let _prior = self
-                .shutters
+                .panel_folds
                 .insert(id.to_owned(), matches!(wake.flux, chrome::FoldFlux::Open));
             self.inscribe_durable_state();
         }
@@ -473,8 +472,8 @@ impl Bayonet {
             format!("crawl: {}", self.crawl_status),
             format!("families: {}", self.kin_status),
             format!("build: {}", env!("CARGO_PKG_VERSION")),
-            format!("data: {}", self.lair.data.display()),
-            format!("index: {}", self.lair.index_path().display()),
+            format!("data: {}", self.paths.data.display()),
+            format!("index: {}", self.paths.index_path().display()),
         ] {
             let _line = chrome::note(ui, line);
         }
@@ -488,21 +487,33 @@ impl Bayonet {
         let _wet = ui.horizontal_wrapped(|ui| {
             let dry_btn =
                 controls::plate(ui, "DRY", dry).on_hover_text("disable the water shader entirely");
-            crate::probe_anchor!(ui, "water:dry", dry_btn.interact_rect);
+            crate::probe_anchor!(
+                ui,
+                abv_contract::Target::Water(abv_contract::Water::Dry),
+                dry_btn.interact_rect
+            );
             if dry_btn.clicked() && !dry {
                 self.water_mode = WaterMode::Dry;
                 changed = true;
             }
             let wet_btn = controls::plate(ui, "WET", wet)
                 .on_hover_text("enable water, refraction, and veil shaders");
-            crate::probe_anchor!(ui, "water:wet", wet_btn.interact_rect);
+            crate::probe_anchor!(
+                ui,
+                abv_contract::Target::Water(abv_contract::Water::Wet),
+                wet_btn.interact_rect
+            );
             if wet_btn.clicked() && !wet {
                 self.water_mode = WaterMode::Wet;
                 changed = true;
             }
             let really_btn = controls::plate(ui, "REALLY WET", really)
                 .on_hover_text("stronger, slower, wetter water");
-            crate::probe_anchor!(ui, "water:really", really_btn.interact_rect);
+            crate::probe_anchor!(
+                ui,
+                abv_contract::Target::Water(abv_contract::Water::ReallyWet),
+                really_btn.interact_rect
+            );
             if really_btn.clicked() && !really {
                 self.water_mode = WaterMode::ReallyWet;
                 changed = true;

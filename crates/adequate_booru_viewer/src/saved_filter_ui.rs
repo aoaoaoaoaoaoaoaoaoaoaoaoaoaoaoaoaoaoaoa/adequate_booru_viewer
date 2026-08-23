@@ -1,6 +1,6 @@
 use crate::{
     chrome,
-    config::{FilterName, FilterSelection, SavedFilter},
+    configuration::{FilterName, FilterSelection, SavedFilter},
     controls,
     filter_bank::{Bank, Berth, ShelfBerth},
     water,
@@ -183,7 +183,11 @@ fn local_favorites_row(
     let response = ui
         .selectable_label(selected, text)
         .on_hover_text("built-in: show every locally favorited image");
-    crate::probe_anchor!(ui, "filter:local-favorites", response.interact_rect);
+    crate::probe_anchor!(
+        ui,
+        abv_contract::Target::LocalFavorites,
+        response.interact_rect
+    );
     if chrome::hover_started(ui, &response) {
         water.bump(response.rect);
     }

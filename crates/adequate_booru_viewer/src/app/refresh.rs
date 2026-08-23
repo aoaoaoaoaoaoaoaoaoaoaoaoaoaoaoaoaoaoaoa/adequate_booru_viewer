@@ -135,11 +135,11 @@ impl Bayonet {
         self.status = match tail {
             SearchTail::Open => format!(
                 "{posts} loaded from {candidates} matching posts; scroll for more; {}",
-                self.lair.data.display()
+                self.paths.data.display()
             ),
             SearchTail::Exhausted => format!(
                 "{posts} hits from {candidates} matching posts; {}",
-                self.lair.data.display()
+                self.paths.data.display()
             ),
         };
     }

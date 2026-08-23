@@ -20,7 +20,7 @@ use std::{
 use egui::{Context, Id, Rect, Ui};
 use serde::Serialize;
 
-use crate::{config::WaterMode, date::DateRange, model::Sort};
+use crate::{configuration::WaterMode, date::DateRange, model::Sort};
 
 const STORE: &str = "probe-anchors";
 static ON: AtomicBool = AtomicBool::new(false);

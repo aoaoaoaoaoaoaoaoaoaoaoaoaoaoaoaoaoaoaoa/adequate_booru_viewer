@@ -2,7 +2,7 @@
 # choreography fragment at `segments/<name>.toml`. The continuous final take
 # plays them all back-to-back from segment 01's entry state; `--segment <name>`
 # replays one from its own entry; `--scaffold` regenerates every later entry
-# from the app's own slate/config writer (the state-faithfulness test).
+# from the app's own session-state/configuration writer (the state-faithfulness test).
 order = [
     "01-water-modes",
     "02-filter-library",
