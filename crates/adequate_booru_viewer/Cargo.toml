@@ -33,7 +33,7 @@ anyhow = "1.0.104"
 arboard = "3.6.1"
 crossbeam-channel = "0.5.16"
 directories = "6.0.0"
-brass_poolrooms = "0.14.1"
+brass_poolrooms = "0.14.2"
 abv-contract = { path = "../abv-contract", version = "0.2.2" }
 egui = "=0.36.1"
 egui-wgpu = { version = "=0.36.1", default-features = false }
