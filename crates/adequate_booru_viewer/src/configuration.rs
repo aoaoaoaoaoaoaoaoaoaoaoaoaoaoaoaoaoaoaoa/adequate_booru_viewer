@@ -216,6 +216,10 @@ impl FilterLibrary {
     pub fn save(&self, path: &Path) -> Result<()> {
         save_toml(self, path, "serialize filter library")
     }
+
+    fn is_empty(&self) -> bool {
+        self.unfiled.is_empty() && self.folders.is_empty()
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -225,6 +229,66 @@ struct LegacyConfiguration {
     mirror: MirrorConfig,
     danbooru: DanbooruConfig,
     filters: LegacyFilterLibrary,
+}
+
+/// Intermediate combined format: the compact Filter Library lived at the root
+/// of `config.toml` before the three persistence domains were separated.
+#[derive(Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct CombinedConfiguration {
+    prefetch_on_hover: bool,
+    mirror: MirrorConfig,
+    danbooru: DanbooruConfig,
+    #[serde(rename = "filter")]
+    unfiled: Vec<SavedFilter>,
+    #[serde(rename = "folder")]
+    folders: Vec<Folder>,
+}
+
+impl Default for CombinedConfiguration {
+    fn default() -> Self {
+        Self {
+            prefetch_on_hover: true,
+            mirror: MirrorConfig::default(),
+            danbooru: DanbooruConfig::default(),
+            unfiled: Vec::new(),
+            folders: Vec::new(),
+        }
+    }
+}
+
+struct ConfigurationMigration {
+    configuration: Configuration,
+    filters: FilterLibrary,
+}
+
+impl From<LegacyConfiguration> for ConfigurationMigration {
+    fn from(legacy: LegacyConfiguration) -> Self {
+        Self {
+            configuration: Configuration {
+                prefetch_on_hover: legacy.prefetch_on_hover,
+                mirror: legacy.mirror,
+                danbooru: legacy.danbooru,
+            },
+            filters: legacy.filters.into(),
+        }
+    }
+}
+
+impl From<CombinedConfiguration> for ConfigurationMigration {
+    fn from(combined: CombinedConfiguration) -> Self {
+        Self {
+            configuration: Configuration {
+                prefetch_on_hover: combined.prefetch_on_hover,
+                mirror: combined.mirror,
+                danbooru: combined.danbooru,
+            },
+            filters: FilterLibrary {
+                unfiled: combined.unfiled,
+                folders: combined.folders,
+            },
+        }
+    }
 }
 
 impl Default for LegacyConfiguration {
@@ -250,21 +314,42 @@ pub fn migrate_legacy_configuration(config: &Path, filters: &Path) -> Result<boo
     let Ok(document) = toml::from_str::<toml::Table>(&text) else {
         return Ok(false);
     };
-    if !document.contains_key("filters") {
+    let nested = document.contains_key("filters");
+    let root = document.contains_key("filter") || document.contains_key("folder");
+    if !nested && !root {
         return Ok(false);
     }
-    let Ok(legacy) = toml::from_str::<LegacyConfiguration>(&text) else {
-        return Ok(false);
+    anyhow::ensure!(
+        !(nested && root),
+        "configuration combines nested and root-level Filter Libraries"
+    );
+    let migration: ConfigurationMigration = if nested {
+        toml::from_str::<LegacyConfiguration>(&text)
+            .context("decode nested Filter Library in configuration")?
+            .into()
+    } else {
+        toml::from_str::<CombinedConfiguration>(&text)
+            .context("decode root-level Filter Library in configuration")?
+            .into()
     };
-    if !filters.exists() {
-        FilterLibrary::from(legacy.filters).save(filters)?;
+    let encoded = toml::to_string(&migration.filters).context("canonicalize Filter Library")?;
+    let migrated: FilterLibrary =
+        toml::from_str(&encoded).context("decode canonical Filter Library")?;
+    if filters.exists() {
+        let resident = FilterLibrary::load(filters, false)?;
+        anyhow::ensure!(
+            migrated == resident || migrated.is_empty() || resident.is_empty(),
+            "refusing to split configuration: it and {} contain different Filter Libraries",
+            filters.display()
+        );
+        if resident.is_empty() && !migrated.is_empty() {
+            migrated.save(filters)?;
+        }
+    } else {
+        migrated.save(filters)?;
     }
     save_toml(
-        &Configuration {
-            prefetch_on_hover: legacy.prefetch_on_hover,
-            mirror: legacy.mirror,
-            danbooru: legacy.danbooru,
-        },
+        &migration.configuration,
         config,
         "serialize migrated configuration",
     )?;
@@ -662,6 +747,58 @@ mod tests {
             crate::filter_expression::render(&library.unfiled[0].query)?,
             crate::filter_expression::render(&query)?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn combined_configuration_migration_recovers_its_root_filter_library() -> Result<()> {
+        // An intermediate build admitted the compact library at config root,
+        // then the first split build created an empty destination before
+        // rejecting `folder`. The migration must treat that file as vacant.
+        let directory = tempfile::tempdir()?;
+        let configuration_path = directory.path().join("config.toml");
+        let library_path = directory.path().join("filters.toml");
+        let mut query = Query::default();
+        assert!(query.push_atom(&[], tag("solo")?, TagPolarity::Positive));
+        let combined = CombinedConfiguration {
+            prefetch_on_hover: false,
+            mirror: MirrorConfig {
+                policy: MirrorPolicy::Paused,
+            },
+            danbooru: DanbooruConfig {
+                account: Some(DanbooruAccountConfig {
+                    login: "blade".to_owned(),
+                    api_key_file: PathBuf::from("secrets/danbooru.token"),
+                }),
+            },
+            unfiled: Vec::new(),
+            folders: vec![Folder {
+                name: "work".to_owned(),
+                filters: vec![SavedFilter::new(
+                    FilterName::forge("reference").context("filter name")?,
+                    query,
+                )],
+            }],
+        };
+        std::fs::write(&configuration_path, toml::to_string_pretty(&combined)?)?;
+        std::fs::write(&library_path, "")?;
+
+        assert!(migrate_legacy_configuration(
+            &configuration_path,
+            &library_path
+        )?);
+        let configuration: Configuration =
+            toml::from_str(&std::fs::read_to_string(&configuration_path)?)?;
+        let library = FilterLibrary::load(&library_path, false)?;
+
+        assert!(!configuration.prefetch_on_hover);
+        assert_eq!(configuration.danbooru, combined.danbooru);
+        assert_eq!(library.folders.len(), 1);
+        assert_eq!(library.folders[0].filters[0].name.as_str(), "reference");
+        assert!(!migrate_legacy_configuration(
+            &configuration_path,
+            &library_path
+        )?);
         Ok(())
     }
 
