@@ -834,8 +834,15 @@ fn definition_loop(
         let result = booru
             .tag_definitions()
             .context("provider withdrew tag-definition capability")
-            .and_then(|source| source.tag_definition(&command.tag))
-            .map_err(|err| format!("{err:#}"));
+            .map_err(|err| format!("{err:#}"))
+            .and_then(|source| {
+                source.tag_definition(&command.tag).map_err(|fault| {
+                    if let Some(cooloff) = fault.cooloff {
+                        gate.defer(cooloff);
+                    }
+                    fault.message
+                })
+            });
         events.send(Event::TagDefinition {
             serial: command.serial,
             tag: command.tag,
@@ -1286,6 +1293,14 @@ impl RateGate {
             thread::sleep(*next - now);
         }
         *next = Instant::now() + self.gap;
+    }
+
+    fn defer(&self, delay: Duration) {
+        let mut next = match self.next.lock() {
+            Ok(next) => next,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *next = (*next).max(Instant::now() + delay);
     }
 }
 

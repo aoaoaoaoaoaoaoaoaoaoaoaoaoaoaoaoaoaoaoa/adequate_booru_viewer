@@ -44,10 +44,10 @@ login = "example_user"
 api_key_file = "/home/example/security/danbooru.token"
 ```
 
-The file contains only the API key. ABV loads it at startup; the first push
-begins with a safe authenticated read and reports any rejected credential or
-permission. The anonymous mirror never receives the credential. Relative key
-paths resolve beside `config.toml`.
+The file contains only the API key. ABV loads it at startup; each push first
+reads the current post, then reports any rejected credential or permission.
+The anonymous mirror never receives the credential. Relative key paths resolve
+beside `config.toml`.
 
 Saved filters use a small Boolean language rather than exposing the editor's
 tree representation:
@@ -69,8 +69,7 @@ query = "blue_eyes AND ~(closed_eyes OR /(^|_)covered_eyes$/)"
 precedence. Operators are uppercase, while tags and `rating:*` atoms are
 lowercase. Regexp atoms use `/pattern/`. An empty query matches everything.
 `XOR` retains ABV's selection-group meaning: exactly one operand must match.
-Older generated filter trees migrate automatically; unrelated formatting and
-comments remain untouched.
+Older generated filter trees migrate atomically on load.
 
 the release-tested native coordinates are Linux/X11, Linux/Wayland, macOS on
 Apple and Intel silicon, and 64-bit Windows. `abv --pause-mirror` starts with

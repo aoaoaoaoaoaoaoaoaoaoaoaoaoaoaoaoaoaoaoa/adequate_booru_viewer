@@ -2,92 +2,28 @@ use super::*;
 use crate::configuration::MirrorPolicy;
 
 impl Bayonet {
-    fn autocomplete(&mut self, ui: &mut egui::Ui, focused: bool) -> bool {
+    fn autocomplete(&mut self, ui: &mut egui::Ui, cycle: Option<GroupCycle>, accept: bool) -> bool {
         if active_pattern(&self.tag_entry).is_some() {
-            self.suggest_memo = None;
-            self.suggest_pick = 0;
+            self.query_completion.clear();
             return false;
         }
         let Some(prefix) = active_prefix(&self.tag_entry) else {
-            self.suggest_memo = None;
-            self.suggest_pick = 0;
+            self.query_completion.clear();
             return false;
         };
         // Suggestion lookups walk chunked bitmap ranges — far too expensive
         // for the UI thread. A keystroke requests them from the refresh
         // worker; results land via `Event::Suggested` and render from here.
-        let stale = self
-            .suggest_memo
-            .as_ref()
-            .is_none_or(|(memo, _)| memo != &prefix.body);
-        if stale {
-            self.suggest_serial = self.suggest_serial.saturating_add(1);
-            let kept = self
-                .suggest_memo
-                .take()
-                .map(|(_, hits)| hits)
-                .unwrap_or_default();
-            // Keep the previous hits visible while the worker catches up.
-            self.suggest_memo = Some((prefix.body.clone(), kept));
-            self.suggest_pick = 0;
-            if let Err(err) = self.worker.send(Command::Suggest {
-                serial: self.suggest_serial,
-                prefix: prefix.body.clone(),
-            }) {
-                self.status = format!("{err:#}");
-            }
+        if let Err(err) =
+            self.query_completion
+                .demand(&prefix.body, &mut self.suggest_serial, &self.worker)
+        {
+            self.status = format!("{err:#}");
         }
-        let owns_keys = !self.guide.is_open()
-            && ui.ctx().memory(|memory| memory.top_modal_layer().is_none())
-            && (focused || !ui.ctx().text_edit_focused());
-        let picked_by_key = owns_keys
-            .then(|| ui.input_mut(take_completion_cycle))
-            .flatten();
-        let Some((_, suggestions)) = &self.suggest_memo else {
-            return false;
-        };
-        if suggestions.is_empty() {
-            return false;
-        }
-        self.suggest_pick = self.suggest_pick.min(suggestions.len().saturating_sub(1));
-        if let Some(cycle) = picked_by_key {
-            self.suggest_pick = match cycle {
-                GroupCycle::Forward => (self.suggest_pick + 1) % suggestions.len(),
-                GroupCycle::Backward => self
-                    .suggest_pick
-                    .checked_sub(1)
-                    .unwrap_or(suggestions.len() - 1),
-            };
-        }
-        let accepted_by_key = owns_keys
-            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
-        if accepted_by_key {
-            let suggestion = suggestions[self.suggest_pick].clone();
-            self.complete_active(&suggestion, prefix.negative);
-            return true;
-        }
-        let mut picked = None;
-        let _row = ui.horizontal_wrapped(|ui| {
-            let _label = ui.label("complete");
-            for (slot, suggestion) in suggestions.iter().enumerate() {
-                let selected = slot == self.suggest_pick;
-                let cursor = if selected { "▸ " } else { "" };
-                if chrome::complete_chip(
-                    ui,
-                    tag_chroma::text(
-                        format!("{cursor}{} ({})", suggestion.tag, suggestion.posts),
-                        suggestion.kind,
-                    ),
-                    selected,
-                )
-                .clicked()
-                {
-                    picked = Some(suggestion.clone());
-                    self.suggest_pick = slot;
-                }
-            }
-        });
-        if let Some(suggestion) = picked {
+        if let Some(suggestion) =
+            self.query_completion
+                .choose(ui, cycle, accept, "query-completion", |_| true)
+        {
             self.complete_active(&suggestion, prefix.negative);
             return true;
         }
@@ -227,8 +163,18 @@ impl Bayonet {
         if focus_entry || seeded_entry {
             ui.memory_mut(|mem| mem.request_focus(entry_id));
         }
+        let owns_completion_keys = !self.guide.is_open()
+            && ui.ctx().memory(|memory| memory.top_modal_layer().is_none())
+            && ui.memory(|memory| memory.has_focus(entry_id));
+        let completion_active = self.query_completion.has_choices(|_| true);
+        let completion_cycle = self
+            .query_completion
+            .take_cycle(ui, owns_completion_keys, |_| true);
+        let enter = owns_completion_keys
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
         let text = egui::TextEdit::singleline(&mut self.tag_entry)
             .id(entry_id)
+            .lock_focus(completion_active)
             .hint_text("add tag to selected group…")
             .desired_width(ui.available_width());
         let mut output = ui.scope(|ui| {
@@ -252,10 +198,7 @@ impl Bayonet {
         }
         self.sync_pattern_demand(&query);
         self.pattern_entry_feedback(ui);
-        let accepted_completion = self.autocomplete(ui, entry.has_focus());
-        let enter = !self.guide.is_open()
-            && ui.ctx().memory(|memory| memory.top_modal_layer().is_none())
-            && ui.input(|input| input.key_pressed(egui::Key::Enter));
+        let accepted_completion = self.autocomplete(ui, completion_cycle, enter);
         if !accepted_completion && enter && (entry.has_focus() || entry.lost_focus()) {
             self.commit_tag_entry();
         }

@@ -17,6 +17,7 @@ use crate::{
 };
 
 const POST_LIMIT: &str = "200";
+const DANBOORU_BUSY_COOLOFF: Duration = Duration::from_secs(30);
 
 pub fn post_url(id: PostId) -> String {
     format!("https://danbooru.donmai.us/posts/{id}")
@@ -33,7 +34,10 @@ pub trait Booru {
 }
 
 pub trait TagDefinitionSource {
-    fn tag_definition(&self, tag: &Tag) -> Result<Option<TagDefinition>>;
+    fn tag_definition(
+        &self,
+        tag: &Tag,
+    ) -> std::result::Result<Option<TagDefinition>, TagDefinitionFault>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -47,6 +51,12 @@ pub enum DefinitionBlock {
     Heading(String),
     Paragraph(String),
     Bullet(String),
+}
+
+#[derive(Debug)]
+pub struct TagDefinitionFault {
+    pub message: String,
+    pub cooloff: Option<Duration>,
 }
 
 #[derive(Clone)]
@@ -94,19 +104,49 @@ impl Danbooru {
         self.fetch_kin(&format!("parent:{parent}"), None)
     }
 
-    fn fetch_tag_definition(&self, tag: &Tag) -> Result<Option<TagDefinition>> {
+    fn fetch_tag_definition(
+        &self,
+        tag: &Tag,
+    ) -> std::result::Result<Option<TagDefinition>, TagDefinitionFault> {
         let mut response = self
             .agent
             .get("https://danbooru.donmai.us/wiki_pages.json")
             .query("search[title]", tag.as_str())
             .query("limit", "1")
             .query("only", "title,body,is_deleted")
+            .config()
+            .http_status_as_error(false)
+            .build()
             .call()
-            .with_context(|| format!("GET Danbooru wiki page for {tag}"))?;
+            .map_err(|err| TagDefinitionFault {
+                message: format!("fetch Danbooru definition for {tag}: {err}"),
+                cooloff: None,
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = response
+                .body_mut()
+                .read_json::<DanbooruApiFault>()
+                .ok()
+                .and_then(DanbooruApiFault::detail);
+            let transient = matches!(status.as_u16(), 429 | 502..=504);
+            let message = if transient {
+                format!("Danbooru definitions temporarily unavailable ({status})")
+            } else {
+                format!("Danbooru rejected definition lookup ({status})")
+            };
+            return Err(TagDefinitionFault {
+                message: detail.map_or(message.clone(), |detail| format!("{message}: {detail}")),
+                cooloff: transient.then_some(DANBOORU_BUSY_COOLOFF),
+            });
+        }
         let pages = response
             .body_mut()
             .read_json::<Vec<DanbooruWikiPage>>()
-            .with_context(|| format!("decode Danbooru wiki page for {tag}"))?;
+            .map_err(|err| TagDefinitionFault {
+                message: format!("decode Danbooru definition for {tag}: {err}"),
+                cooloff: None,
+            })?;
         Ok(pages
             .into_iter()
             .find(|page| !page.is_deleted && page.title.eq_ignore_ascii_case(tag.as_str()))
@@ -217,7 +257,7 @@ impl DanbooruAccount {
         id: PostId,
         additions: &[Tag],
     ) -> std::result::Result<Harvest, TagEditFault> {
-        let current = self.fetch_post(id).map_err(|err| TagEditFault {
+        let current = self.fetch_public_post(id).map_err(|err| TagEditFault {
             message: format!("fetch current post {id}: {err:#}"),
             harvest: None,
         })?;
@@ -253,17 +293,21 @@ impl DanbooruAccount {
                 ("post[tag_string]", tag_string.as_str()),
                 ("post[old_tag_string]", old_tag_string.as_str()),
             ]);
-        let failure = match mutation {
+        let (acknowledged, mutation_harvest, mutation_fault) = match mutation {
             Ok(mut response) if response.status().is_success() => {
-                return response
+                match response
                     .body_mut()
                     .read_json::<DanbooruPost>()
                     .context("decode edited Danbooru post")
                     .and_then(Harvest::try_from)
-                    .map_err(|err| TagEditFault {
-                        message: format!("edit post {id}: {err:#}"),
-                        harvest: None,
-                    });
+                {
+                    Ok(harvest) => (true, Some(harvest), None),
+                    Err(err) => (
+                        true,
+                        None,
+                        Some(format!("decode edited post {id}: {err:#}")),
+                    ),
+                }
             }
             Ok(mut response) => {
                 let status = response.status();
@@ -271,42 +315,61 @@ impl DanbooruAccount {
                     .body_mut()
                     .read_json::<DanbooruApiFault>()
                     .ok()
-                    .and_then(DanbooruApiFault::detail);
-                detail.map_or_else(
+                    .and_then(DanbooruApiFault::edit_detail);
+                let failure = detail.map_or_else(
                     || format!("Danbooru rejected edit ({status})"),
                     |detail| format!("Danbooru rejected edit ({status}): {detail}"),
-                )
+                );
+                (false, None, Some(failure))
             }
-            Err(err) => format!("edit post {id}: {err}"),
+            Err(err) => (false, None, Some(format!("edit post {id}: {err}"))),
         };
-        let reconciled = self.fetch_post(id).ok().and_then(|post| {
-            let present = additions.iter().all(|tag| {
-                post.tag_string
-                    .split_whitespace()
-                    .any(|found| found == tag.as_str())
-            });
-            Harvest::try_from(post)
-                .ok()
-                .map(|harvest| (present, harvest))
-        });
-        match reconciled {
-            Some((true, harvest)) => Ok(harvest),
-            Some((false, harvest)) => Err(TagEditFault {
-                message: failure,
+        match self.fetch_public_post(id).and_then(Harvest::try_from) {
+            Ok(harvest) if harvest_contains(&harvest, additions) => Ok(harvest),
+            Ok(harvest) => Err(TagEditFault {
+                message: if acknowledged {
+                    let omission = format!(
+                        "Danbooru acknowledged the edit, but the refreshed post omitted {}",
+                        tag_names(additions)
+                    );
+                    match mutation_fault {
+                        Some(detail) => format!("{omission}; {detail}"),
+                        None => omission,
+                    }
+                } else {
+                    mutation_fault.unwrap_or_else(|| "Danbooru edit failed".to_owned())
+                },
                 harvest: Some(Box::new(harvest)),
             }),
-            None => Err(TagEditFault {
-                message: failure,
-                harvest: None,
-            }),
+            Err(reconcile) => {
+                if let Some(harvest) = mutation_harvest.as_ref()
+                    && harvest_contains(harvest, additions)
+                {
+                    return Ok(harvest.clone());
+                }
+                let reconciliation = format!("refresh edited post {id}: {reconcile:#}");
+                let message = match mutation_fault {
+                    Some(failure) => format!("{failure}; {reconciliation}"),
+                    None => {
+                        if acknowledged {
+                            reconciliation
+                        } else {
+                            format!("edit outcome unknown; {reconciliation}")
+                        }
+                    }
+                };
+                Err(TagEditFault {
+                    message,
+                    harvest: mutation_harvest.map(Box::new),
+                })
+            }
         }
     }
 
-    fn fetch_post(&self, id: PostId) -> Result<DanbooruPost> {
+    fn fetch_public_post(&self, id: PostId) -> Result<DanbooruPost> {
         let mut response = self
             .agent
             .get(format!("https://danbooru.donmai.us/posts/{id}.json"))
-            .header("Authorization", &self.authorization)
             .call()
             .with_context(|| format!("GET Danbooru post {id}"))?;
         response
@@ -325,10 +388,24 @@ struct DanbooruApiFault {
 }
 
 impl DanbooruApiFault {
+    fn edit_detail(self) -> Option<String> {
+        if self.error.as_deref() == Some("User::PrivilegeError") {
+            Some("API key does not permit posts:update from this IP".to_owned())
+        } else {
+            self.detail()
+        }
+    }
+
     fn detail(self) -> Option<String> {
-        self.message
-            .or(self.error)
-            .filter(|detail| !detail.is_empty())
+        let message = self.message.filter(|detail| !detail.is_empty());
+        let error = self.error.filter(|detail| !detail.is_empty());
+        match (message, error) {
+            (Some(message), Some(error)) if message != error => {
+                Some(format!("{message} ({error})"))
+            }
+            (Some(message), _) => Some(message),
+            (None, error) => error,
+        }
     }
 }
 
@@ -343,9 +420,22 @@ impl Booru for Danbooru {
 }
 
 impl TagDefinitionSource for Danbooru {
-    fn tag_definition(&self, tag: &Tag) -> Result<Option<TagDefinition>> {
+    fn tag_definition(
+        &self,
+        tag: &Tag,
+    ) -> std::result::Result<Option<TagDefinition>, TagDefinitionFault> {
         self.fetch_tag_definition(tag)
     }
+}
+
+fn harvest_contains(harvest: &Harvest, additions: &[Tag]) -> bool {
+    additions
+        .iter()
+        .all(|addition| harvest.post.tags.contains(addition))
+}
+
+fn tag_names(tags: &[Tag]) -> String {
+    tags.iter().map(Tag::as_str).collect::<Vec<_>>().join(", ")
 }
 
 #[derive(Debug, Deserialize)]

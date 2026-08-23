@@ -42,6 +42,7 @@ use crate::{
 };
 
 mod bench;
+mod completion;
 mod loading;
 mod palette;
 mod panels;
@@ -53,6 +54,8 @@ mod water;
 use refresh::{AsyncPulse, PulseGate};
 use scroll::ThumbCruise;
 use viewer::{FullWait, ViewerGate};
+
+use completion::TagCompletion;
 
 use eternalist_apps::{
     ApplicationHeader, ScribeOutcome, SettledScribe,
@@ -205,6 +208,45 @@ enum TagDefinitionMemo {
     Fault { message: String, born: Instant },
 }
 
+#[derive(Clone, Debug)]
+struct TagAddition {
+    tag: Tag,
+    kind: TagKind,
+}
+
+#[derive(Debug)]
+enum TagPushNotice {
+    Updated(usize),
+    Fault(String),
+}
+
+#[derive(Debug, Default)]
+struct TagPushDraft {
+    target: Option<PostId>,
+    entry: String,
+    additions: Vec<TagAddition>,
+    notice: Option<TagPushNotice>,
+}
+
+impl TagPushDraft {
+    fn retarget(&mut self, target: PostId) {
+        if self.target == Some(target) {
+            return;
+        }
+        self.target = Some(target);
+        self.entry.clear();
+        self.additions.clear();
+        self.notice = None;
+    }
+
+    fn acknowledge(&mut self) {
+        let count = self.additions.len();
+        self.entry.clear();
+        self.additions.clear();
+        self.notice = Some(TagPushNotice::Updated(count));
+    }
+}
+
 #[expect(
     clippy::struct_excessive_bools,
     reason = "independent app-state flags (UI toggles + a one-shot pending), not a state machine"
@@ -307,8 +349,8 @@ pub struct Bayonet {
     thumb_cruise: ThumbCruise,
     bench_open: bool,
     tag_kinds: HashMap<Tag, TagKind>,
-    suggest_memo: Option<(String, Vec<TagSuggestion>)>,
-    suggest_pick: usize,
+    query_completion: TagCompletion,
+    push_completion: TagCompletion,
     suggest_serial: u64,
     pattern_memo: HashMap<TagPattern, Vec<TagPatternMatch>>,
     pattern_demand: Vec<TagPattern>,
@@ -316,7 +358,7 @@ pub struct Bayonet {
     refetch_inflight: HashSet<PostId>,
     danbooru_config: DanbooruConfig,
     danbooru_account: AccountReadiness,
-    tag_push_entry: String,
+    tag_push_draft: TagPushDraft,
     tag_push_inflight: Option<PostId>,
     prefetch_on_hover: bool,
     mirror_policy: MirrorPolicy,
@@ -610,8 +652,8 @@ impl Bayonet {
             thumb_cruise: ThumbCruise::default(),
             bench_open: false,
             tag_kinds: HashMap::new(),
-            suggest_memo: None,
-            suggest_pick: 0,
+            query_completion: TagCompletion::default(),
+            push_completion: TagCompletion::default(),
             suggest_serial: 0,
             pattern_memo: HashMap::new(),
             pattern_demand: Vec::new(),
@@ -619,7 +661,7 @@ impl Bayonet {
             refetch_inflight: HashSet::new(),
             danbooru_config: configuration_snapshot.danbooru.clone(),
             danbooru_account,
-            tag_push_entry: String::new(),
+            tag_push_draft: TagPushDraft::default(),
             tag_push_inflight: None,
             prefetch_on_hover: configuration_snapshot.prefetch_on_hover,
             mirror_policy,
@@ -1566,10 +1608,17 @@ impl Bayonet {
                     }
                     match result {
                         Ok(()) => {
-                            self.tag_push_entry.clear();
+                            if self.tag_push_draft.target == Some(id) {
+                                self.tag_push_draft.acknowledge();
+                                self.push_completion.clear();
+                            }
                             self.status = format!("updated tags on post {id}");
                         }
                         Err(message) => {
+                            if self.tag_push_draft.target == Some(id) {
+                                self.tag_push_draft.notice =
+                                    Some(TagPushNotice::Fault(message.clone()));
+                            }
                             self.status = format!("tag edit failed: {message}");
                         }
                     }
@@ -1578,11 +1627,9 @@ impl Bayonet {
                     ctx.request_repaint();
                 }
                 Event::Suggested { serial, hits } => {
-                    if serial == self.suggest_serial
-                        && let Some((_, memo)) = &mut self.suggest_memo
+                    if self.query_completion.absorb(serial, &hits)
+                        || self.push_completion.absorb(serial, &hits)
                     {
-                        *memo = hits;
-                        self.suggest_pick = self.suggest_pick.min(memo.len().saturating_sub(1));
                         ctx.request_repaint();
                     }
                 }
@@ -1749,7 +1796,10 @@ impl Bayonet {
                 .flatten()
                 .and_then(|motion| motion.scroll_offset(self.gallery_scroll_offset, row_height))
         });
-        let scroll = egui::ScrollArea::vertical();
+        let scroll = chrome::ScrewScroll::vertical()
+            .id_salt("gallery-results")
+            .max_width(width)
+            .auto_shrink([false, false]);
         let scroll = if let Some(offset) = offset {
             scroll.vertical_scroll_offset(offset)
         } else {

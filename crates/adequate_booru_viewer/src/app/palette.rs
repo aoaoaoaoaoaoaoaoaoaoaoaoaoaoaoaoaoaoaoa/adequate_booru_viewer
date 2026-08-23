@@ -89,6 +89,7 @@ impl Bayonet {
     }
 
     fn viewer_tag_pusher(&mut self, ui: &mut egui::Ui, post: &PostRecord) -> f32 {
+        self.tag_push_draft.retarget(post.id);
         let denial = self.danbooru_account.push_denial().map(str::to_owned);
         let pusher = ui.vertical(|ui| {
             if self.danbooru_account.is_unconfigured() {
@@ -97,31 +98,107 @@ impl Bayonet {
                      [danbooru.account]\n\
                      login = \"your_login\"\n\
                      api_key_file = \"/path/to/danbooru.token\"\n\n\
-                     The token file must contain only the API key. Relative paths resolve beside \
-                     config.toml.",
+                     The token file must contain only the API key. The key must permit \
+                     posts:update from this machine; leave its Permissions and IP Addresses \
+                     blank to allow all, or scope them accordingly. Relative paths resolve \
+                     beside config.toml.",
                 );
             } else {
                 let enabled = denial.is_none() && self.tag_push_inflight.is_none();
-                let mut submit = false;
+                let entry_id = ui.make_persistent_id("tag-push-entry");
+                let entry_focused = ui.memory(|memory| memory.has_focus(entry_id));
+                let staged = self
+                    .tag_push_draft
+                    .additions
+                    .iter()
+                    .map(|addition| addition.tag.clone())
+                    .collect::<Vec<_>>();
+                let actionable = |suggestion: &TagSuggestion| {
+                    Tag::forge(&suggestion.tag)
+                        .is_some_and(|tag| !post.tags.contains(&tag) && !staged.contains(&tag))
+                };
+                let completion_active = self.push_completion.has_choices(actionable);
+                let completion_cycle =
+                    self.push_completion
+                        .take_cycle(ui, enabled && entry_focused, actionable);
+                let enter = enabled
+                    && entry_focused
+                    && ui.input_mut(|input| {
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                    });
+                let before = self.tag_push_draft.entry.clone();
+                let mut stage = false;
                 let _row = ui.horizontal(|ui| {
-                    let entry_width = (ui.available_width() - 44.0).max(80.0);
+                    let entry_width = (ui.available_width()
+                        - chrome::MechanismSize::Medium.side()
+                        - ui.spacing().item_spacing.x)
+                        .max(80.0);
                     let response = ui.add_enabled(
                         enabled,
-                        egui::TextEdit::singleline(&mut self.tag_push_entry)
-                            .hint_text("tag to push")
+                        egui::TextEdit::singleline(&mut self.tag_push_draft.entry)
+                            .id(entry_id)
+                            .lock_focus(completion_active)
+                            .hint_text("stage a tag…")
                             .desired_width(entry_width),
                     );
-                    let enter = response.lost_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                    let button = ui.add_enabled(enabled, egui::Button::new("add"));
+                    crate::probe_anchor!(ui, "field:tag-push", response.interact_rect);
+                    if let Some(wake) =
+                        chrome::text_wake(ui, &response, &before, &self.tag_push_draft.entry)
+                    {
+                        self.water.text(wake);
+                    }
+                    let button = ui
+                        .add_enabled_ui(enabled, |ui| {
+                            controls::symbol_sized(
+                                ui,
+                                &mut self.water,
+                                chrome::Symbol::Add,
+                                chrome::MechanismSize::Medium,
+                            )
+                        })
+                        .inner;
+                    crate::probe_anchor!(ui, "tag-push:stage", button.interact_rect);
+                    let clicked = button.clicked();
                     if let Some(reason) = &denial {
                         let _entry_reason = response.on_hover_text(reason);
-                        let _button_reason = button.clone().on_hover_text(reason);
+                        let _button_reason = button.on_hover_text(reason);
                     }
-                    submit = button.clicked() || enter;
+                    stage = clicked;
                 });
-                if submit {
-                    self.submit_tag_push(post);
+
+                let prefix = self.tag_push_draft.entry.trim().to_owned();
+                if prefix.is_empty() {
+                    self.push_completion.clear();
+                } else if let Err(err) =
+                    self.push_completion
+                        .demand(&prefix, &mut self.suggest_serial, &self.worker)
+                {
+                    self.status = format!("tag completion: {err:#}");
+                }
+                let chosen = self.push_completion.choose(
+                    ui,
+                    completion_cycle,
+                    enter,
+                    "push-completion",
+                    actionable,
+                );
+                let staged_now = if let Some(suggestion) = chosen {
+                    self.stage_tag_push(
+                        post,
+                        Tag::forge(&suggestion.tag).map(|tag| TagAddition {
+                            tag,
+                            kind: suggestion.kind,
+                        }),
+                    )
+                } else if stage || enter {
+                    let addition = self.tag_push_addition();
+                    self.stage_tag_push(post, addition)
+                } else {
+                    false
+                };
+
+                if !staged_now {
+                    self.tag_push_staging(ui, post, enabled);
                 }
             }
             let _rule = ui.separator();
@@ -129,35 +206,163 @@ impl Bayonet {
         pusher.response.rect.height()
     }
 
-    fn submit_tag_push(&mut self, post: &PostRecord) {
-        let Some(tag) = Tag::forge(&self.tag_push_entry) else {
-            "enter a tag to push".clone_into(&mut self.status);
-            return;
-        };
-        if post.tags.contains(&tag) {
-            self.status = format!("post already has {tag}");
-            return;
+    fn tag_push_addition(&mut self) -> Option<TagAddition> {
+        let tag = Tag::forge(self.tag_push_draft.entry.trim())?;
+        match self.index.tag_kind(&tag) {
+            Ok(kind) => Some(TagAddition { tag, kind }),
+            Err(err) => {
+                self.status = format!("read staged tag: {err:#}");
+                None
+            }
         }
-        match self.index.contains_tag(&tag) {
+    }
+
+    fn stage_tag_push(&mut self, post: &PostRecord, addition: Option<TagAddition>) -> bool {
+        let Some(addition) = addition else {
+            "enter a concrete tag".clone_into(&mut self.status);
+            return false;
+        };
+        if post.tags.contains(&addition.tag) {
+            self.status = format!("post already has {}", addition.tag);
+            return false;
+        }
+        if self
+            .tag_push_draft
+            .additions
+            .iter()
+            .any(|staged| staged.tag == addition.tag)
+        {
+            self.status = format!("{} is already staged", addition.tag);
+            return false;
+        }
+        match self.index.contains_tag(&addition.tag) {
             Ok(false) => {
-                self.status = format!("{tag} is not in the known tag bank");
-                return;
+                self.status = format!("{} is not in the known tag bank", addition.tag);
+                return false;
             }
             Err(err) => {
-                self.status = format!("check tag before push: {err:#}");
-                return;
+                self.status = format!("check staged tag: {err:#}");
+                return false;
             }
             Ok(true) => {}
         }
-        match self.worker.send(Command::AddPostTags {
-            id: post.id,
-            tags: vec![tag],
-        }) {
-            Ok(()) => {
-                self.tag_push_inflight = Some(post.id);
-                self.status = format!("pushing tag to post {}", post.id);
+        self.status = format!("staged {}", addition.tag);
+        self.tag_push_draft.additions.push(addition);
+        self.tag_push_draft.entry.clear();
+        self.tag_push_draft.notice = None;
+        self.push_completion.clear();
+        true
+    }
+
+    fn tag_push_staging(&mut self, ui: &mut egui::Ui, post: &PostRecord, enabled: bool) {
+        match &self.tag_push_draft.notice {
+            Some(TagPushNotice::Updated(count)) => {
+                let noun = if *count == 1 { "tag" } else { "tags" };
+                let _acknowledgment = ui.label(
+                    egui::RichText::new(format!("updated {count} {noun}"))
+                        .strong()
+                        .color(chrome::TEXT),
+                );
+                crate::probe_anchor!(ui, "tag-push:updated", _acknowledgment.interact_rect);
             }
-            Err(err) => self.status = format!("start tag push: {err:#}"),
+            Some(TagPushNotice::Fault(message)) => {
+                let _fault = ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("push failed: {message}"))
+                            .strong()
+                            .color(egui::Color32::from_rgb(224, 144, 120)),
+                    )
+                    .wrap(),
+                );
+                crate::probe_anchor!(ui, "tag-push:fault", _fault.interact_rect);
+            }
+            None => {}
+        }
+        if self.tag_push_draft.additions.is_empty() {
+            return;
+        }
+        let mut remove = None;
+        let mut hovered_definition = None;
+        let definitions = &self.tag_definitions;
+        let _staging = ui.horizontal_wrapped(|ui| {
+            let _label = ui.label("pending");
+            for (slot, addition) in self.tag_push_draft.additions.iter().enumerate() {
+                let chip = chrome::complete_chip(
+                    ui,
+                    tag_chroma::text(format!("{}  ×", addition.tag), addition.kind),
+                    false,
+                );
+                if chip.hovered() {
+                    hovered_definition = Some(addition.tag.clone());
+                }
+                let chip = chip.on_hover_ui(|ui| {
+                    definition_tooltip(
+                        ui,
+                        &addition.tag,
+                        addition.kind,
+                        definitions.get(&addition.tag),
+                    );
+                });
+                crate::probe_anchor!(
+                    ui,
+                    format!("tag-push:pending:{}", addition.tag),
+                    chip.interact_rect
+                );
+                if chip.clicked() {
+                    remove = Some(slot);
+                }
+            }
+        });
+        if let Some(tag) = hovered_definition {
+            self.request_tag_definition(tag);
+        }
+        if let Some(slot) = remove {
+            let _removed = self.tag_push_draft.additions.remove(slot);
+            self.tag_push_draft.notice = None;
+            return;
+        }
+
+        if self.tag_push_inflight == Some(post.id) {
+            let _lease = ui.label(chrome::muted(format!("updating post {}…", post.id)));
+        } else {
+            let export = ui
+                .add_enabled_ui(enabled, |ui| {
+                    let response = chrome::Monoglyph::new('↗')
+                        .size(chrome::MechanismSize::Medium)
+                        .show(ui);
+                    self.water.monoglyph(&response);
+                    response
+                })
+                .inner
+                .on_hover_text("push pending tags to Danbooru");
+            crate::probe_anchor!(ui, "tag-push:export", export.interact_rect);
+            if export.clicked() {
+                self.submit_tag_push(post);
+            }
+        }
+    }
+
+    fn submit_tag_push(&mut self, post: &PostRecord) {
+        let tags = self
+            .tag_push_draft
+            .additions
+            .iter()
+            .map(|addition| addition.tag.clone())
+            .collect::<Vec<_>>();
+        if tags.is_empty() || self.tag_push_draft.target != Some(post.id) {
+            return;
+        }
+        match self.worker.send(Command::AddPostTags { id: post.id, tags }) {
+            Ok(()) => {
+                self.tag_push_draft.notice = None;
+                self.tag_push_inflight = Some(post.id);
+                self.status = format!("updating tags on post {}", post.id);
+            }
+            Err(err) => {
+                let message = format!("start tag push: {err:#}");
+                self.tag_push_draft.notice = Some(TagPushNotice::Fault(message.clone()));
+                self.status = message;
+            }
         }
     }
 

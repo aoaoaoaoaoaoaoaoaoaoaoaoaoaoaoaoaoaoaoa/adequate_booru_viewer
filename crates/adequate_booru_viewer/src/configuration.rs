@@ -658,7 +658,10 @@ mod tests {
         assert_eq!(configuration.danbooru, legacy.danbooru);
         assert_eq!(library.unfiled.len(), 1);
         assert_eq!(library.unfiled[0].name.as_str(), "beach");
-        assert_eq!(library.unfiled[0].query, query);
+        assert_eq!(
+            crate::filter_expression::render(&library.unfiled[0].query)?,
+            crate::filter_expression::render(&query)?
+        );
         Ok(())
     }
 

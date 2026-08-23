@@ -5,4 +5,4 @@ This repo inherits the canonical Rust style doctrine:
 Local sharpening: this is a fast native reference-search tool, not a web app.
 Keep the durable booru index in XDG data, keep media bytes in XDG cache, and
 keep the mirror anonymous. Authenticated mutations must be optional,
-user-initiated capabilities; credentials stay outside config and durable state.
+user-initiated capabilities; secret bytes stay outside config and durable state.

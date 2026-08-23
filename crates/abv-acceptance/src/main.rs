@@ -6,7 +6,7 @@ use std::{
 
 use adequate_booru_viewer::{
     index::Index,
-    model::{Harvest, Kin, PostId, PostRecord, Rating, Tag},
+    model::{Harvest, Kin, PostId, PostRecord, Rating, Tag, TagHint, TagKind},
 };
 use egui_tester::{
     AppCommand, Application, Backend, Button, Condition, Error, Frame, Graphics, Key, Modifiers,
@@ -58,6 +58,8 @@ fn main() -> Result<()> {
         if cli.smoke {
             smoke(&harness, cli.backend)
         } else {
+            query_completion(&harness)?;
+            reset_durable_state(testbed)?;
             keyboard_contract(&harness)?;
             reset_durable_state(testbed)?;
             water_persists(&harness)?;
@@ -69,6 +71,34 @@ fn main() -> Result<()> {
             Ok(())
         }
     })
+}
+
+fn query_completion(harness: &Harness<'_>) -> Result<()> {
+    let app = harness.launch(true)?;
+    let mut story = harness.story(&app)?;
+    let _posts = story.wait(Condition::new(
+        "seeded tag bank ready for query completion",
+        |state: &Observation| state.result_posts == 2,
+    ))?;
+    let _focused = story
+        .chord(Modifiers::ALT, Key::Character('f'))?
+        .until(Condition::new(
+            "query entry focused for completion",
+            |state: &Observation| state.text_edit_focused,
+        ))?;
+    let _typed = story.type_text("so")?.next_frame()?;
+    let mut focus: Probe<Observation> = app.witness()?.typed();
+    let _first = focus.wait_anchor(&app, "query-completion:soft_focus", WAIT)?;
+    let _candidate = focus.wait_anchor(&app, "query-completion:solo", WAIT)?;
+    let _cycled = story.key(Key::Tab)?.next_frame()?;
+    let _chosen = story.key(Key::Return)?.next_frame()?;
+    let _atom = focus.wait_anchor(&app, "atom:solo", WAIT)?;
+    let _focused = story.click("field:tag-entry")?.next_frame()?;
+    let _typed = story.type_text("soft")?.next_frame()?;
+    let _candidate = focus.wait_anchor(&app, "query-completion:soft_focus", WAIT)?;
+    let _chosen = story.click("query-completion:soft_focus")?.next_frame()?;
+    let _atom = focus.wait_anchor(&app, "atom:soft_focus", WAIT)?;
+    app.terminate()
 }
 
 #[derive(Debug, Deserialize)]
@@ -654,6 +684,27 @@ fn native_effects(harness: &Harness<'_>) -> Result<()> {
             toolbar.rect, tag_drawer.rect
         ),
     )?;
+    let _entry_ready = focus.wait_anchor(&app, "field:tag-push", WAIT)?;
+    let _focused = story.click("field:tag-push")?.next_frame()?;
+    let _typed = story.type_text("so")?.next_frame()?;
+    let _first = focus.wait_anchor(&app, "push-completion:soft_focus", WAIT)?;
+    let _completion = focus.wait_anchor(&app, "push-completion:solo", WAIT)?;
+    let _cycled = story.key(Key::Tab)?.next_frame()?;
+    let _staged = story.key(Key::Return)?.next_frame()?;
+    let _pending = focus.wait_anchor(&app, "tag-push:pending:solo", WAIT)?;
+    let _focused = story.click("field:tag-push")?.next_frame()?;
+    let _typed = story.type_text("soft")?.next_frame()?;
+    let _completion = focus.wait_anchor(&app, "push-completion:soft_focus", WAIT)?;
+    let _staged = story.click("push-completion:soft_focus")?.next_frame()?;
+    let _pending = focus.wait_anchor(&app, "tag-push:pending:soft_focus", WAIT)?;
+    let _pushed = story.click("tag-push:export")?.next_frame()?;
+    let _fault = focus.wait_anchor(&app, "tag-push:fault", WAIT)?;
+    let _pending = focus.wait_anchor(&app, "tag-push:pending:solo", WAIT)?;
+    if let Some(artifacts) = harness.artifacts {
+        story
+            .capture()?
+            .save_png(artifacts.join("abv-tag-push-fault.png"))?;
+    }
     let _tags = story.key(Key::Character('t'))?.until(Condition::new(
         "viewer tag drawer closed",
         |state: &Observation| !state.viewer_tags_open,
@@ -738,6 +789,23 @@ fn seed(testbed: &Testbed) -> Result<()> {
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let mut next_tags = tags.clone();
+    next_tags.push(Tag::forge("solo").ok_or_else(|| Error::Verdict {
+        detail: "invalid acceptance completion tag `solo`".to_owned(),
+    })?);
+    next_tags.push(Tag::forge("soft_focus").ok_or_else(|| Error::Verdict {
+        detail: "invalid acceptance completion tag `soft_focus`".to_owned(),
+    })?);
+    let hints = tags
+        .iter()
+        .cloned()
+        .map(|tag| TagHint::new(tag, TagKind::General))
+        .collect::<Vec<_>>();
+    let next_hints = next_tags
+        .iter()
+        .cloned()
+        .map(|tag| TagHint::new(tag, TagKind::General))
+        .collect::<Vec<_>>();
     index
         .absorb_harvest(&[
             Harvest {
@@ -750,7 +818,7 @@ fn seed(testbed: &Testbed) -> Result<()> {
                     height: 480,
                     created_at: "2026-08-11T00:00:00Z".to_owned(),
                     tags: tags.clone(),
-                    tag_hints: Vec::new(),
+                    tag_hints: hints,
                     preview_url: Some("https://example.test/reference.jpg".to_owned()),
                     thumb_360_url: None,
                     thumb_720_url: None,
@@ -772,8 +840,8 @@ fn seed(testbed: &Testbed) -> Result<()> {
                     width: 640,
                     height: 480,
                     created_at: "2026-08-10T00:00:00Z".to_owned(),
-                    tags,
-                    tag_hints: Vec::new(),
+                    tags: next_tags,
+                    tag_hints: next_hints,
                     preview_url: Some("https://example.test/next-reference.jpg".to_owned()),
                     thumb_360_url: None,
                     thumb_720_url: None,
