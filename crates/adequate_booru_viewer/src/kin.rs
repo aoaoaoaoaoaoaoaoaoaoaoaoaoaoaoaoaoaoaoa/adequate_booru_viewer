@@ -515,8 +515,10 @@ fn decode_children(bytes: &[u8]) -> Result<Vec<PostId>> {
         bail!("malformed kin child list of {} bytes", bytes.len());
     }
     Ok(bytes
-        .chunks_exact(SLOT_BYTES)
-        .map(|word| PostId(u32::from_le_bytes([word[0], word[1], word[2], word[3]])))
+        .as_chunks::<SLOT_BYTES>()
+        .0
+        .iter()
+        .map(|word| PostId(u32::from_le_bytes(*word)))
         .collect())
 }
 

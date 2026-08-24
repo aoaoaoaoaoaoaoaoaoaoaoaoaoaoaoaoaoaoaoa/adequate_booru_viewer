@@ -1137,7 +1137,7 @@ impl Bayonet {
             };
             let from = origin + parent_center + egui::vec2(0.0, tile * 0.5);
             let to = origin + child_center - egui::vec2(0.0, tile * 0.5);
-            let elbow = (from.y + to.y) * 0.5;
+            let elbow = f32::midpoint(from.y, to.y);
             for segment in [
                 [from, egui::pos2(from.x, elbow)],
                 [egui::pos2(from.x, elbow), egui::pos2(to.x, elbow)],
@@ -1544,7 +1544,7 @@ fn place_branch(
         });
         let first = span.next().unwrap_or(0.0);
         let last = span.last().unwrap_or(first);
-        (first + last) * 0.5
+        f32::midpoint(first, last)
     };
     let y = level as f32 * (tile + gap_y) + tile * 0.5;
     let _old = centers.insert(id, egui::vec2(x, y));

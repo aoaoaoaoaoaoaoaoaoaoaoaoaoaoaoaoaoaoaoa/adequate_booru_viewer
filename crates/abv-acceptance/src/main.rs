@@ -20,6 +20,16 @@ const SESSION_STATE: &str = "xdg/state/adequate_booru_viewer/slate.toml";
 const BROWSER_RECORD: &str = "effects/danbooru-url";
 const EFFECT_POST: u32 = 9_000_001;
 const NEXT_POST: u32 = 9_000_000;
+const TAIL_POST: u32 = 8_999_995;
+const FIXTURE_POSTS: [(u32, i32, u32); 7] = [
+    (EFFECT_POST, 42, 7),
+    (NEXT_POST, 41, 6),
+    (8_999_999, 40, 5),
+    (8_999_998, 39, 4),
+    (8_999_997, 38, 3),
+    (8_999_996, 37, 2),
+    (TAIL_POST, 36, 1),
+];
 const VIEWER_TOOLBAR: &str = "viewer:toolbar";
 const VIEWER_TAG_DRAWER: &str = "viewer:tag-drawer";
 const WAIT: Duration = Duration::from_secs(5);
@@ -78,7 +88,7 @@ fn query_completion(harness: &Harness<'_>) -> Result<()> {
     let mut story = harness.story(&app)?;
     let _posts = story.wait(Condition::new(
         "seeded tag bank ready for query completion",
-        |state: &Observation| state.result_posts == 2,
+        |state: &Observation| state.result_posts == FIXTURE_POSTS.len(),
     ))?;
     let _focused = story
         .chord(Modifiers::ALT, Key::Character('f'))?
@@ -236,6 +246,25 @@ fn smoke_wayland(harness: &Harness<'_>) -> Result<()> {
 fn water_persists(harness: &Harness<'_>) -> Result<()> {
     let app = harness.launch(true)?;
     let mut story = harness.story(&app)?;
+    let _posts = story.wait(Condition::new(
+        "full fixture row ready",
+        |state: &Observation| state.result_posts == FIXTURE_POSTS.len(),
+    ))?;
+    let content = story.anchor("gallery:content")?;
+    let gutter = story.anchor("gallery:screw-gutter")?;
+    let tail = story.anchor(format!("tile:{TAIL_POST}"))?;
+    // ScrewScroll's gutter is outside `inner_rect`; virtualized tile geometry
+    // must be calculated from that content span before the row is allocated.
+    demand(
+        tail.rect[2] <= content.rect[2],
+        "gallery's final tile entered the screw-scroll gutter",
+    )?;
+    let frame = story.capture()?;
+    let outer_gap = f64::from(frame.width()) - f64::from(gutter.rect[2]);
+    demand(
+        (0.0..=1.0).contains(&outer_gap),
+        format!("screw-scroll gutter left a {outer_gap:.2}px outer gap"),
+    )?;
     let initial = story.wait(water_is("dry"))?;
     demand(
         initial.state.filter == "harmless screenshot",
@@ -301,7 +330,7 @@ fn viewer_persists(harness: &Harness<'_>) -> Result<()> {
     let mut story = harness.story(&app)?;
     let _posts = story.wait(Condition::new(
         "seeded posts ready for viewer restoration",
-        |state: &Observation| state.result_posts == 2,
+        |state: &Observation| state.result_posts == FIXTURE_POSTS.len(),
     ))?;
     let tile = story.anchor(format!("tile:{EFFECT_POST}"))?;
     let (x, y) = tile.center();
@@ -574,7 +603,7 @@ fn native_effects(harness: &Harness<'_>) -> Result<()> {
     let mut story = harness.story(&app)?;
     let _post = story.wait(Condition::new(
         "seeded reference post visible",
-        |state: &Observation| state.result_posts == 2,
+        |state: &Observation| state.result_posts == FIXTURE_POSTS.len(),
     ))?;
 
     let _focused = story
@@ -769,7 +798,7 @@ fn water_is(expected: &'static str) -> Condition<Observation> {
 }
 
 fn visible(frame: &Frame) -> bool {
-    let pixels = frame.rgba().chunks_exact(4);
+    let pixels = frame.rgba().as_chunks::<4>().0.iter();
     let total = pixels.len();
     let painted = pixels.filter(|pixel| pixel[..3] != [0, 0, 0]).count();
     painted > total / 4
@@ -806,55 +835,42 @@ fn seed(testbed: &Testbed) -> Result<()> {
         .cloned()
         .map(|tag| TagHint::new(tag, TagKind::General))
         .collect::<Vec<_>>();
+    let harvests = FIXTURE_POSTS.map(|(id, score, favs)| {
+        let completion = id == NEXT_POST;
+        Harvest {
+            post: PostRecord {
+                id: PostId(id),
+                rating: Rating::General,
+                score,
+                favs,
+                width: 640,
+                height: 480,
+                created_at: "2026-08-11T00:00:00Z".to_owned(),
+                tags: if completion {
+                    next_tags.clone()
+                } else {
+                    tags.clone()
+                },
+                tag_hints: if completion {
+                    next_hints.clone()
+                } else {
+                    hints.clone()
+                },
+                preview_url: Some(format!("https://example.test/reference-{id}.jpg")),
+                thumb_360_url: None,
+                thumb_720_url: None,
+                large_url: None,
+                file_url: None,
+            },
+            kin: Kin {
+                id: PostId(id),
+                parent: None,
+                has_children: id == EFFECT_POST,
+            },
+        }
+    });
     index
-        .absorb_harvest(&[
-            Harvest {
-                post: PostRecord {
-                    id: PostId(EFFECT_POST),
-                    rating: Rating::General,
-                    score: 42,
-                    favs: 7,
-                    width: 640,
-                    height: 480,
-                    created_at: "2026-08-11T00:00:00Z".to_owned(),
-                    tags: tags.clone(),
-                    tag_hints: hints,
-                    preview_url: Some("https://example.test/reference.jpg".to_owned()),
-                    thumb_360_url: None,
-                    thumb_720_url: None,
-                    large_url: None,
-                    file_url: None,
-                },
-                kin: Kin {
-                    id: PostId(EFFECT_POST),
-                    parent: None,
-                    has_children: true,
-                },
-            },
-            Harvest {
-                post: PostRecord {
-                    id: PostId(NEXT_POST),
-                    rating: Rating::General,
-                    score: 41,
-                    favs: 6,
-                    width: 640,
-                    height: 480,
-                    created_at: "2026-08-10T00:00:00Z".to_owned(),
-                    tags: next_tags,
-                    tag_hints: next_hints,
-                    preview_url: Some("https://example.test/next-reference.jpg".to_owned()),
-                    thumb_360_url: None,
-                    thumb_720_url: None,
-                    large_url: None,
-                    file_url: None,
-                },
-                kin: Kin {
-                    id: PostId(NEXT_POST),
-                    parent: None,
-                    has_children: false,
-                },
-            },
-        ])
+        .absorb_harvest(&harvests)
         .map_err(|error| Error::Verdict {
             detail: format!("seed acceptance index: {error:#}"),
         })?;

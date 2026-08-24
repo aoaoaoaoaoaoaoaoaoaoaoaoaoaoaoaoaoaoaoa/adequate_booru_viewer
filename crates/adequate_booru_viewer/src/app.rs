@@ -1764,7 +1764,8 @@ impl Bayonet {
     }
 
     fn grid(&mut self, ui: &mut egui::Ui) -> bool {
-        let width = ui.available_width().max(MIN_TILE_EDGE);
+        let surface_width = ui.available_width().max(MIN_TILE_EDGE);
+        let width = chrome::ScrewScroll::content_width(surface_width);
         let max_cols = (((width + GAP) / (MIN_TILE_EDGE + GAP)) as usize).max(1);
         let cols = usize::from(self.images_per_row.max(1)).min(max_cols);
         self.gallery_columns = cols;
@@ -1798,7 +1799,7 @@ impl Bayonet {
         });
         let scroll = chrome::ScrewScroll::vertical()
             .id_salt("gallery-results")
-            .max_width(width)
+            .max_width(surface_width)
             .auto_shrink([false, false]);
         let scroll = if let Some(offset) = offset {
             scroll.vertical_scroll_offset(offset)
@@ -1819,6 +1820,15 @@ impl Bayonet {
                 });
             }
         });
+        crate::probe_anchor!(ui, "gallery:content", scroll.inner_rect);
+        crate::probe_anchor!(
+            ui,
+            "gallery:screw-gutter",
+            egui::Rect::from_min_max(
+                scroll.inner_rect.right_top(),
+                scroll.inner_rect.right_bottom() + egui::vec2(surface_width - width, 0.0),
+            )
+        );
         self.gallery_scroll_offset = scroll.state.offset.y;
         if posts.is_empty() {
             self.empty_gallery(ui, arena);
@@ -2778,9 +2788,13 @@ impl Bayonet {
         self.tag_palette_overlay(&ctx);
         self.absorb_tag_menu_wheel(&ctx);
         let mut menu_opened = false;
-        let _center = egui::CentralPanel::default().show(ui, |ui| {
-            menu_opened = self.grid(ui);
-        });
+        let mut center_frame = egui::Frame::central_panel(ui.style());
+        center_frame.inner_margin.right = 1;
+        let _center = egui::CentralPanel::default()
+            .frame(center_frame)
+            .show(ui, |ui| {
+                menu_opened = self.grid(ui);
+            });
         if self.tag_menu.post_id() != prior {
             self.tag_menu_rect = None;
             self.tag_palette_overlay(&ctx);
