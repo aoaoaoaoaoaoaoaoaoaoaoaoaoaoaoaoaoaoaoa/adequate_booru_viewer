@@ -17,7 +17,7 @@ and no, it's not an organizer.
 
 ### install
 
-linux (rust 1.96+):
+linux (Rust 1.98.0+):
 
 ```sh
 cargo install adequate_booru_viewer   # gives you the `abv` binary

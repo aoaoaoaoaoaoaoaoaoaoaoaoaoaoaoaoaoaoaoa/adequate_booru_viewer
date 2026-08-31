@@ -192,17 +192,15 @@ fn viewer_title_bar(
             ui.set_min_width(ui.available_width());
             let _row = ui.horizontal(|ui| {
                 let link = ui.hyperlink_to(
-                    egui::RichText::new(viewer_id_date(post))
-                        .size(13.0)
-                        .strong(),
+                    chrome::TypeRole::Label.text(viewer_id_date(post)).strong(),
                     crate::booru::post_url(post.id),
                 );
                 crate::probe_anchor!(ui, format!("danbooru:{}", post.id.0), link.interact_rect);
                 record_control(ui, abv_contract::ViewerControl::Danbooru, &link);
                 let _link = link.on_hover_text("open on Danbooru");
                 let _meta = ui.label(
-                    egui::RichText::new(format!("score {}  fav {}", post.score, post.favs))
-                        .size(13.0)
+                    chrome::TypeRole::Label
+                        .text(format!("score {}  fav {}", post.score, post.favs))
                         .strong()
                         .color(chrome::TEXT),
                 );

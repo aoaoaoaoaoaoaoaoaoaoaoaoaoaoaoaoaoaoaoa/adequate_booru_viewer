@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use eternalist_apps::{
-    command_guide::{GuideGesture, GuideSection},
+    command_guide::{GuideGesture, GuideGroup},
     commands::{
         CommandCanon, CommandScope, CommandSpec, SETTINGS_SHORTCUTS, Shortcut, ShortcutKey,
         ShortcutModifiers,
@@ -291,25 +291,23 @@ const APPLICATION_GESTURES: [GuideGesture; 1] = [GuideGesture::new(
     &SETTINGS_SHORTCUTS,
 )];
 
-const INSPECTOR_GUIDE_GROUP: GuideSection = GuideSection::new("INSPECTOR", &INSPECTOR_GESTURES);
-const QUERY_GUIDE_GROUP: GuideSection = GuideSection::new("REFERENCE QUERY", &QUERY_GESTURES);
-const GALLERY_GUIDE_GROUP: GuideSection = GuideSection::new("GALLERY", &GALLERY_GESTURES);
-const IMAGE_NAVIGATION_GUIDE_GROUP: GuideSection =
-    GuideSection::new("NAVIGATION", &IMAGE_NAVIGATION_GESTURES);
-const FAMILY_TREE_GUIDE_GROUP: GuideSection =
-    GuideSection::new("FAMILY TREE", &FAMILY_TREE_GESTURES);
-const APPLICATION_GUIDE_GROUP: GuideSection =
-    GuideSection::new("APPLICATION", &APPLICATION_GESTURES);
+const INSPECTOR_GUIDE_GROUP: GuideGroup = GuideGroup::new("INSPECTOR", &INSPECTOR_GESTURES);
+const QUERY_GUIDE_GROUP: GuideGroup = GuideGroup::new("REFERENCE QUERY", &QUERY_GESTURES);
+const GALLERY_GUIDE_GROUP: GuideGroup = GuideGroup::new("GALLERY", &GALLERY_GESTURES);
+const IMAGE_NAVIGATION_GUIDE_GROUP: GuideGroup =
+    GuideGroup::new("NAVIGATION", &IMAGE_NAVIGATION_GESTURES);
+const FAMILY_TREE_GUIDE_GROUP: GuideGroup = GuideGroup::new("FAMILY TREE", &FAMILY_TREE_GESTURES);
+const APPLICATION_GUIDE_GROUP: GuideGroup = GuideGroup::new("APPLICATION", &APPLICATION_GESTURES);
 
-pub const WORKBENCH_GUIDE_GROUPS: [GuideSection; 4] = [
+pub const WORKBENCH_GUIDE_GROUPS: [GuideGroup; 4] = [
     INSPECTOR_GUIDE_GROUP,
     QUERY_GUIDE_GROUP,
     GALLERY_GUIDE_GROUP,
     APPLICATION_GUIDE_GROUP,
 ];
-pub const IMAGE_VIEWER_GUIDE_GROUPS: [GuideSection; 2] =
+pub const IMAGE_VIEWER_GUIDE_GROUPS: [GuideGroup; 2] =
     [IMAGE_NAVIGATION_GUIDE_GROUP, APPLICATION_GUIDE_GROUP];
-pub const FAMILY_VIEWER_GUIDE_GROUPS: [GuideSection; 2] =
+pub const FAMILY_VIEWER_GUIDE_GROUPS: [GuideGroup; 2] =
     [FAMILY_TREE_GUIDE_GROUP, APPLICATION_GUIDE_GROUP];
 
 pub fn canon() -> &'static CommandCanon<Edict, Context> {

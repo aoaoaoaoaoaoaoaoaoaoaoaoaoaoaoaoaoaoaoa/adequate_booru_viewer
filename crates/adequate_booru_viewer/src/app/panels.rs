@@ -120,7 +120,7 @@ impl Bayonet {
         add: impl FnOnce(&mut Self, &mut egui::Ui),
     ) {
         let open = self.panel_folds.get(id).copied().unwrap_or(default_open);
-        let section = panels.section(ui, id, title, open, |ui| add(self, ui));
+        let section = panels.panel(ui, id, title, open, |ui| add(self, ui));
         crate::witness::response(ui, abv_contract::Target::Panel(id), &section.header);
         if let Some(wake) = section.wake.as_ref() {
             let _prior = self

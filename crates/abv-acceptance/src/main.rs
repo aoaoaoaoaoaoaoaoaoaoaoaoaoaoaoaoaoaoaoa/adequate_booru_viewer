@@ -10,7 +10,7 @@ use adequate_booru_viewer::{
 };
 use egui_tester::{
     AppCommand, Application, Backend, Button, Condition, Error, Frame, Graphics, Key, Modifiers,
-    Network, PixelRegion, Probe, ReactionBudget, Result, Story, Testbed, TestbedBuilder,
+    Motion, Network, PixelRegion, Probe, ReactionBudget, Result, Story, Testbed, TestbedBuilder,
     WaylandConfig, WindowQuery, X11Config, demand,
 };
 use serde::Deserialize;
@@ -448,13 +448,21 @@ fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
         !quarantined.state.mirror_active,
         "settings story did not inherit the paused mirror projection",
     )?;
-    let prefetch = story.anchor("eternalist.settings.prefetch_on_hover")?;
+    let prefetch = story.anchor("eternalist.settings.entry/prefetch_on_hover")?;
     let (x, y) = prefetch.center();
     let toggled = story.session().click(x, y, Button::Primary)?;
     let _disabled = story.reaction(toggled).until(Condition::new(
         "hover prefetch disabled",
         |state: &Observation| !state.prefetch_on_hover,
     ))?;
+    let _font_rail = story
+        .tap(
+            "eternalist.settings.entry/font_scale",
+            Button::Primary,
+            Motion::default(),
+        )?
+        .next_frame()?;
+    let _extra_large = story.key(Key::End)?.next_frame()?;
     let _closed = story
         .chord(Modifiers::CTRL, Key::Character(','))?
         .until(Condition::new(
@@ -465,7 +473,10 @@ fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
         Ok(harness
             .testbed
             .read_private_to_string("xdg/config/adequate_booru_viewer/config.toml")
-            .is_ok_and(|text| text.contains("prefetch_on_hover = false")))
+            .is_ok_and(|text| {
+                text.contains("prefetch_on_hover = false")
+                    && text.contains("font_scale = \"extra_large\"")
+            }))
     })?;
 
     let _focused = story

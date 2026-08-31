@@ -1,4 +1,5 @@
 use anyhow::{Context as _, Result};
+use brass_poolrooms::chrome::FontScale;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{
     fmt::{Display, Formatter},
@@ -17,6 +18,7 @@ use crate::{
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Configuration {
+    pub font_scale: FontScale,
     pub prefetch_on_hover: bool,
     pub mirror: MirrorConfig,
     pub danbooru: DanbooruConfig,
@@ -25,6 +27,7 @@ pub struct Configuration {
 impl Default for Configuration {
     fn default() -> Self {
         Self {
+            font_scale: FontScale::Standard,
             prefetch_on_hover: true,
             mirror: MirrorConfig::default(),
             danbooru: DanbooruConfig::default(),
@@ -225,6 +228,7 @@ impl FilterLibrary {
 #[derive(Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct LegacyConfiguration {
+    font_scale: FontScale,
     prefetch_on_hover: bool,
     mirror: MirrorConfig,
     danbooru: DanbooruConfig,
@@ -236,6 +240,7 @@ struct LegacyConfiguration {
 #[derive(Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct CombinedConfiguration {
+    font_scale: FontScale,
     prefetch_on_hover: bool,
     mirror: MirrorConfig,
     danbooru: DanbooruConfig,
@@ -248,6 +253,7 @@ struct CombinedConfiguration {
 impl Default for CombinedConfiguration {
     fn default() -> Self {
         Self {
+            font_scale: FontScale::Standard,
             prefetch_on_hover: true,
             mirror: MirrorConfig::default(),
             danbooru: DanbooruConfig::default(),
@@ -266,6 +272,7 @@ impl From<LegacyConfiguration> for ConfigurationMigration {
     fn from(legacy: LegacyConfiguration) -> Self {
         Self {
             configuration: Configuration {
+                font_scale: legacy.font_scale,
                 prefetch_on_hover: legacy.prefetch_on_hover,
                 mirror: legacy.mirror,
                 danbooru: legacy.danbooru,
@@ -279,6 +286,7 @@ impl From<CombinedConfiguration> for ConfigurationMigration {
     fn from(combined: CombinedConfiguration) -> Self {
         Self {
             configuration: Configuration {
+                font_scale: combined.font_scale,
                 prefetch_on_hover: combined.prefetch_on_hover,
                 mirror: combined.mirror,
                 danbooru: combined.danbooru,
@@ -294,6 +302,7 @@ impl From<CombinedConfiguration> for ConfigurationMigration {
 impl Default for LegacyConfiguration {
     fn default() -> Self {
         Self {
+            font_scale: FontScale::Standard,
             prefetch_on_hover: true,
             mirror: MirrorConfig::default(),
             danbooru: DanbooruConfig::default(),
@@ -703,6 +712,7 @@ mod tests {
         let mut query = Query::default();
         assert!(query.push_atom(&[], tag("solo")?, TagPolarity::Positive));
         let legacy = LegacyConfiguration {
+            font_scale: FontScale::Standard,
             prefetch_on_hover: false,
             mirror: MirrorConfig {
                 policy: MirrorPolicy::Paused,
@@ -761,6 +771,7 @@ mod tests {
         let mut query = Query::default();
         assert!(query.push_atom(&[], tag("solo")?, TagPolarity::Positive));
         let combined = CombinedConfiguration {
+            font_scale: FontScale::Standard,
             prefetch_on_hover: false,
             mirror: MirrorConfig {
                 policy: MirrorPolicy::Paused,

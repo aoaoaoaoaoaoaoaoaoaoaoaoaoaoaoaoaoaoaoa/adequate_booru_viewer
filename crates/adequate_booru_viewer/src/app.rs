@@ -360,6 +360,7 @@ pub struct Bayonet {
     danbooru_account: AccountReadiness,
     tag_push_draft: TagPushDraft,
     tag_push_inflight: Option<PostId>,
+    font_scale: chrome::FontScale,
     prefetch_on_hover: bool,
     mirror_policy: MirrorPolicy,
     prefetched: HashSet<PostId>,
@@ -446,6 +447,7 @@ impl Bayonet {
             CONFIG_SETTLE,
         )?;
         let configuration_snapshot = configuration.live().clone();
+        chrome::set_font_scale(ctx, configuration_snapshot.font_scale);
         let mut settings = SettingsSheet::default();
         if configuration.fault().is_some() {
             settings.require_attention(ctx);
@@ -663,6 +665,7 @@ impl Bayonet {
             danbooru_account,
             tag_push_draft: TagPushDraft::default(),
             tag_push_inflight: None,
+            font_scale: configuration_snapshot.font_scale,
             prefetch_on_hover: configuration_snapshot.prefetch_on_hover,
             mirror_policy,
             prefetched: HashSet::new(),
@@ -738,8 +741,9 @@ impl Bayonet {
     pub fn pulse(&mut self, ui: &mut egui::Ui) {
         crate::probe_reset!(ui.ctx());
         let ctx = ui.ctx().clone();
+        chrome::set_font_scale(&ctx, self.configuration.live().font_scale);
         if self.configuration.absorb() && self.configuration.fault().is_none() {
-            self.adopt_configuration();
+            self.adopt_configuration(&ctx);
         }
         if self.configuration.fault().is_some() {
             self.settings.require_attention(&ctx);
@@ -2170,6 +2174,7 @@ impl Bayonet {
 
     fn configuration_projection(&self) -> Configuration {
         Configuration {
+            font_scale: self.font_scale,
             prefetch_on_hover: self.prefetch_on_hover,
             mirror: MirrorConfig {
                 policy: self.mirror_policy,
@@ -2249,8 +2254,10 @@ impl Bayonet {
         }
     }
 
-    fn adopt_configuration(&mut self) {
+    fn adopt_configuration(&mut self, ctx: &egui::Context) {
         let configuration = self.configuration.live().clone();
+        self.font_scale = configuration.font_scale;
+        chrome::set_font_scale(ctx, self.font_scale);
         self.prefetch_on_hover = configuration.prefetch_on_hover;
         self.install_mirror_policy(configuration.mirror.policy);
     }
@@ -2260,6 +2267,7 @@ impl Bayonet {
         let fault = self.configuration.fault().map(ToString::to_string);
         let mut prefetch = self.prefetch_on_hover;
         let mut mirror = self.mirror_policy.active();
+        let mut font_scale = self.font_scale;
         let file = fault.as_deref().map_or_else(
             || SettingsFile::ready(&path),
             |message| SettingsFile::fault(&path, message),
@@ -2268,13 +2276,20 @@ impl Bayonet {
             .reloading(self.configuration.reload_pending())
             .reloadable(self.configuration.fault().is_some() || self.configuration.settled());
         let mut changed = false;
+        let mut font_scale_changed = false;
         let response = self.settings.show(ctx, &mut self.water, file, |settings| {
-            settings.section("BROWSING");
+            settings.group("APPEARANCE");
+            font_scale_changed |= settings.font_scale(&mut font_scale);
+            settings.group("BROWSING");
             changed |= settings.boolean(PREFETCH_SETTING, &mut prefetch);
-            settings.section("INDEX");
+            settings.group("INDEX");
             changed |= settings.boolean(MIRROR_SETTING, &mut mirror);
         });
-        if changed {
+        if changed || font_scale_changed {
+            self.font_scale = font_scale;
+            if font_scale_changed {
+                chrome::set_font_scale(ctx, font_scale);
+            }
             self.prefetch_on_hover = prefetch;
             self.install_mirror_policy(if mirror {
                 MirrorPolicy::Active
@@ -2655,7 +2670,7 @@ fn paint_tile_badge(
     color: egui::Color32,
     corner: BadgeCorner,
 ) {
-    let font = egui::FontId::new(13.0, egui::FontFamily::Monospace);
+    let font = chrome::spatial_font(ui.ctx(), 13.0, egui::FontFamily::Monospace);
     let galley = ui.painter().layout_no_wrap(text, font, color);
     let size = galley.size() + egui::vec2(12.0, 6.0);
     let (min, radius) = match corner {

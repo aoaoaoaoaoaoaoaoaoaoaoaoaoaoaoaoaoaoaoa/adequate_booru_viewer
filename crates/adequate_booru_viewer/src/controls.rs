@@ -15,8 +15,8 @@ pub fn plate_enabled(
     text: impl Into<String>,
     selected: bool,
 ) -> egui::Response {
-    let text = egui::RichText::new(text.into())
-        .size(13.0)
+    let text = chrome::TypeRole::Label
+        .text(text)
         .strong()
         .color(if selected { chrome::HOT } else { chrome::TEXT });
     let button = egui::Button::new(text).min_size(egui::vec2(24.0, 20.0));

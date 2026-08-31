@@ -274,21 +274,18 @@ dependencies = [
 
 [[package]]
 name = "brass_foundry"
-version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a6c7ba04561ff1b9f7f315954d9c162de58ba811c1f16b19150619aca7ee3c1"
+version = "0.14.6"
 
 [[package]]
 name = "brass_poolrooms"
-version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8ecf21d094247339ad1088c98d5ec24fd2b96e5e8b74d4c51a69b992ad27c2f"
+version = "0.14.6"
 dependencies = [
  "anyhow",
  "brass_foundry",
  "bytemuck",
  "egui",
  "egui-wgpu",
+ "serde",
  "web-time",
 ]
 
@@ -894,9 +891,7 @@ checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
 
 [[package]]
 name = "eternalist-apps"
-version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b136dbb9ae3d5551f2308155e812913766e6c8b19bde1c48406194f028d1c558"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "atomic-write-file",

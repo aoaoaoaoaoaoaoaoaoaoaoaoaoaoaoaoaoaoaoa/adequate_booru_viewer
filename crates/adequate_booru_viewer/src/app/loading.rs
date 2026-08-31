@@ -79,7 +79,7 @@ impl Bayonet {
             egui::Stroke::new(1.0_f32, chrome::EDGE_STRONG),
             egui::StrokeKind::Inside,
         );
-        let font = egui::FontId::new(36.0, egui::FontFamily::Proportional);
+        let font = chrome::spatial_font(ui.ctx(), 36.0, egui::FontFamily::Proportional);
         let text = state.label();
         let galley = painter.layout_no_wrap(text.to_owned(), font.clone(), chrome::HOT);
         let at = rect.center() - galley.size() * 0.5;

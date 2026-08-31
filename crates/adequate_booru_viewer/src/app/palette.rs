@@ -551,7 +551,11 @@ fn definition_tooltip(
         Some(TagDefinitionMemo::Ready(Some(definition))) => definition.title.as_str(),
         _ => tag.as_str(),
     };
-    let _title = ui.label(tag_chroma::text(title, kind).strong().size(14.0));
+    let _title = ui.label(
+        tag_chroma::text(title, kind)
+            .text_style(chrome::TypeRole::Label.style())
+            .strong(),
+    );
     let _rule = ui.separator();
     match memo {
         None | Some(TagDefinitionMemo::Pending(_)) => {
