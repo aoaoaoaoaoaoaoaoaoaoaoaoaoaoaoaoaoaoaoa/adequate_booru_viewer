@@ -34,22 +34,22 @@ arboard = "3.6.1"
 base64 = "0.23.1"
 crossbeam-channel = "0.5.16"
 directories = "6.0.0"
-brass_poolrooms = "0.14.6"
+brass_poolrooms = "0.14.7"
 abv-contract = { path = "../abv-contract", version = "0.2.2" }
 egui = "=0.36.1"
 egui-wgpu = { version = "=0.36.1", default-features = false }
 egui-winit = { version = "=0.36.1", default-features = false, features = ["clipboard", "links"] }
-egui-tester-witness = { version = "0.9.7", optional = true, features = ["egui"] }
+egui-tester-witness = { version = "0.9.8", optional = true, features = ["egui"] }
 eternalist-apps = "0.9.4"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 memmap2 = "0.9.11"
-redb = "4.1.0"
+redb = "4.2.0"
 regex = "1.13.1"
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 roaring = "0.11.5"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", optional = true }
-toml = "1.1.4"
+toml = "1.1.5"
 tracing = "0.1.44"
 ureq = { version = "3.4.0", features = ["json"] }
 zune-core = "0.5.3"
