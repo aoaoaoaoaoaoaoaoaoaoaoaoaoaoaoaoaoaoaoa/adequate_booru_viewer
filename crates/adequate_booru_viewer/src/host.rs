@@ -1,6 +1,7 @@
-use crate::{app::Bayonet, application_paths::ApplicationPaths};
+use crate::app::Bayonet;
+use adequate_booru_viewer::application_paths::PRODUCT;
 use anyhow::Result;
-use eternalist_apps::{CrashProduct, CrashReportSpec, NativeApp, WindowSpec};
+use eternalist_apps::{NativeApp, ProductIdentity, WindowSpec};
 use std::time::Instant;
 
 pub fn run(ctx: egui::Context, pause_mirror: bool) -> Result<()> {
@@ -8,17 +9,10 @@ pub fn run(ctx: egui::Context, pause_mirror: bool) -> Result<()> {
 }
 
 impl NativeApp for Bayonet {
+    const PRODUCT: ProductIdentity = PRODUCT;
+    const RELEASE: &'static str = env!("CARGO_PKG_VERSION");
     const WINDOW: WindowSpec = WindowSpec::new("adequate booru viewer", [1_440.0, 920.0]);
-
-    fn crash_reports() -> Option<CrashReportSpec> {
-        ApplicationPaths::claim().ok().map(|paths| {
-            CrashReportSpec::new(
-                CrashProduct::BooruViewer,
-                env!("CARGO_PKG_VERSION"),
-                paths.state,
-            )
-        })
-    }
+    const CRASH_REPORTS: bool = true;
 
     fn draw(&mut self, ui: &mut egui::Ui) {
         self.pulse(ui);
@@ -32,10 +26,6 @@ impl NativeApp for Bayonet {
         Bayonet::service_deadline_reached(self, now)
     }
 
-    fn after_present(&mut self) -> bool {
-        false
-    }
-
     fn water(
         &mut self,
         ctx: &egui::Context,
@@ -43,13 +33,6 @@ impl NativeApp for Bayonet {
         tooltip_rects: &[egui::Rect],
     ) -> brass_poolrooms::water::Frame {
         self.water_frame(ctx, pixels_per_point, tooltip_rects)
-    }
-
-    fn register_gpu(
-        _renderer: &mut egui_wgpu::Renderer,
-        _device: &egui_wgpu::wgpu::Device,
-        _format: egui_wgpu::wgpu::TextureFormat,
-    ) {
     }
 
     #[cfg(feature = "egui-test")]

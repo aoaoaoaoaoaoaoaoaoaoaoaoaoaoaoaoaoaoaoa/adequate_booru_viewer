@@ -415,7 +415,7 @@ impl Bayonet {
             format!("crawl: {}", self.crawl_status),
             format!("families: {}", self.kin_status),
             format!("build: {}", env!("CARGO_PKG_VERSION")),
-            format!("data: {}", self.paths.data.display()),
+            format!("data: {}", self.paths.local_data.display()),
             format!("index: {}", self.paths.index_path().display()),
         ] {
             let _line = chrome::note(ui, line);

@@ -111,8 +111,8 @@ impl super::Bayonet {
                     let _guard = ui.checkbox(&mut agitation.poison_sweep, "poison sweep + reset");
                 });
                 section(ui, "BOUNDARIES", |ui| {
-                    knob(ui, "shelf reflection", &mut chemistry.r_panel, 0.0..=1.0);
-                    knob(ui, "panel shimmer", &mut chemistry.t_panel, 0.0..=1.0);
+                    knob(ui, "floor reflection", &mut chemistry.r_floor, 0.0..=1.0);
+                    knob(ui, "floor shimmer", &mut chemistry.t_floor, 0.0..=1.0);
                     knob(
                         ui,
                         "boundary softness px",

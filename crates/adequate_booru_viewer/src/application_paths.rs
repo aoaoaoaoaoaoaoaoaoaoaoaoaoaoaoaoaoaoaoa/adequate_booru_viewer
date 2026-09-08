@@ -1,80 +1,65 @@
-use anyhow::{Context as _, Result, bail};
-use directories::ProjectDirs;
-use std::path::{Path, PathBuf};
+use anyhow::{Context as _, Result};
+pub use eternalist_apps::ApplicationPaths;
+use eternalist_apps::ProductIdentity;
+use std::path::PathBuf;
 
-#[derive(Clone, Debug)]
-pub struct ApplicationPaths {
-    pub config: PathBuf,
-    pub data: PathBuf,
-    pub cache: PathBuf,
-    pub state: PathBuf,
+pub const PRODUCT: ProductIdentity =
+    ProductIdentity::declare(abv_contract::PRODUCT_IDENTIFIER, abv_contract::PRODUCT_NAME);
+
+/// Resolve the platform directories and create every root the viewer writes.
+pub fn claim() -> Result<ApplicationPaths> {
+    let paths = ApplicationPaths::claim(PRODUCT)?;
+    paths.prepare()?;
+    for path in [paths.media_dir(), paths.model_dir(), paths.debug_dir()] {
+        std::fs::create_dir_all(&path).with_context(|| format!("create {}", path.display()))?;
+    }
+    Ok(paths)
 }
 
-impl ApplicationPaths {
-    pub fn claim() -> Result<Self> {
-        let Some(dirs) = ProjectDirs::from("moe", "swarm", "adequate_booru_viewer") else {
-            bail!("could not resolve platform project directories");
-        };
-        // XDG_STATE_HOME on Linux; macOS/Windows fold state into data.
-        let state = dirs
-            .state_dir()
-            .map_or_else(|| dirs.data_local_dir().join("state"), Path::to_path_buf);
-        let paths = Self {
-            config: dirs.config_dir().to_path_buf(),
-            data: dirs.data_local_dir().to_path_buf(),
-            cache: dirs.cache_dir().to_path_buf(),
-            state,
-        };
-        paths.mkdir()?;
-        Ok(paths)
-    }
+/// The viewer's files beneath the platform directories.
+pub trait ViewerPaths {
+    fn session_state_path(&self) -> PathBuf;
+    fn index_path(&self) -> PathBuf;
+    fn favorites_path(&self) -> PathBuf;
+    fn config_path(&self) -> PathBuf;
+    fn filter_library_path(&self) -> PathBuf;
+    fn media_dir(&self) -> PathBuf;
+    fn model_dir(&self) -> PathBuf;
+    fn debug_dir(&self) -> PathBuf;
+}
 
-    pub fn session_state_path(&self) -> PathBuf {
+impl ViewerPaths for ApplicationPaths {
+    fn session_state_path(&self) -> PathBuf {
         // Filename is a durable compatibility boundary predating the type's
         // rectified name.
         self.state.join("slate.toml")
     }
 
-    pub fn index_path(&self) -> PathBuf {
-        self.data.join("index.redb")
+    fn index_path(&self) -> PathBuf {
+        self.local_data.join("index.redb")
     }
 
-    pub fn favorites_path(&self) -> PathBuf {
-        self.data.join("favorites.roar")
+    fn favorites_path(&self) -> PathBuf {
+        self.local_data.join("favorites.roar")
     }
 
-    pub fn config_path(&self) -> PathBuf {
+    fn config_path(&self) -> PathBuf {
         self.config.join("config.toml")
     }
 
-    pub fn filter_library_path(&self) -> PathBuf {
-        self.data.join("filters.toml")
+    fn filter_library_path(&self) -> PathBuf {
+        self.local_data.join("filters.toml")
     }
 
-    pub fn media_dir(&self) -> PathBuf {
+    fn media_dir(&self) -> PathBuf {
         self.cache.join("media")
     }
 
-    pub fn model_dir(&self) -> PathBuf {
-        self.data.join("models")
+    fn model_dir(&self) -> PathBuf {
+        self.local_data.join("models")
     }
 
-    pub fn debug_dir(&self) -> PathBuf {
+    fn debug_dir(&self) -> PathBuf {
         self.state.join("debug")
-    }
-
-    fn mkdir(&self) -> Result<()> {
-        for path in [
-            &self.config,
-            &self.data,
-            &self.cache,
-            &self.state,
-            &self.media_dir(),
-            &self.model_dir(),
-            &self.debug_dir(),
-        ] {
-            std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
-        }
-        Ok(())
     }
 }

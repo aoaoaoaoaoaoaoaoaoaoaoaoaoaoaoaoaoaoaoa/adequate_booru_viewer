@@ -2,6 +2,10 @@
 
 use std::{borrow::Cow, fmt};
 
+/// Reverse-DNS product identifier; the sole source of the viewer's platform and crash identity.
+pub const PRODUCT_IDENTIFIER: &str = "moe.eternalist.adequate-booru-viewer";
+/// Product display name.
+pub const PRODUCT_NAME: &str = "Adequate Booru Viewer";
 pub const UI_FINGERPRINT: &str = "abv.ui/4";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

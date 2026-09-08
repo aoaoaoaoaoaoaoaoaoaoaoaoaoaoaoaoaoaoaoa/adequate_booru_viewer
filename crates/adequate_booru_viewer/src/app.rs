@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    application_paths::ApplicationPaths,
+    application_paths::{self, ApplicationPaths, ViewerPaths as _},
     booru::TagDefinition,
     chrome,
     commands::{self, Edict},
@@ -431,7 +431,7 @@ impl Bayonet {
 
     pub fn open(ctx: &egui::Context, pause_mirror: bool) -> Result<Self> {
         startup("app.open.enter");
-        let paths = ApplicationPaths::claim()?;
+        let paths = application_paths::claim()?;
         startup("app.paths.claimed");
         let configuration_path = paths.config_path();
         let filter_library_path = paths.filter_library_path();
@@ -2279,7 +2279,7 @@ impl Bayonet {
         let mut font_scale_changed = false;
         let response = self.settings.show(ctx, &mut self.water, file, |settings| {
             settings.group("APPEARANCE");
-            font_scale_changed |= settings.font_scale(&mut font_scale);
+            font_scale_changed |= settings.font_size(&mut font_scale);
             settings.group("BROWSING");
             changed |= settings.boolean(PREFETCH_SETTING, &mut prefetch);
             settings.group("INDEX");

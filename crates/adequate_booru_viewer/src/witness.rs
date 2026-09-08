@@ -1,21 +1,4 @@
-use std::fmt::Display;
-
-#[inline]
-#[cfg(feature = "egui-test")]
-pub fn anchor(ui: &egui::Ui, name: impl Display, rect: egui::Rect) {
-    egui_tester_witness::egui::record(ui, name.to_string(), rect);
-}
-
-#[inline]
-pub fn response(ui: &egui::Ui, name: impl Display, response: &egui::Response) {
-    #[cfg(feature = "egui-test")]
-    egui_tester_witness::egui::record_response(ui, name.to_string(), response);
-    #[cfg(not(feature = "egui-test"))]
-    {
-        let _ = (ui, response);
-        drop(name);
-    }
-}
+pub use eternalist_apps::witness::{anchor, response};
 
 #[cfg(feature = "egui-test")]
 pub use active::{Settings, State};

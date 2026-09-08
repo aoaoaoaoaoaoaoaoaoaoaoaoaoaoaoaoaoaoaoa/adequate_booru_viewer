@@ -575,7 +575,13 @@ impl Camp {
 
     #[cfg(unix)]
     fn link_operator_data(&self) -> Result<()> {
-        let operator = ProjectDirs::from("moe", "swarm", APP)
+        let mut labels = abv_contract::PRODUCT_IDENTIFIER.split('.');
+        let (Some(qualifier), Some(organization), Some(application)) =
+            (labels.next(), labels.next(), labels.next())
+        else {
+            bail!("product identifier is not three labels");
+        };
+        let operator = ProjectDirs::from(qualifier, organization, application)
             .context("resolve operator ABV data for the wet demo")?;
         for name in ["index.redb", "favorites.roar", "models"] {
             let source = operator.data_local_dir().join(name);

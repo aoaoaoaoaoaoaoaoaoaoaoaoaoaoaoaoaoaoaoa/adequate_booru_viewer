@@ -36,7 +36,7 @@ media bytes remain disposable cache.
 
 optional post-tag editing uses a Danbooru login and an API key stored in a
 separate file. On Linux, add this to
-`~/.config/adequate_booru_viewer/config.toml`:
+`~/.config/adequate-booru-viewer/config.toml`:
 
 ```toml
 [danbooru.account]

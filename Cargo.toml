@@ -125,3 +125,8 @@ canonicalize_commands = [
 max_lines = 3000
 include = ["*.rs", "**/*.rs"]
 exclude = []
+
+[patch.crates-io]
+brass_poolrooms = { path = "../../../brass_poolrooms/.worktrees/cell-walls" }
+eternalist-apps = { path = "../../../eternalist_apps/.worktrees/cell-walls" }
+egui-tester-witness = { git = "https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/egui-tester", rev = "2411accb64b9c4012190d1bd0915d68113b8dcf1" }
