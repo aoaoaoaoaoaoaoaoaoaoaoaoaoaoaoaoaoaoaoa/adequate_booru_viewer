@@ -1,4 +1,6 @@
-pub use eternalist_apps::witness::{anchor, response};
+#[cfg(feature = "egui-test")]
+pub use eternalist_apps::witness::anchor;
+pub use eternalist_apps::witness::response;
 
 #[cfg(feature = "egui-test")]
 pub use active::{Settings, State};

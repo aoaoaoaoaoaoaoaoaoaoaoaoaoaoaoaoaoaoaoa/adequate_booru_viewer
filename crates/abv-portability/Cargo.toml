@@ -8,9 +8,9 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-abv-contract = { path = "../abv-contract", version = "0.2.3" }
+abv-contract = { path = "../abv-contract", version = "0.2.4" }
 anyhow = "1.0.104"
-egui-tester-witness = "0.9.9"
+egui-tester-witness = "0.9.11"
 serde_json = "1.0.151"
 tempfile = "3.27.0"
 
