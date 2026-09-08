@@ -16,7 +16,9 @@ use egui_tester::{
 use serde::Deserialize;
 
 const TITLE: &str = "adequate booru viewer";
-const SESSION_STATE: &str = "xdg/state/adequate_booru_viewer/slate.toml";
+fn session_state() -> String {
+    format!("xdg/state/{}/slate.toml", abv_contract::product_directory())
+}
 const BROWSER_RECORD: &str = "effects/danbooru-url";
 const EFFECT_POST: u32 = 9_000_001;
 const NEXT_POST: u32 = 9_000_000;
@@ -302,7 +304,7 @@ fn water_persists(harness: &Harness<'_>) -> Result<()> {
         || {
             Ok(harness
                 .testbed
-                .read_private_to_string(SESSION_STATE)
+                .read_private_to_string(session_state().as_str())
                 .is_ok_and(|text| text.contains("water = \"wet\"")))
         },
     )?;
@@ -342,7 +344,7 @@ fn viewer_persists(harness: &Harness<'_>) -> Result<()> {
     app.wait_until(WAIT, "open viewer identity to reach slate.toml", || {
         Ok(harness
             .testbed
-            .read_private_to_string(SESSION_STATE)
+            .read_private_to_string(session_state().as_str())
             .is_ok_and(|text| text.contains(&format!("post = {EFFECT_POST}"))))
     })?;
     app.terminate()?;
@@ -362,7 +364,7 @@ fn viewer_persists(harness: &Harness<'_>) -> Result<()> {
     restarted.wait_until(WAIT, "closed viewer to leave slate.toml", || {
         Ok(harness
             .testbed
-            .read_private_to_string(SESSION_STATE)
+            .read_private_to_string(session_state().as_str())
             .is_ok_and(|text| !text.contains("[viewer]")))
     })?;
     restarted.terminate()
@@ -472,7 +474,10 @@ fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
     app.wait_until(WAIT, "hover prefetch to reach config.toml", || {
         Ok(harness
             .testbed
-            .read_private_to_string("xdg/config/adequate_booru_viewer/config.toml")
+            .read_private_to_string(format!(
+                "xdg/config/{}/config.toml",
+                abv_contract::product_directory()
+            ))
             .is_ok_and(|text| {
                 text.contains("prefetch_on_hover = false")
                     && text.contains("font_scale = \"extra_large\"")
@@ -817,7 +822,8 @@ fn visible(frame: &Frame) -> bool {
 
 fn seed(testbed: &Testbed) -> Result<()> {
     reset_durable_state(testbed)?;
-    let data = testbed.create_private_dir("xdg/data/adequate_booru_viewer")?;
+    let data =
+        testbed.create_private_dir(format!("xdg/data/{}", abv_contract::product_directory()))?;
     let index = Index::open(&data.join("index.redb")).map_err(|error| Error::Verdict {
         detail: format!("create acceptance index: {error:#}"),
     })?;
@@ -891,16 +897,27 @@ fn seed(testbed: &Testbed) -> Result<()> {
 
 fn reset_durable_state(testbed: &Testbed) -> Result<()> {
     let _config = testbed.write_private(
-        "xdg/config/adequate_booru_viewer/config.toml",
+        format!(
+            "xdg/config/{}/config.toml",
+            abv_contract::product_directory()
+        ),
         ACCEPTANCE_CONFIG,
     )?;
     let _token = testbed.write_private(
-        "xdg/config/adequate_booru_viewer/danbooru.token",
+        format!(
+            "xdg/config/{}/danbooru.token",
+            abv_contract::product_directory()
+        ),
         b"acceptance-token\n",
     )?;
-    let _filters =
-        testbed.write_private("xdg/data/adequate_booru_viewer/filters.toml", DEMO_FILTERS)?;
-    let _session_state = testbed.write_private(SESSION_STATE, DEMO_SESSION_STATE)?;
+    let _filters = testbed.write_private(
+        format!(
+            "xdg/data/{}/filters.toml",
+            abv_contract::product_directory()
+        ),
+        DEMO_FILTERS,
+    )?;
+    let _session_state = testbed.write_private(session_state().as_str(), DEMO_SESSION_STATE)?;
     Ok(())
 }
 

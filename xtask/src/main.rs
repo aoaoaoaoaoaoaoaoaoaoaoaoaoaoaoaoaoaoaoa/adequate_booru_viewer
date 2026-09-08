@@ -12,7 +12,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const APP: &str = "adequate_booru_viewer";
 const WINDOW: &str = "adequate booru viewer";
 const DEMO: &str = "demo/wet";
 const DEFAULT_W: u32 = 1440;
@@ -562,15 +561,15 @@ impl Camp {
     }
 
     fn config_app(&self) -> PathBuf {
-        self.config_home().join(APP)
+        self.config_home().join(abv_contract::product_directory())
     }
 
     fn state_app(&self) -> PathBuf {
-        self.state_home().join(APP)
+        self.state_home().join(abv_contract::product_directory())
     }
 
     fn data_app(&self) -> PathBuf {
-        self.data_home().join(APP)
+        self.data_home().join(abv_contract::product_directory())
     }
 
     #[cfg(unix)]

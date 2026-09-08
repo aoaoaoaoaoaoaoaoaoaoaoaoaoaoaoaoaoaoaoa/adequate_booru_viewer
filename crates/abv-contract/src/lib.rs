@@ -6,6 +6,15 @@ use std::{borrow::Cow, fmt};
 pub const PRODUCT_IDENTIFIER: &str = "moe.eternalist.adequate-booru-viewer";
 /// Product display name.
 pub const PRODUCT_NAME: &str = "Adequate Booru Viewer";
+
+/// The identifier's last label: the platform directory name on Linux.
+#[must_use]
+pub fn product_directory() -> &'static str {
+    PRODUCT_IDENTIFIER
+        .rsplit('.')
+        .next()
+        .unwrap_or(PRODUCT_IDENTIFIER)
+}
 pub const UI_FINGERPRINT: &str = "abv.ui/4";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
