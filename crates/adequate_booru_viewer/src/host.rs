@@ -1,11 +1,13 @@
 use crate::app::Bayonet;
 use adequate_booru_viewer::application_paths::PRODUCT;
 use anyhow::Result;
-use eternalist_apps::{NativeApp, ProductIdentity, WindowSpec};
+use eternalist_apps::{Ingress, NativeApp, ProductIdentity, WindowSpec};
 use std::time::Instant;
 
-pub fn run(ctx: egui::Context, pause_mirror: bool) -> Result<()> {
-    eternalist_apps::run_with(ctx, |ctx| Bayonet::open(ctx, pause_mirror))
+pub fn run(ingress: Ingress, ctx: egui::Context, pause_mirror: bool) -> Result<()> {
+    eternalist_apps::run_with(ingress, ctx, |ctx, _ingress| {
+        Bayonet::open(ctx, pause_mirror)
+    })
 }
 
 impl NativeApp for Bayonet {

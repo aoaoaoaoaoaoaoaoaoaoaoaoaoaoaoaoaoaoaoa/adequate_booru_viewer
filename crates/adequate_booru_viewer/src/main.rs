@@ -76,7 +76,7 @@ fn main() -> Result<()> {
     let ctx = egui::Context::default();
     chrome::install(&ctx);
     let trace = eternalist_apps::TraceGuard::arm()?;
-    let result = host::run(ctx, pause_mirror);
+    let result = host::run(eternalist_apps::Ingress::Desktop, ctx, pause_mirror);
     trace.flush();
     result
 }

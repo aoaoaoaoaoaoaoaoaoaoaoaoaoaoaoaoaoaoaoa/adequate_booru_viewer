@@ -2277,14 +2277,16 @@ impl Bayonet {
             .reloadable(self.configuration.fault().is_some() || self.configuration.settled());
         let mut changed = false;
         let mut font_scale_changed = false;
-        let response = self.settings.show(ctx, &mut self.water, file, |settings| {
-            settings.group("APPEARANCE");
-            font_scale_changed |= settings.font_size(&mut font_scale);
-            settings.group("BROWSING");
-            changed |= settings.boolean(PREFETCH_SETTING, &mut prefetch);
-            settings.group("INDEX");
-            changed |= settings.boolean(MIRROR_SETTING, &mut mirror);
-        });
+        let response = self
+            .settings
+            .show(ctx, &mut self.water, Some(file), |settings| {
+                settings.group("APPEARANCE");
+                font_scale_changed |= settings.font_size(&mut font_scale);
+                settings.group("BROWSING");
+                changed |= settings.boolean(PREFETCH_SETTING, &mut prefetch);
+                settings.group("INDEX");
+                changed |= settings.boolean(MIRROR_SETTING, &mut mirror);
+            });
         if changed || font_scale_changed {
             self.font_scale = font_scale;
             if font_scale_changed {
