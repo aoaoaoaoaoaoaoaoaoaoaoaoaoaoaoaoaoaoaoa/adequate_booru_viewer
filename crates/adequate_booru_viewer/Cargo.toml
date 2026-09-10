@@ -36,7 +36,7 @@ crossbeam-channel = "0.5.16"
 brass_poolrooms = "0.15.0"
 abv-contract = { path = "../abv-contract", version = "0.2.4" }
 egui = "=0.36.1"
-eternalist-apps = "0.11.0"
+eternalist-apps = "0.12.0"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 memmap2 = "0.9.11"
 redb = "4.2.0"
