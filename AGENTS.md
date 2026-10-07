@@ -1,8 +1,5 @@
-This repo inherits the canonical Rust style doctrine:
+booru_viewer: fast native reference-image search over a read-only Danbooru mirror; not a web app
 
-- /home/main/programming/projects/rust_starter/docs/rust-style-doctrine.md
-
-Local sharpening: this is a fast native reference-search tool, not a web app.
-Keep the durable booru index in XDG data, keep media bytes in XDG cache, and
-keep the mirror anonymous. Authenticated mutations must be optional,
-user-initiated capabilities; secret bytes stay outside config and durable state.
+## invariants
+- Durable booru index in XDG data; media bytes in XDG cache; mirror stays anonymous
+- Authenticated mutations: optional, user-initiated capabilities; secret bytes stay outside config and durable state
