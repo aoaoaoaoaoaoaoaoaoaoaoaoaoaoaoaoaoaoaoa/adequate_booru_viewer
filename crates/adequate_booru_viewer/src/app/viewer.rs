@@ -229,6 +229,10 @@ fn viewer_title_bar(
                                 chrome::MonoglyphFinish::BrightCut
                             })
                             .size(chrome::MechanismSize::Medium)
+                            .struck(
+                                commands::canon()
+                                    .take_routed(Edict::ToggleViewerFavorite, ui.ctx()),
+                            )
                             .show(ui);
                         water.monoglyph(&favorite_control);
                         record_control(
