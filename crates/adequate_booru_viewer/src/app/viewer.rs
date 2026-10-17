@@ -204,12 +204,6 @@ fn viewer_title_bar(
                 );
                 record_control(ui, abv_contract::ViewerControl::Danbooru, &link);
                 let _link = link.on_hover_text("open on Danbooru");
-                let _meta = ui.label(
-                    chrome::TypeRole::Label
-                        .text(format!("score {}  fav {}", post.score, post.favs))
-                        .strong()
-                        .color(chrome::TEXT),
-                );
                 let _actions =
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let close = controls::symbol_sized(
@@ -316,6 +310,25 @@ fn viewer_title_bar(
                                 }
                             }
                         }
+                        // The tally takes what the controls leave and elides
+                        // rather than running beneath them.
+                        let _meta = ui.with_layout(
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        chrome::TypeRole::Label
+                                            .text(format!(
+                                                "score {}  fav {}",
+                                                post.score, post.favs
+                                            ))
+                                            .strong()
+                                            .color(chrome::TEXT),
+                                    )
+                                    .truncate(),
+                                )
+                            },
+                        );
                     });
             });
         });
