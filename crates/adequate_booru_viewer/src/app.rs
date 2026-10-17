@@ -295,7 +295,8 @@ pub struct Bayonet {
     warm: WarmLedger,
     full: HashMap<PostId, TextureHandle>,
     full_rgba: HashMap<PostId, RgbaBlade>,
-    /// The image copy whose clipboard seizure has not settled; it leases Copy.
+    /// The image copy whose clipboard seizure has not settled; a newer copy
+    /// supersedes it.
     copy: Option<(PostId, Seizure)>,
     full_loaded_at: HashMap<PostId, Instant>,
     full_wait: HashMap<PostId, FullWait>,
@@ -881,9 +882,6 @@ impl Bayonet {
                     .is_none() =>
             {
                 CommandStatus::Disabled("the original media is unavailable")
-            }
-            Edict::CopyViewerImage if self.copy.is_some() => {
-                CommandStatus::Disabled("the previous copy is still settling")
             }
             Edict::FocusTagEntry
             | Edict::NextQueryGroup
