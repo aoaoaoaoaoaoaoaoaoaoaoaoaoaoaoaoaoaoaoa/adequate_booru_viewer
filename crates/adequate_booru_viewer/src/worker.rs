@@ -230,7 +230,6 @@ pub enum Event {
         bytes: usize,
         groups: usize,
     },
-    Toast(String),
     Fault(String),
 }
 
@@ -258,11 +257,6 @@ impl Klaxon {
         let _sent = self.tx.send(event);
         let _woken = self.wake.request_foreground_repaint_after(MURMUR);
     }
-
-    /// User-facing one-liner from any thread.
-    pub fn toast(&self, text: String) {
-        self.send(Event::Toast(text));
-    }
 }
 
 pub struct Worker {
@@ -272,7 +266,6 @@ pub struct Worker {
     media_tx: Sender<MediaCommand>,
     /// The lanes that absorb into the index; a sealed session spawns none.
     absorption: Option<Absorption>,
-    crier: Klaxon,
     rx: Receiver<Event>,
 }
 
@@ -397,7 +390,6 @@ impl Worker {
             tx: event_tx,
             wake: NativeWake::from_context(&ctx),
         };
-        let crier = event_tx.clone();
         let refresh_events = event_tx.clone();
         let refresh_index = Index::clone(&tenure);
         let _refresh =
@@ -471,16 +463,10 @@ impl Worker {
                 definition_tx,
                 media_tx,
                 absorption,
-                crier,
                 rx: event_rx,
             },
             account_readiness,
         )
-    }
-
-    /// A handle for app-side threads (e.g. the clipboard) to report back.
-    pub fn crier(&self) -> Klaxon {
-        self.crier.clone()
     }
 
     pub fn send(&self, command: Command) -> Result<()> {

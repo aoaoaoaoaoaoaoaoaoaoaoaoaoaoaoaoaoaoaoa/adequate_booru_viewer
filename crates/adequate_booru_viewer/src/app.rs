@@ -1,8 +1,6 @@
-use anyhow::{Context as _, Result};
-use arboard::{Clipboard, ImageData};
+use anyhow::Result;
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use std::{
-    borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::PathBuf,
     time::{Duration, Instant},
@@ -59,7 +57,8 @@ use viewer::{FullWait, ViewerGate};
 use completion::TagCompletion;
 
 use eternalist_apps::{
-    ApplicationHeader, ScribeOutcome, SettledScribe,
+    ApplicationHeader, NativeWake, ScribeOutcome, SettledScribe,
+    clipboard::{RgbaImage, Seizure},
     command_guide::CommandGuide,
     commands::{CommandDispatch, CommandStatus},
     configuration::ConfigurationLedger,
@@ -296,6 +295,8 @@ pub struct Bayonet {
     warm: WarmLedger,
     full: HashMap<PostId, TextureHandle>,
     full_rgba: HashMap<PostId, RgbaBlade>,
+    /// The image copy whose clipboard seizure has not settled; it leases Copy.
+    copy: Option<(PostId, Seizure)>,
     full_loaded_at: HashMap<PostId, Instant>,
     full_wait: HashMap<PostId, FullWait>,
     full_inflight: HashSet<PostId>,
@@ -641,6 +642,7 @@ impl Bayonet {
             warm: WarmLedger::new(WarmKey::new(&query, sort)),
             full: HashMap::new(),
             full_rgba: HashMap::new(),
+            copy: None,
             full_loaded_at: HashMap::new(),
             full_wait: HashMap::new(),
             full_inflight: HashSet::new(),
@@ -791,6 +793,7 @@ impl Bayonet {
         }
         self.zoom_tiles(&ctx);
         self.drain(&ctx);
+        self.settle_copy();
         let _gates = self.flush_pulse_gates(Instant::now());
         self.absorb_persistence();
         self.paint(ui);
@@ -879,6 +882,9 @@ impl Bayonet {
             {
                 CommandStatus::Disabled("the original media is unavailable")
             }
+            Edict::CopyViewerImage if self.copy.is_some() => {
+                CommandStatus::Disabled("the previous copy is still settling")
+            }
             Edict::FocusTagEntry
             | Edict::NextQueryGroup
             | Edict::PreviousQueryGroup
@@ -922,7 +928,7 @@ impl Bayonet {
             }
             Edict::CopyViewerImage => {
                 if let Some(id) = self.viewer_post.as_ref().map(|post| post.id) {
-                    self.copy_full(id);
+                    self.copy_full(ctx, id);
                 }
             }
         }
@@ -1657,10 +1663,6 @@ impl Bayonet {
                         }
                         ctx.request_repaint();
                     }
-                }
-                Event::Toast(text) => {
-                    self.status = text;
-                    ctx.request_repaint();
                 }
                 Event::Refetched { post } => {
                     if let Some(post) = post {

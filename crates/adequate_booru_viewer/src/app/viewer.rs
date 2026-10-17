@@ -182,6 +182,8 @@ fn viewer_title_bar(
     tags_open: bool,
     view: ViewerView,
     kin: KinNav,
+    save: CommandStatus<'static>,
+    copy: CommandStatus<'static>,
 ) -> Vec<ViewerAction> {
     let mut actions = Vec::new();
     let _bar = egui::Frame::new()
@@ -244,31 +246,20 @@ fn viewer_title_bar(
                         {
                             actions.push(ViewerAction::Favorite);
                         }
-                        let save = ui
-                            .add_enabled_ui(post.original_url().is_some(), |ui| {
-                                commands::canon().button_with(
-                                    Edict::SaveViewerImage,
-                                    ui,
-                                    |button| button.min_size(egui::vec2(24.0, 20.0)),
-                                )
-                            })
-                            .inner;
-                        let save_activated = save.clicked();
-                        let save = save.into_response();
-                        chrome::tension(ui, &save);
-                        record_control(ui, abv_contract::ViewerControl::Save, &save);
-                        if save_activated {
+                        if edict_plate(
+                            ui,
+                            Edict::SaveViewerImage,
+                            save,
+                            abv_contract::ViewerControl::Save,
+                        ) {
                             actions.push(ViewerAction::Save);
                         }
-                        let copy =
-                            commands::canon().button_with(Edict::CopyViewerImage, ui, |button| {
-                                button.min_size(egui::vec2(24.0, 20.0))
-                            });
-                        let copy_activated = copy.clicked();
-                        let copy = copy.into_response();
-                        chrome::tension(ui, &copy);
-                        record_control(ui, abv_contract::ViewerControl::Copy, &copy);
-                        if copy_activated {
+                        if edict_plate(
+                            ui,
+                            Edict::CopyViewerImage,
+                            copy,
+                            abv_contract::ViewerControl::Copy,
+                        ) {
                             actions.push(ViewerAction::Copy);
                         }
                         if view == ViewerView::Image {
@@ -326,6 +317,30 @@ fn viewer_title_bar(
         });
     crate::witness_anchor!(ui, abv_contract::Target::ViewerToolbar, _bar.response.rect);
     actions
+}
+
+/// One viewer command plate, available exactly when its edict is; a disabled
+/// plate explains itself on hover.
+fn edict_plate(
+    ui: &mut egui::Ui,
+    edict: Edict,
+    status: CommandStatus<'static>,
+    control: abv_contract::ViewerControl,
+) -> bool {
+    let command = ui
+        .add_enabled_ui(status == CommandStatus::Enabled, |ui| {
+            commands::canon()
+                .button_with(edict, ui, |button| button.min_size(egui::vec2(24.0, 20.0)))
+        })
+        .inner;
+    let activated = command.clicked();
+    let mut response = command.into_response();
+    chrome::tension(ui, &response);
+    if let CommandStatus::Disabled(reason) = status {
+        response = response.on_disabled_hover_text(reason);
+    }
+    record_control(ui, control, &response);
+    activated
 }
 
 /// Four congruent chevrons cut from one geometric die. Font arrows vary in
@@ -923,6 +938,8 @@ impl Bayonet {
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
+                let save = self.edict_status(Edict::SaveViewerImage);
+                let copy = self.edict_status(Edict::CopyViewerImage);
                 for action in viewer_title_bar(
                     ui,
                     &mut self.water,
@@ -931,9 +948,11 @@ impl Bayonet {
                     self.viewer_tags_open,
                     view,
                     kin_nav,
+                    save,
+                    copy,
                 ) {
                     match action {
-                        ViewerAction::Copy => self.copy_full(post.id),
+                        ViewerAction::Copy => self.copy_full(ctx, post.id),
                         ViewerAction::Save => self.save_full(&post),
                         ViewerAction::Favorite => self.toggle_viewer_favorite(post.id),
                         ViewerAction::Tree => {
@@ -1248,33 +1267,30 @@ impl Bayonet {
         }
     }
 
-    pub(super) fn copy_full(&mut self, id: PostId) {
+    pub(super) fn copy_full(&mut self, ctx: &egui::Context, id: PostId) {
         let Some(blade) = self.full_rgba.get(&id) else {
             "full image is not loaded yet".clone_into(&mut self.status);
             return;
         };
-        // The X11 clipboard transfer of a full-size image takes long enough
-        // to hitch a frame; hand it to a throwaway thread and toast back.
-        let blade = blade.clone();
-        let crier = self.worker.crier();
-        self.status = format!("copying #{id}…");
-        let _hand = std::thread::spawn(move || {
-            let result = Clipboard::new()
-                .context("open clipboard")
-                .and_then(|mut clipboard| {
-                    clipboard
-                        .set_image(ImageData {
-                            width: blade.size[0],
-                            height: blade.size[1],
-                            bytes: Cow::Owned(blade.rgba),
-                        })
-                        .context("copy image")
-                });
-            crier.toast(match result {
-                Ok(()) => format!("copied #{id}"),
-                Err(err) => format!("{err:#}"),
-            });
-        });
+        match RgbaImage::new(blade.size[0], blade.size[1], blade.rgba.clone()) {
+            Ok(image) => {
+                self.status = format!("copying #{id}…");
+                self.copy = Some((id, Seizure::image(image, NativeWake::from_context(ctx))));
+            }
+            Err(error) => self.status = format!("copy #{id} failed: {error:#}"),
+        }
+    }
+
+    /// Report the copy once the clipboard holds its image or refuses it.
+    pub(super) fn settle_copy(&mut self) {
+        let Some((id, seizure)) = self.copy.take() else {
+            return;
+        };
+        match seizure.try_settle() {
+            Ok(Ok(())) => self.status = format!("copied #{id}"),
+            Ok(Err(error)) => self.status = format!("copy #{id} failed: {error:#}"),
+            Err(pending) => self.copy = Some((id, pending)),
+        }
     }
 
     pub(super) fn toggle_viewer_tags(&mut self, ctx: &egui::Context) {
