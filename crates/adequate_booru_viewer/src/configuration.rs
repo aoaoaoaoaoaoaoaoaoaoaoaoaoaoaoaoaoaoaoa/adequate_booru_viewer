@@ -700,7 +700,7 @@ mod tests {
         assert_eq!(seeded.unfiled.len(), 1);
         assert_eq!(seeded.unfiled[0].name.as_str(), SAFE_DEFAULT_FILTER);
         assert!(toml::to_string(&seeded.unfiled[0])?.contains("rating:g"));
-        assert!(FilterLibrary::default().unfiled.is_empty());
+        assert_eq!(FilterLibrary::default().unfiled, []);
         Ok(())
     }
 
