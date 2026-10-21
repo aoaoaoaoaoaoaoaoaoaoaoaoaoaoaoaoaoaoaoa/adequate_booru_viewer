@@ -133,11 +133,11 @@ For local release-candidate work:
 
 ```sh
 scripts/check
-scripts/audit
+cargo audit --deny warnings
 scripts/verify-install
 scripts/test-gui
 scripts/test-wayland
-scripts/package
+foundry package
 ```
 
 the pinned Eternalist Foundry workflow proves every declared host, builds and
