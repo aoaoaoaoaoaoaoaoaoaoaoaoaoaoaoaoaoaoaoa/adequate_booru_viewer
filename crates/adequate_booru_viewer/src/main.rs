@@ -75,7 +75,16 @@ fn main() -> Result<()> {
     let ctx = egui::Context::default();
     chrome::install(&ctx);
     let trace = eternalist_apps::TraceGuard::arm()?;
-    let result = host::run(eternalist_apps::Ingress::Desktop, ctx, launch);
+    let claim = match &launch {
+        Launch::Sealed(_) => application_paths::Claim::sparing(),
+        Launch::Configured | Launch::Paused => application_paths::Claim::adopting(),
+    };
+    let result = claim.and_then(|claim| {
+        for strand in &claim.strands {
+            eprintln!("abv: {strand}");
+        }
+        host::run(eternalist_apps::Ingress::Desktop, ctx, claim, launch)
+    });
     trace.flush();
     result
 }

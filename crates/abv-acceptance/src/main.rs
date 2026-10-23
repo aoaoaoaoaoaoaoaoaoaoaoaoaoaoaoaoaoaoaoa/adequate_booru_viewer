@@ -17,6 +17,7 @@ use egui_tester::{
 };
 use serde::Deserialize;
 
+mod adoption;
 mod showcase;
 
 const TITLE: &str = "adequate booru viewer";
@@ -98,6 +99,8 @@ fn suite(harness: &Harness<'_>) -> Result<()> {
     viewer_persists(harness)?;
     reset_durable_state(harness.testbed)?;
     native_effects(harness)?;
+    reset_durable_state(harness.testbed)?;
+    adoption::legacy_roots_adopted(harness)?;
     println!("abv acceptance passed under {}", harness.testbed.id());
     Ok(())
 }

@@ -424,7 +424,10 @@ impl Bayonet {
             format!("build: {}", env!("CARGO_PKG_VERSION")),
             format!("data: {}", self.paths.local_data.display()),
             format!("index: {}", self.index.path().display()),
-        ] {
+        ]
+        .into_iter()
+        .chain(self.strands.iter().map(ToString::to_string))
+        {
             let _line = chrome::note(ui, line);
         }
     }

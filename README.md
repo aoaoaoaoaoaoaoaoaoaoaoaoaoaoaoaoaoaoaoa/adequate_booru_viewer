@@ -34,6 +34,17 @@ first launch starts an anonymous, read-only, persistent danbooru mirror which ma
 grow to tens of gibibytes. pause it under `INDEX STATUS`; closing `abv` stops it.
 media bytes remain disposable cache.
 
+releases through 1.3.16 kept their files in directories named
+`adequate_booru_viewer`; 1.3.17–1.3.19 started over in empty
+`adequate-booru-viewer` ones beside them. on launch `abv` moves the old
+configuration, data, and state directories to the new names together,
+replacing new ones that hold no files. if any new one already holds files, it
+moves none of them and names each conflict under `INDEX STATUS` and on stderr:
+to adopt the old installation, quit `abv`, move those new directories aside,
+and relaunch. the old cache follows alone when the new one holds no files.
+while either index is open in another process, `abv` moves nothing; any other
+failure is reported the same way, with every completed move undone.
+
 optional post-tag editing uses a Danbooru login and an API key stored in a
 separate file. On Linux, add this to
 `~/.config/adequate-booru-viewer/config.toml`:
@@ -79,7 +90,8 @@ crawls, warms, hydrates, or edits it or the kin atlas beside it, and a writer
 elsewhere locks it out. Only those two files are sealed: configuration, Session
 State, the Filter Library, local favorites, and the media cache stay writable,
 and a first run still seeds configuration, the Filter Library, and Session
-State.
+State. A sealed launch leaves directories from releases through 1.3.16
+where they are.
 
 ### keyboard
 

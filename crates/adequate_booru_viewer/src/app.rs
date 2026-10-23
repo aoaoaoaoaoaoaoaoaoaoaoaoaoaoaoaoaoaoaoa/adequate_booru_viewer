@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::{
-    application_paths::{self, ApplicationPaths, ViewerPaths as _},
+    application_paths::{ApplicationPaths, Claim, Strand, ViewerPaths as _},
     booru::TagDefinition,
     chrome,
     commands::{self, Edict},
@@ -254,6 +254,8 @@ impl TagPushDraft {
 )]
 pub struct Bayonet {
     paths: ApplicationPaths,
+    /// Legacy roots the claim left in place; the index status names them.
+    strands: Vec<Strand>,
     index: Tenure,
     worker: Worker,
     query: Query,
@@ -474,10 +476,9 @@ impl Bayonet {
         }
     }
 
-    pub fn open(ctx: &egui::Context, launch: Launch) -> Result<Self> {
+    pub fn open(ctx: &egui::Context, claim: Claim, launch: Launch) -> Result<Self> {
         startup("app.open.enter");
-        let paths = application_paths::claim()?;
-        startup("app.paths.claimed");
+        let Claim { paths, strands } = claim;
         let configuration_path = paths.config_path();
         let filter_library_path = paths.filter_library_path();
         // The library file is the first-run marker. Its contents may lawfully
@@ -603,6 +604,7 @@ impl Bayonet {
             crawl_status: valve_status(&index, valve, "crawl waking"),
             kin_status: valve_status(&index, valve, "family index waking"),
             paths,
+            strands,
             index,
             worker,
             query: query.clone(),
