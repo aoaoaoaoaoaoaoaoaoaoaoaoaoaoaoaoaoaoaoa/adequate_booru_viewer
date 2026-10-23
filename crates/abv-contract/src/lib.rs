@@ -192,6 +192,9 @@ impl TagPush {
 /// A gallery tile's wire, before its post id.
 const TILE: &str = "abv.gallery.tile/";
 
+/// The wire stem of every tag-drawer row control.
+const TAG_ROW: &str = "abv.tag-drawer.";
+
 /// Every semantic address ABV publishes. The wire follows
 /// `owner.semantic.path[/identity...]`: runtime identities are encoded.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -234,24 +237,26 @@ pub enum Target {
 
 impl Target {
     #[must_use]
-    pub fn wire(&self) -> Cow<'static, str> {
+    /// The wire spelling; `None` when a runtime identity is empty, which no
+    /// Target name admits.
+    pub fn wire(&self) -> Option<Cow<'static, str>> {
         let wire = match self {
-            Self::ImagesPerRow => return Cow::Borrowed("abv.gallery.images-per-row"),
-            Self::GalleryContent => return Cow::Borrowed("abv.gallery.content"),
-            Self::GalleryGutter => return Cow::Borrowed("abv.gallery.gutter"),
-            Self::TagEntry => return Cow::Borrowed("abv.query.tag-entry"),
-            Self::ViewerSurface => return Cow::Borrowed("abv.viewer.surface"),
-            Self::ViewerImage => return Cow::Borrowed("abv.viewer.image"),
-            Self::ViewerToolbar => return Cow::Borrowed("abv.viewer.toolbar"),
-            Self::TagDrawer => return Cow::Borrowed("abv.viewer.tag-drawer"),
-            Self::LocalFavorites => return Cow::Borrowed("abv.filter.local-favorites"),
+            Self::ImagesPerRow => return Some(Cow::Borrowed("abv.gallery.images-per-row")),
+            Self::GalleryContent => return Some(Cow::Borrowed("abv.gallery.content")),
+            Self::GalleryGutter => return Some(Cow::Borrowed("abv.gallery.gutter")),
+            Self::TagEntry => return Some(Cow::Borrowed("abv.query.tag-entry")),
+            Self::ViewerSurface => return Some(Cow::Borrowed("abv.viewer.surface")),
+            Self::ViewerImage => return Some(Cow::Borrowed("abv.viewer.image")),
+            Self::ViewerToolbar => return Some(Cow::Borrowed("abv.viewer.toolbar")),
+            Self::TagDrawer => return Some(Cow::Borrowed("abv.viewer.tag-drawer")),
+            Self::LocalFavorites => return Some(Cow::Borrowed("abv.filter.local-favorites")),
             Self::Tile(id) => format!("{TILE}{id}"),
             Self::FamilyBadge(id) => format!("abv.gallery.family-badge/{id}"),
             Self::Sort(sort) => format!("abv.gallery.sort.{}", sort.wire()),
             Self::DateLever(bound) => format!("abv.gallery.date-lever.{}", bound.wire()),
-            Self::Panel(name) => format!("abv.inspector.panel/{}", identity(name)),
+            Self::Panel(name) => format!("abv.inspector.panel/{}", identity(name)?),
             Self::Completion(entry, tag) => {
-                format!("abv.{}.completion/{}", entry.wire(), identity(tag))
+                format!("abv.{}.completion/{}", entry.wire(), identity(tag)?)
             }
             Self::Group(path) => format!("abv.query.group{}", group(path)),
             Self::GroupOperator(path, operator) => {
@@ -261,30 +266,39 @@ impl Target {
                     group(path)
                 )
             }
-            Self::Atom(term) => format!("abv.query.atom/{}", identity(term)),
+            Self::Atom(term) => format!("abv.query.atom/{}", identity(term)?),
             Self::ViewerControl(control) => format!("abv.viewer.control.{}", control.wire()),
             Self::TagRow(action, tag) => {
-                format!("abv.tag-drawer.{}/{}", action.wire(), identity(tag))
+                format!("{TAG_ROW}{}/{}", action.wire(), identity(tag)?)
             }
             Self::TagPush(part) => format!("abv.tag-push.{}", part.wire()),
-            Self::PendingTag(tag) => format!("abv.tag-push.pending/{}", identity(tag)),
+            Self::PendingTag(tag) => format!("abv.tag-push.pending/{}", identity(tag)?),
             Self::DanbooruLink(id) => format!("abv.viewer.danbooru-link/{id}"),
             Self::FamilyNode(id) => format!("abv.family.node/{id}"),
             Self::Water(mode) => format!("abv.water.mode.{}", mode.wire()),
-            Self::Filter(name) => format!("cabinet.{FILTER_CABINET}.entry/{}", identity(name)),
+            Self::Filter(name) => format!("cabinet.{FILTER_CABINET}.entry/{}", identity(name)?),
             Self::FilterClone(name) => {
-                format!("cabinet.{FILTER_CABINET}.clone/{}", identity(name))
+                format!("cabinet.{FILTER_CABINET}.clone/{}", identity(name)?)
             }
-            Self::Shelf(name) => format!("cabinet.{FILTER_CABINET}.shelf/{}", identity(name)),
+            Self::Shelf(name) => format!("cabinet.{FILTER_CABINET}.shelf/{}", identity(name)?),
         };
-        Cow::Owned(wire)
+        Some(Cow::Owned(wire))
     }
 
     /// The post a gallery tile's wire names; `None` for any other wire.
     #[must_use]
     pub fn tile_of(wire: &str) -> Option<u32> {
         let id = wire.strip_prefix(TILE)?.parse().ok()?;
-        (Self::Tile(id).wire() == wire).then_some(id)
+        (Self::Tile(id).wire()? == wire).then_some(id)
+    }
+
+    /// Whether `wire` names a tag-drawer row control of `action`, for any tag.
+    #[must_use]
+    pub fn is_tag_row(action: TagRowAction, wire: &str) -> bool {
+        wire.strip_prefix(TAG_ROW)
+            .and_then(|row| row.strip_prefix(action.wire()))
+            .and_then(|row| row.strip_prefix('/'))
+            .is_some_and(|tag| !tag.is_empty())
     }
 }
 
@@ -300,8 +314,11 @@ fn group(path: &[usize]) -> String {
     identity
 }
 
+/// An unspellable Target displays as nothing, which every witness lookup
+/// refuses as off-grammar.
 impl fmt::Display for Target {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.wire())
+        self.wire()
+            .map_or(Ok(()), |wire| formatter.write_str(&wire))
     }
 }

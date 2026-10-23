@@ -11,9 +11,9 @@ use adequate_booru_viewer::{
 };
 use egui_demo::Showcase;
 use egui_tester::{
-    AppCommand, Application, Backend, Button, Condition, Error, Frame, Graphics, Key, Modifiers,
-    Motion, Network, PixelRegion, Probe, ReactionBudget, Result, Story, Testbed, TestbedBuilder,
-    WaylandConfig, WindowQuery, X11Config, demand,
+    AppCommand, Application, ArtifactStem, Backend, Button, Condition, Error, Frame, Graphics, Key,
+    Modifiers, Motion, Network, PixelRegion, Probe, ReactionBudget, Result, Story, Testbed,
+    TestbedBuilder, WaylandConfig, WindowQuery, X11Config, demand,
 };
 use serde::Deserialize;
 
@@ -78,9 +78,11 @@ fn main() -> Result<()> {
             Rail::Stills(directory) => {
                 showcase::perform(testbed, &binary, Showcase::stills(directory)?)
             }
-            Rail::Film(directory) => {
-                showcase::perform(testbed, &binary, Showcase::film(directory, FILM)?)
-            }
+            Rail::Film(directory) => showcase::perform(
+                testbed,
+                &binary,
+                Showcase::film(directory, &ArtifactStem::new(FILM)?)?,
+            ),
         }
     })
 }
@@ -753,12 +755,12 @@ fn native_effects(harness: &Harness<'_>) -> Result<()> {
             detail: "open tag drawer frame omitted its image surface".to_owned(),
         })?;
     let toolbar = opened
-        .anchor(&Target::ViewerToolbar.wire())
+        .anchor(&Target::ViewerToolbar.to_string())
         .ok_or_else(|| Error::Verdict {
             detail: "open viewer omitted its toolbar geometry".to_owned(),
         })?;
     let tag_drawer = opened
-        .anchor(&Target::TagDrawer.wire())
+        .anchor(&Target::TagDrawer.to_string())
         .ok_or_else(|| Error::Verdict {
             detail: "open viewer omitted its tag-drawer geometry".to_owned(),
         })?;

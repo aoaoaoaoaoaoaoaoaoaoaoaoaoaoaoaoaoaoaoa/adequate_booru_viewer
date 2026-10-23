@@ -9,9 +9,10 @@ macro_rules! witness_anchor {
         #[cfg(feature = "egui-test")]
         {
             let rect = $rect;
-            if rect.is_positive() {
-                let name = $name;
-                $crate::witness::anchor($ui, &name, rect);
+            if rect.is_positive()
+                && let Some(name) = $name.wire()
+            {
+                $crate::witness::anchor($ui, name, rect);
             }
         }
     }};

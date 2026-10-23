@@ -22,8 +22,9 @@ use adequate_booru_viewer::{
 };
 use egui_demo::Showcase;
 use egui_tester::{
-    Anchor, AppCommand, Button, Condition, Error, Graphics, Key, Modifiers, Motion, Network,
-    ReactionBudget, Result, Story, StoryObserver, StoryTempo, Testbed, Wheel, WindowQuery, demand,
+    Anchor, AppCommand, ArtifactStem, Button, Condition, Error, Graphics, Key, Modifiers, Motion,
+    Network, ReactionBudget, Result, Story, StoryObserver, StoryTempo, Testbed, Wheel, WindowQuery,
+    demand,
 };
 use serde::Deserialize;
 
@@ -107,7 +108,7 @@ fn score<O: StoryObserver>(story: &mut Show<'_, '_, O>) -> Result<()> {
     }
     let _left = story.leave()?.next_frame()?;
     let _painted = story.wait(painted())?;
-    story.still("frontispiece")?;
+    story.still(&ArtifactStem::FRONTISPIECE)?;
     story.hold(Duration::from_millis(1_500))?;
     algebra(story)?;
     hover(story)?;
@@ -270,7 +271,7 @@ fn viewer<O: StoryObserver>(story: &mut Show<'_, '_, O>) -> Result<()> {
         |state: &Observation| state.viewer.is_some_and(|viewer| viewer.painted),
     ))?;
     let [left, top, right, bottom] = rest
-        .anchor(&Target::ViewerImage.wire())
+        .anchor(&Target::ViewerImage.to_string())
         .ok_or_else(|| Error::Verdict {
             detail: "the painted viewer published no image".to_owned(),
         })?
@@ -284,22 +285,19 @@ fn viewer<O: StoryObserver>(story: &mut Show<'_, '_, O>) -> Result<()> {
         let _splash = story.click_at(point, Button::Primary)?.next_frame()?;
         story.hold(Duration::from_millis(900))?;
     }
-    story.still("viewer")?;
+    story.still(&ArtifactStem::new("viewer")?)?;
     let _drawer = story
         .key(Key::Character('t'))?
         .until(Condition::new("tag drawer open", |state: &Observation| {
             state.viewer_tags_open
         }))?;
-    let rows = Target::TagRow(TagRowAction::Require, "".into()).wire();
+    let queried = QUERIED.map(|tag| Target::TagRow(TagRowAction::Require, tag.into()).to_string());
     let require = story
         .frame()?
         .anchors
         .iter()
         .map(|anchor| anchor.name.to_string())
-        .find(|name| {
-            name.strip_prefix(rows.as_ref())
-                .is_some_and(|tag| !QUERIED.contains(&tag))
-        });
+        .find(|name| Target::is_tag_row(TagRowAction::Require, name) && !queried.contains(name));
     if let Some(require) = require {
         let _read = story.point(&require, GLIDE)?.next_frame()?;
         story.hold(Duration::from_millis(800))?;
@@ -366,7 +364,7 @@ fn requery<'app, 'bed, O: StoryObserver>(
 fn tiles<O: StoryObserver>(story: &mut Show<'_, '_, O>) -> Result<Vec<Anchor>> {
     let frame = story.frame()?;
     let content = frame
-        .anchor(&Target::GalleryContent.wire())
+        .anchor(&Target::GalleryContent.to_string())
         .ok_or_else(|| Error::Verdict {
             detail: "the gallery published no content rectangle".to_owned(),
         })?
