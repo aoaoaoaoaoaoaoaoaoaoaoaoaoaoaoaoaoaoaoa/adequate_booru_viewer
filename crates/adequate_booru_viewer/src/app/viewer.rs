@@ -981,6 +981,14 @@ impl Bayonet {
                                             (alpha * 255.0).round() as u8
                                         ),
                                     );
+                                    #[cfg(feature = "egui-test")]
+                                    {
+                                        self.viewer_painted = alpha >= 1.0
+                                            && recoil >= 1.0
+                                            && drag == egui::Vec2::ZERO
+                                            && ui.opacity() >= 1.0
+                                            && !ui.is_sizing_pass();
+                                    }
                                     self.water.pond_surface(response.rect);
                                     crate::witness_anchor!(
                                         ui,

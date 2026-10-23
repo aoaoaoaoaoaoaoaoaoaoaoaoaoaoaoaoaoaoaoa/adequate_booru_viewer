@@ -17,7 +17,7 @@ pub fn product_directory() -> &'static str {
         .next()
         .unwrap_or(PRODUCT_IDENTIFIER)
 }
-pub const UI_FINGERPRINT: &str = "abv.ui/5";
+pub const UI_FINGERPRINT: &str = "abv.ui/6";
 /// Witness scope of the Filter Library's cabinet.
 pub const FILTER_CABINET: &str = "filters";
 
@@ -130,6 +130,42 @@ impl Operator {
     }
 }
 
+/// A gallery sort plate.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Sort {
+    Newest,
+    Score,
+    FavCount,
+}
+
+impl Sort {
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::Newest => "newest",
+            Self::Score => "score",
+            Self::FavCount => "fav-count",
+        }
+    }
+}
+
+/// A bound of the gallery's date range.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum DateBound {
+    From,
+    Until,
+}
+
+impl DateBound {
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::From => "from",
+            Self::Until => "until",
+        }
+    }
+}
+
 /// The viewer's Danbooru tag-push controls.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum TagPush {
@@ -153,6 +189,9 @@ impl TagPush {
     }
 }
 
+/// A gallery tile's wire, before its post id.
+const TILE: &str = "abv.gallery.tile/";
+
 /// Every semantic address ABV publishes. The wire follows
 /// `owner.semantic.path[/identity...]`: runtime identities are encoded.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -163,10 +202,9 @@ pub enum Target {
     GalleryGutter,
     Tile(u32),
     FamilyBadge(u32),
-    /// A sort plate, by its label.
-    Sort(&'static str),
-    /// A date bound's lever, by bound.
-    DateLever(&'static str),
+    Sort(Sort),
+    /// A date bound's lever.
+    DateLever(DateBound),
     Panel(&'static str),
     TagEntry,
     Completion(Completion, Cow<'static, str>),
@@ -207,10 +245,10 @@ impl Target {
             Self::ViewerToolbar => return Cow::Borrowed("abv.viewer.toolbar"),
             Self::TagDrawer => return Cow::Borrowed("abv.viewer.tag-drawer"),
             Self::LocalFavorites => return Cow::Borrowed("abv.filter.local-favorites"),
-            Self::Tile(id) => format!("abv.gallery.tile/{id}"),
+            Self::Tile(id) => format!("{TILE}{id}"),
             Self::FamilyBadge(id) => format!("abv.gallery.family-badge/{id}"),
-            Self::Sort(label) => format!("abv.gallery.sort/{}", identity(label)),
-            Self::DateLever(bound) => format!("abv.gallery.date-lever/{}", identity(bound)),
+            Self::Sort(sort) => format!("abv.gallery.sort.{}", sort.wire()),
+            Self::DateLever(bound) => format!("abv.gallery.date-lever.{}", bound.wire()),
             Self::Panel(name) => format!("abv.inspector.panel/{}", identity(name)),
             Self::Completion(entry, tag) => {
                 format!("abv.{}.completion/{}", entry.wire(), identity(tag))
@@ -240,6 +278,13 @@ impl Target {
             Self::Shelf(name) => format!("cabinet.{FILTER_CABINET}.shelf/{}", identity(name)),
         };
         Cow::Owned(wire)
+    }
+
+    /// The post a gallery tile's wire names; `None` for any other wire.
+    #[must_use]
+    pub fn tile_of(wire: &str) -> Option<u32> {
+        let id = wire.strip_prefix(TILE)?.parse().ok()?;
+        (Self::Tile(id).wire() == wire).then_some(id)
     }
 }
 

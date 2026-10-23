@@ -8,7 +8,7 @@ use std::{
     io, iter,
     os::unix::fs::FileExt as _,
     path::Path,
-    sync::{Mutex, MutexGuard, PoisonError},
+    sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -19,7 +19,7 @@ const BLOCK: u64 = 4096;
 #[derive(Debug)]
 pub struct SealedFile {
     file: File,
-    ink: Mutex<Ink>,
+    ink: RwLock<Ink>,
 }
 
 /// The overlay: whole blocks written since opening, the virtual length, and
@@ -54,7 +54,7 @@ impl SealedFile {
         }
         Ok(Self {
             file,
-            ink: Mutex::new(Ink {
+            ink: RwLock::new(Ink {
                 blocks: HashMap::new(),
                 len,
                 floor: len,
@@ -62,13 +62,18 @@ impl SealedFile {
         })
     }
 
-    fn ink(&self) -> MutexGuard<'_, Ink> {
-        self.ink.lock().unwrap_or_else(PoisonError::into_inner)
+    fn ink(&self) -> RwLockReadGuard<'_, Ink> {
+        self.ink.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn ink_mut(&self) -> RwLockWriteGuard<'_, Ink> {
+        self.ink.write().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 impl Ink {
-    /// Fill `out` with the base file's bytes at `offset`, zero past the floor.
+    /// Fill `out` with the base file's bytes at `offset`. Bytes at or past the
+    /// floor, which a shrink cut from the file's view, read as zero.
     fn base(&self, file: &File, offset: u64, out: &mut [u8]) -> io::Result<()> {
         let visible = usize::try_from(self.floor.saturating_sub(offset))
             .unwrap_or(usize::MAX)
@@ -87,6 +92,15 @@ impl StorageBackend for SealedFile {
 
     fn read(&self, offset: u64, out: &mut [u8]) -> io::Result<()> {
         let ink = self.ink();
+        if offset
+            .checked_add(out.len() as u64)
+            .is_none_or(|end| end > ink.len)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "read past the end of the sealed index",
+            ));
+        }
         let mut cursor = 0;
         for (block, within, take) in spans(offset, out.len()) {
             let chunk = &mut out[cursor..cursor + take];
@@ -100,7 +114,7 @@ impl StorageBackend for SealedFile {
     }
 
     fn set_len(&self, len: u64) -> io::Result<()> {
-        let mut ink = self.ink();
+        let mut ink = self.ink_mut();
         if len < ink.len {
             ink.floor = ink.floor.min(len);
             ink.blocks.retain(|&block, _| block * BLOCK < len);
@@ -117,7 +131,7 @@ impl StorageBackend for SealedFile {
     }
 
     fn write(&self, offset: u64, data: &[u8]) -> io::Result<()> {
-        let mut ink = self.ink();
+        let mut ink = self.ink_mut();
         let mut cursor = 0;
         for (block, within, take) in spans(offset, data.len()) {
             if !ink.blocks.contains_key(&block) {

@@ -40,7 +40,7 @@ pub(crate) use adequate_booru_viewer::{
 
 pub(crate) use brass_poolrooms::{chrome, water};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use app::Launch;
 use std::path::PathBuf;
 
@@ -62,7 +62,7 @@ fn main() -> Result<()> {
                         .context("--sealed-index requires an index path")?,
                 ));
             }
-            _ => {}
+            _ => bail!("unknown argument `{}`", argument.display()),
         }
     }
     let launch = match (sealed, paused) {

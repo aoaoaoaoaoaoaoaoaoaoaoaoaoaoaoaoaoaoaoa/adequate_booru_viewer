@@ -109,6 +109,10 @@ impl Bayonet {
             && let Some(hit) = hit
         {
             self.install_refresh(hit);
+            #[cfg(feature = "egui-test")]
+            {
+                self.search_answered = serial;
+            }
             ctx.request_repaint();
         }
         if dirty {

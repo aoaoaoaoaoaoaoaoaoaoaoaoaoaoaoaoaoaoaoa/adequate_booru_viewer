@@ -278,7 +278,11 @@ impl Bayonet {
                 let button = controls::plate(ui, sort.label(), self.sort == sort);
                 crate::witness_anchor!(
                     ui,
-                    abv_contract::Target::Sort(sort.label()),
+                    abv_contract::Target::Sort(match sort {
+                        Sort::Newest => abv_contract::Sort::Newest,
+                        Sort::Score => abv_contract::Sort::Score,
+                        Sort::FavCount => abv_contract::Sort::FavCount,
+                    }),
                     button.interact_rect
                 );
                 if button.clicked() && self.sort != sort {
@@ -323,8 +327,8 @@ impl Bayonet {
         ui.add_space(2.0);
         let _title = ui.label(chrome::eyebrow("DATE RANGE"));
         let mut next = self.date_range;
-        next.first = self.date_bound(ui, "date-from", "FROM", next.first);
-        next.last = self.date_bound(ui, "date-to", "UNTIL", next.last);
+        next.first = self.date_bound(ui, abv_contract::DateBound::From, "FROM", next.first);
+        next.last = self.date_bound(ui, abv_contract::DateBound::Until, "UNTIL", next.last);
         if clean_dates(next) != self.date_range {
             self.install_dates(next);
         }
@@ -333,7 +337,7 @@ impl Bayonet {
     fn date_bound(
         &mut self,
         ui: &mut egui::Ui,
-        id: &'static str,
+        bound: abv_contract::DateBound,
         label: &'static str,
         value: Option<CreatedDay>,
     ) -> Option<CreatedDay> {
@@ -347,7 +351,7 @@ impl Bayonet {
                 .label(label)
                 .width(width)
                 .loaded(armed)
-                .show(ui, id);
+                .show(ui, ("date", bound));
             self.water.date_spool(&spool);
             if spool.changed() {
                 next = Some(day);
@@ -361,7 +365,7 @@ impl Bayonet {
             let lever = controls::symbol(ui, &mut self.water, symbol).on_hover_text(hint);
             crate::witness_anchor!(
                 ui,
-                abv_contract::Target::DateLever(id.trim_start_matches("date-")),
+                abv_contract::Target::DateLever(bound),
                 lever.interact_rect
             );
             if lever.clicked() {

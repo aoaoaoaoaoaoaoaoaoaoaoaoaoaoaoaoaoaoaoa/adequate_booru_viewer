@@ -3,7 +3,7 @@ pub use eternalist_apps::witness::anchor;
 pub use eternalist_apps::witness::response;
 
 #[cfg(feature = "egui-test")]
-pub use active::{Settings, State, Tiles};
+pub use active::{Search, Settings, State, Tiles, Viewer};
 
 #[cfg(feature = "egui-test")]
 mod active {
@@ -30,8 +30,25 @@ mod active {
         pub mirror_active: bool,
         pub viewer_tags_open: bool,
         pub tag_push_ready: bool,
-        pub viewer_post: Option<u32>,
+        pub viewer: Option<Viewer>,
+        pub search: Search,
         pub tiles: Tiles,
+    }
+
+    /// The open viewer's post, and whether its full image stands at rest:
+    /// drawn opaque, with no fade, recoil, or drag in flight.
+    #[derive(Clone, Copy, Serialize)]
+    pub struct Viewer {
+        pub post: u32,
+        pub painted: bool,
+    }
+
+    /// The serial of the newest search the gallery requested, and of the
+    /// newest whose answer it installed: equal, the results answer the query.
+    #[derive(Clone, Copy, Serialize)]
+    pub struct Search {
+        pub requested: u64,
+        pub answered: u64,
     }
 
     /// Gallery tiles the submitted pass laid out, and those drawing a ready

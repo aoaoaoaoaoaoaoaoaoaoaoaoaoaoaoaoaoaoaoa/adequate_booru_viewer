@@ -7,7 +7,7 @@
 )]
 
 use anyhow::{Context as _, Result, bail};
-use memmap2::{MmapMut, MmapOptions};
+use memmap2::{Mmap, MmapMut, MmapOptions};
 use redb::{Database, ReadTransaction, ReadableDatabase as _, ReadableTable as _, TableDefinition};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
@@ -52,14 +52,32 @@ pub struct Mutation {
 }
 
 /// Runtime family-key accelerator. The redb edge tables are authoritative;
-/// this file is a generation-sealed projection and may always be rebuilt.
+/// this file is a generation-stamped projection and may always be rebuilt.
 pub struct Atlas {
-    map: MmapMut,
+    mapping: Mapping,
     slots: usize,
     generation: u64,
-    /// The durable file a forged atlas writes through. A sealed atlas maps its
-    /// file privately or lives in anonymous memory, and never mutates.
-    file: Option<(File, PathBuf)>,
+}
+
+/// An atlas's memory. A forged atlas writes through its durable file; a
+/// sealed one is read-only memory: its file's pages, or an anonymous rebuild
+/// frozen once inscribed.
+enum Mapping {
+    Forged {
+        map: MmapMut,
+        file: File,
+        path: PathBuf,
+    },
+    Sealed(Mmap),
+}
+
+impl Mapping {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Forged { map, .. } => map,
+            Self::Sealed(map) => map,
+        }
+    }
 }
 
 impl Atlas {
@@ -75,8 +93,8 @@ impl Atlas {
         Self::rebuild(tx, path, generation, minimum_slots)
     }
 
-    /// Map a current atlas file privately, or rebuild a stale one in anonymous
-    /// memory; the file is never written.
+    /// Map a current atlas file read-only, or rebuild a stale one in anonymous
+    /// memory and freeze it; the file is never written.
     pub fn seal(tx: &ReadTransaction, path: &Path, minimum_slots: usize) -> Result<Self> {
         let generation = generation(tx)?;
         let minimum_slots = rounded_slots(minimum_slots);
@@ -84,18 +102,15 @@ impl Atlas {
             && file.metadata().context("stat sealed kin atlas")?.len() >= HEADER as u64
         {
             // SAFETY: the redb shared lock the sealed index holds excludes
-            // every writer of this file, and the private mapping never writes
-            // through.
-            let map =
-                unsafe { MmapOptions::new().map_copy(&file) }.context("mmap sealed kin atlas")?;
+            // every writer of this file, and the mapping is read-only.
+            let map = unsafe { MmapOptions::new().map(&file) }.context("mmap sealed kin atlas")?;
             if let Some(slots) = valid_slots(&map, generation)?
                 && slots >= minimum_slots
             {
                 return Ok(Self {
-                    map,
+                    mapping: Mapping::Sealed(map),
                     slots,
                     generation,
-                    file: None,
                 });
             }
         }
@@ -105,10 +120,9 @@ impl Atlas {
             .context("allocate sealed kin atlas")?;
         inscribe(tx, &mut map, generation, minimum_slots)?;
         Ok(Self {
-            map,
+            mapping: Mapping::Sealed(map.make_read_only().context("freeze sealed kin atlas")?),
             slots: minimum_slots,
             generation,
-            file: None,
         })
     }
 
@@ -118,7 +132,7 @@ impl Atlas {
             return None;
         }
         let offset = slot_offset(slot);
-        let parent = read_u32(&self.map, offset);
+        let parent = read_u32(self.mapping.bytes(), offset);
         (parent != 0).then_some(PostId(parent))
     }
 
@@ -156,25 +170,23 @@ impl Atlas {
         if required > self.slots {
             self.grow(rounded_slots(required))?;
         }
-        let Some((_, path)) = &self.file else {
+        let Mapping::Forged { map, path, .. } = &mut self.mapping else {
             bail!("sealed kin atlas cannot absorb a mutation");
         };
         let mut pages = BTreeSet::new();
         for &(child, parent) in &mutation.patches {
             let offset = slot_offset(child.0 as usize);
-            write_u32(&mut self.map, offset, parent.map_or(0, |id| id.0));
+            write_u32(map, offset, parent.map_or(0, |id| id.0));
             let _inserted = pages.insert(offset / PAGE * PAGE);
         }
         for page in pages {
-            let len = PAGE.min(self.map.len().saturating_sub(page));
-            self.map
-                .flush_range(page, len)
+            let len = PAGE.min(map.len().saturating_sub(page));
+            map.flush_range(page, len)
                 .with_context(|| format!("flush kin atlas page in {}", path.display()))?;
         }
         self.generation = mutation.generation;
-        write_u64(&mut self.map, GENERATION_AT, self.generation);
-        self.map
-            .flush_range(0, HEADER)
+        write_u64(map, GENERATION_AT, self.generation);
+        map.flush_range(0, HEADER)
             .with_context(|| format!("flush kin atlas header in {}", path.display()))
     }
 
@@ -196,10 +208,13 @@ impl Atlas {
             return Ok(None);
         };
         Ok(Some(Self {
-            map,
+            mapping: Mapping::Forged {
+                map,
+                file,
+                path: path.to_path_buf(),
+            },
             slots,
             generation,
-            file: Some((file, path.to_path_buf())),
         }))
     }
 
@@ -223,10 +238,9 @@ impl Atlas {
         inscribe(tx, &mut map, generation, minimum_slots)?;
         map.flush().context("flush rebuilt kin atlas")?;
         Ok(Self {
-            map,
+            mapping: Mapping::Forged { map, file, path },
             slots: minimum_slots,
             generation,
-            file: Some((file, path)),
         })
     }
 
@@ -234,26 +248,25 @@ impl Atlas {
         if slots <= self.slots {
             return Ok(());
         }
-        let Some((file, _)) = &self.file else {
+        let Mapping::Forged { map, file, .. } = &mut self.mapping else {
             bail!("sealed kin atlas cannot grow");
         };
-        self.map.flush().context("flush kin atlas before growth")?;
+        map.flush().context("flush kin atlas before growth")?;
         let spare = MmapOptions::new()
             .len(HEADER)
             .map_anon()
             .context("allocate kin atlas remap sentinel")?;
-        let old = std::mem::replace(&mut self.map, spare);
-        drop(old);
+        drop(std::mem::replace(map, spare));
         file.set_len(atlas_len(slots)? as u64)
             .context("grow kin atlas")?;
         // SAFETY: the old mapping has been dropped and the resized file stays
-        // alive in `self.file`.
-        self.map = unsafe { MmapOptions::new().map_mut(file) }.context("remap grown kin atlas")?;
+        // alive beside the new one.
+        *map = unsafe { MmapOptions::new().map_mut(&*file) }.context("remap grown kin atlas")?;
         self.slots = slots;
-        self.map[..MAGIC.len()].copy_from_slice(MAGIC);
-        write_u64(&mut self.map, GENERATION_AT, self.generation);
-        write_u64(&mut self.map, SLOTS_AT, slots as u64);
-        self.map.flush().context("flush grown kin atlas")
+        map[..MAGIC.len()].copy_from_slice(MAGIC);
+        write_u64(map, GENERATION_AT, self.generation);
+        write_u64(map, SLOTS_AT, slots as u64);
+        map.flush().context("flush grown kin atlas")
     }
 
     fn root_slow(&self, mut cursor: PostId, prefix: &[u32]) -> PostId {
@@ -365,11 +378,11 @@ pub fn hydrated(db: &Database, root: PostId) -> Result<bool> {
         .map(|guard| guard.is_some())
 }
 
-pub fn seal_hydrated(tx: &redb::WriteTransaction, root: PostId) -> Result<()> {
+pub fn brand_hydrated(tx: &redb::WriteTransaction, root: PostId) -> Result<()> {
     let mut hydrated = tx.open_table(HYDRATED).context("open hydrated families")?;
     let _old = hydrated
         .insert(u64::from(root.0), 1)
-        .context("seal hydrated family")?;
+        .context("brand hydrated family")?;
     Ok(())
 }
 
@@ -385,7 +398,9 @@ pub fn advance_backfill(
             .context("write kin cursor")?;
     }
     if complete {
-        let _old = meta.insert(BACKFILL_DONE, 1).context("seal kin backfill")?;
+        let _old = meta
+            .insert(BACKFILL_DONE, 1)
+            .context("mark kin backfill complete")?;
     }
     Ok(())
 }

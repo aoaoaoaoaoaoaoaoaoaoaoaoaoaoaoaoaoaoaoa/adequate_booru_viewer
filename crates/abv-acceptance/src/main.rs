@@ -151,8 +151,21 @@ struct Observation {
     mirror_active: bool,
     viewer_tags_open: bool,
     tag_push_ready: bool,
-    viewer_post: Option<u32>,
+    viewer: Option<ViewerObservation>,
+    search: SearchObservation,
     tiles: TilesObservation,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct ViewerObservation {
+    post: u32,
+    painted: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct SearchObservation {
+    requested: u64,
+    answered: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -363,7 +376,11 @@ fn viewer_persists(harness: &Harness<'_>) -> Result<()> {
     let opened = story.session().click(x, y, Button::Primary)?;
     let _viewer = story.reaction(opened).until(Condition::new(
         "reference image open",
-        |state: &Observation| state.viewer_post == Some(EFFECT_POST),
+        |state: &Observation| {
+            state
+                .viewer
+                .is_some_and(|viewer| viewer.post == EFFECT_POST)
+        },
     ))?;
     app.wait_until(WAIT, "open viewer identity to reach slate.toml", || {
         Ok(harness
@@ -379,11 +396,15 @@ fn viewer_persists(harness: &Harness<'_>) -> Result<()> {
     let mut story = harness.story(&restarted)?;
     let _restored = story.wait(Condition::new(
         "image viewer restored by post identity",
-        |state: &Observation| state.viewer_post == Some(EFFECT_POST),
+        |state: &Observation| {
+            state
+                .viewer
+                .is_some_and(|viewer| viewer.post == EFFECT_POST)
+        },
     ))?;
     let _closed = story.key(Key::Escape)?.until(Condition::new(
         "restored image viewer closed",
-        |state: &Observation| state.viewer_post.is_none(),
+        |state: &Observation| state.viewer.is_none(),
     ))?;
     restarted.wait_until(WAIT, "closed viewer to leave slate.toml", || {
         Ok(harness
@@ -1014,7 +1035,7 @@ impl Cli {
     fn parse() -> Result<Self> {
         let mut args = env::args_os().skip(1);
         let mut artifacts = None;
-        let mut rail = Rail::Suite;
+        let mut rail = None;
         let mut backend = Backend::X11(X11Config::default());
         while let Some(argument) = args.next() {
             match argument.to_str() {
@@ -1025,16 +1046,25 @@ impl Cli {
                         }
                     })?));
                 }
-                Some("--smoke") => rail = Rail::Smoke,
-                Some(flag @ ("--stills" | "--film")) => {
-                    let directory = PathBuf::from(args.next().ok_or_else(|| Error::Verdict {
-                        detail: format!("{flag} requires a directory"),
-                    })?);
-                    rail = if flag == "--stills" {
-                        Rail::Stills(directory)
+                Some(flag @ ("--smoke" | "--stills" | "--film")) => {
+                    if rail.is_some() {
+                        return Err(Error::Verdict {
+                            detail: "--smoke, --stills, and --film exclude each other".to_owned(),
+                        });
+                    }
+                    rail = Some(if flag == "--smoke" {
+                        Rail::Smoke
                     } else {
-                        Rail::Film(directory)
-                    };
+                        let directory =
+                            PathBuf::from(args.next().ok_or_else(|| Error::Verdict {
+                                detail: format!("{flag} requires a directory"),
+                            })?);
+                        if flag == "--stills" {
+                            Rail::Stills(directory)
+                        } else {
+                            Rail::Film(directory)
+                        }
+                    });
                 }
                 Some("--backend") => {
                     let value = args.next().ok_or_else(|| Error::Verdict {
@@ -1069,6 +1099,7 @@ impl Cli {
                 }
             }
         }
+        let rail = rail.unwrap_or(Rail::Suite);
         if matches!(backend, Backend::Wayland(_)) && !matches!(rail, Rail::Smoke) {
             return Err(Error::Verdict {
                 detail: "Wayland admits launch-and-capture smoke only; native stories require X11"

@@ -75,7 +75,11 @@ the release-tested native coordinates are Linux/X11, Linux/Wayland, macOS on
 Apple and Intel silicon, and 64-bit Windows. `abv --pause-mirror` starts with
 the mirror valve closed for deterministic or disconnected work.
 `abv --sealed-index PATH` browses the index at `PATH` read-only: nothing
-crawls, warms, hydrates, or edits it, and a writer elsewhere locks it out.
+crawls, warms, hydrates, or edits it or the kin atlas beside it, and a writer
+elsewhere locks it out. Only those two files are sealed: configuration, Session
+State, the Filter Library, local favorites, and the media cache stay writable,
+and a first run still seeds configuration, the Filter Library, and Session
+State.
 
 ### keyboard
 
@@ -133,9 +137,12 @@ first-present, typed-witness, and nonblack compositor-capture gate.
 
 The showcase is a separate rail, never a verdict: `abv-acceptance --stills DIR`
 performs the presentation score against your own mirror, sealed and borrowed
-read-only, with a private copy of the media cache and general-rated filters,
-and develops its stills (`frontispiece.png`, `viewer.png`); `--film DIR` also
-records `abv-showcase.mp4`. Both need the witnessed build.
+read-only, with general-rated fixture filters and a private copy of the cached
+media they can show, and develops its stills (`frontispiece.png`,
+`viewer.png`); `--film DIR` also records `abv-showcase.mp4`. Both need the
+witnessed build. A take and a running `abv` exclude each other through the
+index's lock: close the viewer before a take and leave it closed until the take
+ends.
 
 For local release-candidate work:
 
@@ -153,11 +160,8 @@ tests the unsigned DMG and NSIS installer, and publishes artifacts only after
 judging the complete evidence graph and finding the exact crate version on
 crates.io.
 
-anyway, check out how wet it is:
-
-[![the wet demo](https://raw.githubusercontent.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/adequate_booru_viewer/v1.0.0/docs/abv-wet-teaser.webp)](https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/adequate_booru_viewer/releases/download/v1.0.0/abv-wet-demo.mp4)
-
-*(click through for the full 60-second take)*
+anyway, see how wet it is on its
+[portfolio page](https://eternalist.moe/projects/adequate-booru-viewer/).
 
 ### halp it's missing feature XYZ
 

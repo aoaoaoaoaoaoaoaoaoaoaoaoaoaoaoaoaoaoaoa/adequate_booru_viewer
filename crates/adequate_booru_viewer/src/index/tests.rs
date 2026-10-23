@@ -1,15 +1,10 @@
 use super::*;
 use crate::model::{GalleryTopology, Harvest, Kin, Rating, TagHint, TagKind, TagPolarity};
-use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn search_tail_proves_exhaustion_without_a_silent_horizon() -> Result<()> {
-    let path = std::env::temp_dir().join(format!(
-        "adequate-booru-search-tail-{}.redb",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    remove_index(&path);
+    let scratch = tempfile::tempdir()?;
+    let path = scratch.path().join("index.redb");
     let index = Index::forge(&path)?;
     index.absorb(&[
         post(1, 10, Rating::General, &["solo"])?,
@@ -37,17 +32,13 @@ fn search_tail_proves_exhaustion_without_a_silent_horizon() -> Result<()> {
     assert_eq!(ids(deep), [3, 2, 1]);
 
     drop(index);
-    remove_index(&path);
     Ok(())
 }
 
 #[test]
 fn boolean_query_evaluator_matches_its_truth_algebra() -> Result<()> {
-    let path = std::env::temp_dir().join(format!(
-        "adequate-booru-bool-{}.redb",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    remove_index(&path);
+    let scratch = tempfile::tempdir()?;
+    let path = scratch.path().join("index.redb");
     let index = Index::forge(&path)?;
     let records = (0_u8..8)
         .map(|mask| {
@@ -81,17 +72,13 @@ fn boolean_query_evaluator_matches_its_truth_algebra() -> Result<()> {
     assert_truth(&index, &neither, |mask| mask.trailing_zeros() >= 2)?;
 
     drop(index);
-    remove_index(&path);
     Ok(())
 }
 
 #[test]
 fn absorption_is_query_visible_across_merge_replacement_and_retraction() -> Result<()> {
-    let path = std::env::temp_dir().join(format!(
-        "adequate-booru-facts-{}.redb",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    remove_index(&path);
+    let scratch = tempfile::tempdir()?;
+    let path = scratch.path().join("index.redb");
     let index = Index::forge(&path)?;
     index.absorb(&[
         post(1, 10, Rating::General, &["solo", "bikini"])?,
@@ -162,17 +149,13 @@ fn absorption_is_query_visible_across_merge_replacement_and_retraction() -> Resu
     );
 
     drop(index);
-    remove_index(&path);
     Ok(())
 }
 
 #[test]
 fn tag_kind_hints_are_durable() -> Result<()> {
-    let path = std::env::temp_dir().join(format!(
-        "adequate-booru-tag-kind-{}.redb",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    remove_index(&path);
+    let scratch = tempfile::tempdir()?;
+    let path = scratch.path().join("index.redb");
     let index = Index::forge(&path)?;
     let idol = Tag::forge("idol").context("idol tag")?;
     let mut post = post(7, 10, Rating::General, &["idol"])?;
@@ -197,17 +180,13 @@ fn tag_kind_hints_are_durable() -> Result<()> {
         Some(TagKind::Character)
     );
     drop(index);
-    remove_index(&path);
     Ok(())
 }
 
 #[test]
 fn date_range_compiles_to_chronological_id_window() -> Result<()> {
-    let path = std::env::temp_dir().join(format!(
-        "adequate-booru-dates-{}.redb",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
-    remove_index(&path);
+    let scratch = tempfile::tempdir()?;
+    let path = scratch.path().join("index.redb");
     let index = Index::forge(&path)?;
     index.absorb(&[
         dated_post(10, 10, "2024-01-01", &["solo"])?,
@@ -224,16 +203,13 @@ fn date_range_compiles_to_chronological_id_window() -> Result<()> {
     assert_eq!(ids(index.search(&solo, Sort::Score, dates, 10)?), [20, 30]);
 
     drop(index);
-    remove_index(&path);
     Ok(())
 }
 
 #[test]
 fn family_projection_keeps_the_strongest_matching_member() -> Result<()> {
-    let path = std::env::temp_dir().join(format!(
-        "adequate-booru-families-{}.redb",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
+    let scratch = tempfile::tempdir()?;
+    let path = scratch.path().join("index.redb");
     let index = Index::forge(&path)?;
     index.absorb_harvest(&[
         harvest(post(1, 10, Rating::General, &["solo"])?, None, true),
@@ -348,16 +324,13 @@ fn family_projection_keeps_the_strongest_matching_member() -> Result<()> {
     assert!(reopened.family_hydrated(PostId(3))?);
     assert_eq!(reopened.family_tree(PostId(12))?.root, PostId(10));
     drop(reopened);
-    remove_index(&path);
     Ok(())
 }
 
 #[test]
 fn reparenting_amends_both_reverse_edges_and_the_atlas() -> Result<()> {
-    let path = std::env::temp_dir().join(format!(
-        "adequate-booru-reparent-{}.redb",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
+    let scratch = tempfile::tempdir()?;
+    let path = scratch.path().join("index.redb");
     let index = Index::forge(&path)?;
     index.absorb_harvest(&[
         harvest(post(20, 10, Rating::General, &["solo"])?, None, true),
@@ -387,16 +360,13 @@ fn reparenting_amends_both_reverse_edges_and_the_atlas() -> Result<()> {
     );
 
     drop(index);
-    remove_index(&path);
     Ok(())
 }
 
 #[test]
 fn local_favorites_prefix_every_sort_without_escaping_the_query() -> Result<()> {
-    let path = std::env::temp_dir().join(format!(
-        "adequate-booru-local-favorites-{}.redb",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    ));
+    let scratch = tempfile::tempdir()?;
+    let path = scratch.path().join("index.redb");
     let index = Index::forge(&path)?;
     let mut root = post(1, 1, Rating::General, &["solo"])?;
     root.favs = 1;
@@ -473,7 +443,6 @@ fn local_favorites_prefix_every_sort_without_escaping_the_query() -> Result<()> 
     );
 
     drop(index);
-    remove_index(&path);
     Ok(())
 }
 
@@ -505,11 +474,9 @@ fn atom(raw: &str) -> Result<QueryAtom> {
 /// index and answer from it while every byte on disk stays as it was.
 #[test]
 fn sealing_reads_an_abandoned_index_without_writing() -> Result<()> {
-    let stem = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let path = std::env::temp_dir().join(format!("adequate-booru-forged-{stem}.redb"));
-    let abandoned = std::env::temp_dir().join(format!("adequate-booru-abandoned-{stem}.redb"));
-    remove_index(&path);
-    remove_index(&abandoned);
+    let scratch = tempfile::tempdir()?;
+    let path = scratch.path().join("forged.redb");
+    let abandoned = scratch.path().join("abandoned.redb");
     let scribe = Index::forge(&path)?;
     scribe.absorb(&[
         post(1, 10, Rating::General, &["solo"])?,
@@ -539,8 +506,6 @@ fn sealing_reads_an_abandoned_index_without_writing() -> Result<()> {
         !abandoned.with_extension("kin.u32").exists(),
         "sealing wrote an atlas"
     );
-    remove_index(&path);
-    remove_index(&abandoned);
     Ok(())
 }
 
@@ -583,9 +548,4 @@ fn harvest(post: PostRecord, parent: Option<u32>, has_children: bool) -> Harvest
             has_children,
         },
     }
-}
-
-fn remove_index(path: &Path) {
-    let _removed = std::fs::remove_file(path);
-    let _removed = std::fs::remove_file(path.with_extension("kin.u32"));
 }

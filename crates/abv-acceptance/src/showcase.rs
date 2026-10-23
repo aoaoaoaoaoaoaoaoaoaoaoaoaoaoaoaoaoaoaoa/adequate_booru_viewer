@@ -2,20 +2,30 @@
 //! borrowed sealed. A specimen never enters an acceptance verdict.
 
 use std::{
-    env, fs,
+    collections::HashSet,
+    fmt::Display,
+    fs,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use abv_contract::{
-    Completion, Operator, PRODUCT_NAME, TagRowAction, Target, UI_FINGERPRINT, Water,
+    Completion, Operator, PRODUCT_NAME, Sort, TagRowAction, Target, UI_FINGERPRINT, Water,
     product_directory,
+};
+use adequate_booru_viewer::{
+    application_paths::{ApplicationPaths, PRODUCT, ViewerPaths as _},
+    date::DateRange,
+    filter_expression,
+    index::Index,
+    model,
 };
 use egui_demo::Showcase;
 use egui_tester::{
     Anchor, AppCommand, Button, Condition, Error, Graphics, Key, Modifiers, Motion, Network,
     ReactionBudget, Result, Story, StoryObserver, StoryTempo, Testbed, Wheel, WindowQuery, demand,
 };
+use serde::Deserialize;
 
 use crate::{FILTER_LIBRARY, Observation, SESSION_STATE, TITLE, session_state};
 
@@ -165,13 +175,15 @@ fn library<O: StoryObserver>(story: &mut Show<'_, '_, O>) -> Result<()> {
     }
     story.tempo(StoryTempo::STANDARD)?;
     for filter in [SCENERY, ARMED] {
-        let _loaded = story
-            .tap(Target::Filter(filter.into()), Button::Primary, GLIDE)?
-            .until(Condition::new(
-                format!("filter `{filter}` armed"),
-                move |state: &Observation| state.filter == filter && state.result_posts > 0,
-            ))?;
-        let _painted = story.wait(painted())?;
+        requery(story, |story| {
+            let _armed = story
+                .tap(Target::Filter(filter.into()), Button::Primary, GLIDE)?
+                .until(Condition::new(
+                    format!("filter `{filter}` armed"),
+                    move |state: &Observation| state.filter == filter,
+                ))?;
+            Ok(())
+        })?;
         story.hold(Duration::from_millis(1_400))?;
     }
     Ok(())
@@ -200,22 +212,26 @@ fn algebra<O: StoryObserver>(story: &mut Show<'_, '_, O>) -> Result<()> {
         let candidate = Target::Completion(Completion::Query, tag.into());
         let _offered = story.anchor(&candidate)?;
         story.hold(Duration::from_millis(450))?;
-        let _chosen = story
-            .tap(&candidate, Button::Primary, GLIDE)?
-            .next_frame()?;
+        requery(story, |story| {
+            let _chosen = story
+                .tap(&candidate, Button::Primary, GLIDE)?
+                .next_frame()?;
+            Ok(())
+        })?;
         let _atom = story.anchor(Target::Atom(tag.into()))?;
-        settle(story)?;
         story.hold(Duration::from_millis(700))?;
     }
     for operator in [Operator::Xor, Operator::Or] {
-        let _flipped = story
-            .tap(
-                Target::GroupOperator(vec![0], operator),
-                Button::Primary,
-                GLIDE,
-            )?
-            .next_frame()?;
-        settle(story)?;
+        requery(story, |story| {
+            let _flipped = story
+                .tap(
+                    Target::GroupOperator(vec![0], operator),
+                    Button::Primary,
+                    GLIDE,
+                )?
+                .next_frame()?;
+            Ok(())
+        })?;
         story.hold(Duration::from_millis(1_100))?;
     }
     Ok(())
@@ -247,19 +263,16 @@ fn viewer<O: StoryObserver>(story: &mut Show<'_, '_, O>) -> Result<()> {
         .tap(&tile.name, Button::Primary, GLIDE)?
         .until(Condition::new(
             "reference image open",
-            |state: &Observation| state.viewer_post.is_some(),
+            |state: &Observation| state.viewer.is_some(),
         ))?;
-    let surface = Target::ViewerSurface.wire();
-    let settled = story.wait_stable(
-        Duration::from_secs(10),
-        Duration::from_millis(250),
-        "viewer window geometry",
-        |frame| frame.anchor(&surface).map(|anchor| anchor.rect),
-    )?;
-    let [left, top, right, bottom] = settled
-        .anchor(&surface)
+    let rest = story.wait(Condition::new(
+        "reference image painted at rest",
+        |state: &Observation| state.viewer.is_some_and(|viewer| viewer.painted),
+    ))?;
+    let [left, top, right, bottom] = rest
+        .anchor(&Target::ViewerImage.wire())
         .ok_or_else(|| Error::Verdict {
-            detail: "the open viewer published no image surface".to_owned(),
+            detail: "the painted viewer published no image".to_owned(),
         })?
         .rect;
     for (x, y) in [(0.38, 0.42), (0.6, 0.58)] {
@@ -268,7 +281,7 @@ fn viewer<O: StoryObserver>(story: &mut Show<'_, '_, O>) -> Result<()> {
             (top + (bottom - top) * y) as i16,
         );
         let _ring = story.motion_to(point, GLIDE)?.next_frame()?;
-        let _splash = story.session().click(point.0, point.1, Button::Primary)?;
+        let _splash = story.click_at(point, Button::Primary)?.next_frame()?;
         story.hold(Duration::from_millis(900))?;
     }
     story.still("viewer")?;
@@ -290,15 +303,19 @@ fn viewer<O: StoryObserver>(story: &mut Show<'_, '_, O>) -> Result<()> {
     if let Some(require) = require {
         let _read = story.point(&require, GLIDE)?.next_frame()?;
         story.hold(Duration::from_millis(800))?;
-        let _required = story.tap(&require, Button::Primary, GLIDE)?.next_frame()?;
+        requery(story, |story| {
+            let _required = story.tap(&require, Button::Primary, GLIDE)?.next_frame()?;
+            Ok(())
+        })?;
         story.hold(Duration::from_millis(900))?;
     }
     let _closed = story
         .key(Key::Escape)?
         .until(Condition::new("viewer closed", |state: &Observation| {
-            state.viewer_post.is_none()
+            state.viewer.is_none()
         }))?;
-    settle(story)
+    let _painted = story.wait(painted())?;
+    Ok(())
 }
 
 fn finale<O: StoryObserver>(story: &mut Show<'_, '_, O>) -> Result<()> {
@@ -310,28 +327,37 @@ fn finale<O: StoryObserver>(story: &mut Show<'_, '_, O>) -> Result<()> {
     let _gallery = story
         .tap(Target::Panel("gallery-controls"), Button::Primary, GLIDE)?
         .next_frame()?;
-    for sort in ["newest", "score"] {
-        let _sorted = story
-            .tap(Target::Sort(sort), Button::Primary, GLIDE)?
-            .next_frame()?;
-        settle(story)?;
+    for sort in [Sort::Newest, Sort::Score] {
+        requery(story, |story| {
+            let _sorted = story
+                .tap(Target::Sort(sort), Button::Primary, GLIDE)?
+                .next_frame()?;
+            Ok(())
+        })?;
         story.hold(Duration::from_millis(900))?;
     }
     story.tempo(StoryTempo::STANDARD)?;
     let grid = story.anchor(Target::GalleryContent)?.center();
     let _aim = story.motion_to(grid, GLIDE)?.next_frame()?;
     let _plunge = story.scroll(grid, 14)?.next_frame()?;
-    story.hold(Duration::from_millis(2_400))
+    let _painted = story.wait(painted())?;
+    story.hold(Duration::from_millis(1_600))
 }
 
-/// Wait out a result change: the count holds still and every tile paints.
-fn settle<O: StoryObserver>(story: &mut Show<'_, '_, O>) -> Result<()> {
-    let _stable = story.wait_stable(
-        Duration::from_secs(10),
-        Duration::from_millis(300),
-        "result count",
-        |frame| Some(frame.state.result_posts),
-    )?;
+/// Perform `act`, then wait until the search it requested is answered
+/// and every visible tile paints the answer.
+fn requery<'app, 'bed, O: StoryObserver>(
+    story: &mut Show<'app, 'bed, O>,
+    act: impl FnOnce(&mut Show<'app, 'bed, O>) -> Result<()>,
+) -> Result<()> {
+    let before = story.frame()?.state.search.requested;
+    act(story)?;
+    let _answered = story.wait(Condition::new(
+        "the requested search answered",
+        move |state: &Observation| {
+            state.search.requested > before && state.search.answered == state.search.requested
+        },
+    ))?;
     let _painted = story.wait(painted())?;
     Ok(())
 }
@@ -349,10 +375,7 @@ fn tiles<O: StoryObserver>(story: &mut Show<'_, '_, O>) -> Result<Vec<Anchor>> {
         .anchors
         .iter()
         .filter(|anchor| {
-            let name = anchor.name.as_ref();
-            name.rsplit_once('/')
-                .and_then(|(_, id)| id.parse().ok())
-                .is_some_and(|id| Target::Tile(id).wire() == name)
+            Target::tile_of(anchor.name.as_ref()).is_some()
                 && anchor.rect[1] >= content[1]
                 && anchor.rect[3] <= content[3]
         })
@@ -380,10 +403,10 @@ fn water_is(expected: &'static str) -> Condition<Observation> {
     )
 }
 
-/// The operator's mirror, admitted read-only: the index and its atlas are
-/// borrowed sealed, and the media cache is copied private. Configuration,
-/// filters, and session state are fixtures; favorites and credentials never
-/// enter.
+/// The operator's mirror, admitted read-only: the index and its kin atlas are
+/// borrowed sealed, and the cached media of every post the fixture filters
+/// resolve is copied private. Configuration, filters, and session state are
+/// fixtures; favorites and credentials never enter.
 struct Specimen {
     index: PathBuf,
     atlas: Option<PathBuf>,
@@ -392,17 +415,15 @@ struct Specimen {
 impl Specimen {
     fn admit(testbed: &Testbed) -> Result<Self> {
         let product = product_directory();
-        let index = operator_root("XDG_DATA_HOME", ".local/share")?
-            .join(product)
-            .join("index.redb");
+        let paths = ApplicationPaths::claim(PRODUCT).map_err(verdict)?;
+        let index = paths.index_path();
         demand(
             index.is_file(),
             format!("no specimen index at {}", index.display()),
         )?;
         let atlas = Some(index.with_extension("kin.u32")).filter(|atlas| atlas.is_file());
-        let media = operator_root("XDG_CACHE_HOME", ".cache")?
-            .join(product)
-            .join("media");
+        let shown = shown(&index)?;
+        let media = paths.media_dir();
         let _media = testbed.create_private_dir(format!("xdg/cache/{product}/media"))?;
         for entry in fs::read_dir(&media).map_err(|source| Error::Io {
             operation: "list specimen media cache",
@@ -414,8 +435,13 @@ impl Specimen {
                 path: media.clone(),
                 source,
             })?;
+            let post = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.split_once('-'))
+                .and_then(|(post, _)| post.parse::<u32>().ok());
             let path = entry.path();
-            if path.is_file() {
+            if post.is_some_and(|post| shown.contains(&post)) && path.is_file() {
                 let _copy = testbed.copy_private(
                     Path::new("xdg/cache")
                         .join(product)
@@ -448,12 +474,44 @@ impl Specimen {
     }
 }
 
-fn operator_root(variable: &str, fallback: &str) -> Result<PathBuf> {
-    env::var_os(variable)
-        .map(PathBuf::from)
-        .filter(|root| root.is_absolute())
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(fallback)))
-        .ok_or_else(|| Error::Verdict {
-            detail: format!("neither {variable} nor HOME locates the operator's mirror"),
-        })
+/// Every post a fixture filter resolves over the specimen, through the
+/// product's own retrieval. The index is sealed only for this census and
+/// closes before the viewer opens it.
+fn shown(index: &Path) -> Result<HashSet<u32>> {
+    #[derive(Deserialize)]
+    struct Library {
+        folder: Vec<Folder>,
+    }
+    #[derive(Deserialize)]
+    struct Folder {
+        #[serde(default)]
+        filter: Vec<Saved>,
+    }
+    #[derive(Deserialize)]
+    struct Saved {
+        query: String,
+    }
+
+    let source = std::str::from_utf8(FILTER_LIBRARY).map_err(verdict)?;
+    let library: Library = toml::from_str(source).map_err(verdict)?;
+    let index = Index::seal(index).map_err(verdict)?;
+    let search = |query: &model::Query, limit: usize| {
+        index
+            .search(query, model::Sort::Newest, DateRange::default(), limit)
+            .map_err(verdict)
+    };
+    let mut shown = HashSet::new();
+    for saved in library.folder.iter().flat_map(|folder| &folder.filter) {
+        let query = filter_expression::parse(&saved.query).map_err(verdict)?;
+        let candidates = search(&query, 0)?.candidates;
+        let hit = search(&query, usize::try_from(candidates).map_err(verdict)?)?;
+        shown.extend(hit.posts.iter().map(|post| post.id.0));
+    }
+    Ok(shown)
+}
+
+fn verdict(error: impl Display) -> Error {
+    Error::Verdict {
+        detail: format!("{error:#}"),
+    }
 }

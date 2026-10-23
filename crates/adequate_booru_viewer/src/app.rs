@@ -382,6 +382,10 @@ pub struct Bayonet {
     living_wait: eternalist_apps::LivingWait,
     #[cfg(feature = "egui-test")]
     tiles: crate::witness::Tiles,
+    #[cfg(feature = "egui-test")]
+    viewer_painted: bool,
+    #[cfg(feature = "egui-test")]
+    search_answered: u64,
 }
 
 /// How one launch holds the mirror, chosen on the command line.
@@ -455,7 +459,17 @@ impl Bayonet {
             mirror_active: self.valve().active(),
             viewer_tags_open: self.viewer_tags_open,
             tag_push_ready: self.danbooru_account.is_ready(),
-            viewer_post: self.viewer_post.as_ref().map(|post| post.id.0),
+            viewer: self
+                .viewer_post
+                .as_ref()
+                .map(|post| crate::witness::Viewer {
+                    post: post.id.0,
+                    painted: self.viewer_painted,
+                }),
+            search: crate::witness::Search {
+                requested: self.refresh_serial,
+                answered: self.search_answered,
+            },
             tiles: self.tiles,
         }
     }
@@ -705,6 +719,10 @@ impl Bayonet {
             living_wait: eternalist_apps::LivingWait::default(),
             #[cfg(feature = "egui-test")]
             tiles: crate::witness::Tiles::default(),
+            #[cfg(feature = "egui-test")]
+            viewer_painted: false,
+            #[cfg(feature = "egui-test")]
+            search_answered: 0,
         };
         startup("app.state.built");
         // Persist the first-run seed and its initial selection.
@@ -725,6 +743,7 @@ impl Bayonet {
         #[cfg(feature = "egui-test")]
         {
             self.tiles = crate::witness::Tiles::default();
+            self.viewer_painted = false;
         }
         let ctx = ui.ctx().clone();
         chrome::set_font_scale(&ctx, self.configuration.live().font_scale);

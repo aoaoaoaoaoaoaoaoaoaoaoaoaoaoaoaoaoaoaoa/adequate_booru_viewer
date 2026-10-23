@@ -30,8 +30,10 @@ Posts tagged `animated` are outside the reference-workbench contract, as are pos
 
 A sealed launch (`--sealed-index PATH`) opens an existing index read-only
 under a shared lock: no lane that absorbs is spawned, the kin atlas is mapped
-privately or rebuilt in memory, and the repair an uncleanly closed index
-demands stays in memory.
+read-only or rebuilt in memory and frozen, and the repair an uncleanly closed
+index demands stays in memory. The seal covers the index and its atlas alone:
+configuration, Session State, the Filter Library, local favorites, and the
+media cache keep their ordinary write paths, the first-run seed included.
 
 Startup restores all three domains before the first local search. The split is
 a contract: losing Session State must never lose user intent, so its loader

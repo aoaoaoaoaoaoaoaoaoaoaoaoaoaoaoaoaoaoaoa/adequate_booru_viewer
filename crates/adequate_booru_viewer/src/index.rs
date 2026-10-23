@@ -1353,7 +1353,7 @@ impl Scribe {
         let mut atlas = write(&self.kin);
         let tx = self.begin_quick_write("begin family hydration write")?;
         let mutation = kin::absorb(&tx, facts)?;
-        kin::seal_hydrated(&tx, root)?;
+        kin::brand_hydrated(&tx, root)?;
         tx.commit().context("commit family hydration")?;
         atlas.apply(&mutation)
     }
