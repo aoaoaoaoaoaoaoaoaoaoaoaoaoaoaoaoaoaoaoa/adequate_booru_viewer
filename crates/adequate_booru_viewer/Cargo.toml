@@ -22,10 +22,6 @@ name = "retrieval_bench"
 path = "examples/retrieval_bench.rs"
 
 [features]
-# Debug-only instrumentation umbrella. First tenant: the egui anchor probe
-# (src/probe.rs) the demo xtask drives. Never in the default set, so shipped
-# builds pay nothing.
-devtools = ["dep:serde_json", "brass_poolrooms/instrumentation"]
 egui-test = ["eternalist-apps/egui-test"]
 
 [dependencies]
@@ -35,7 +31,7 @@ base64 = "0.23.1"
 crossbeam-channel = "0.5.16"
 brass_poolrooms = "0.15.0"
 abv-contract = { path = "../abv-contract", version = "0.2.5" }
-egui = "=0.36.1"
+egui = { version = "=0.36.1", default-features = false }
 eternalist-apps = "0.12.0"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 memmap2 = "0.9.11"
@@ -44,7 +40,6 @@ regex = "1.13.1"
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 roaring = "0.11.5"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.151", optional = true }
 toml = "1.1.5"
 tracing = "0.1.44"
 ureq = { version = "3.4.0", features = ["json"] }
@@ -52,6 +47,7 @@ zune-core = "0.5.3"
 zune-jpeg = "0.5.15"
 
 [dev-dependencies]
+brass_poolrooms = { version = "0.15.0", features = ["glyph-audit"] }
 tempfile = "3.27.0"
 
 [lints]

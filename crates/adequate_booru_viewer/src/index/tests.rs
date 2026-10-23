@@ -10,7 +10,7 @@ fn search_tail_proves_exhaustion_without_a_silent_horizon() -> Result<()> {
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     ));
     remove_index(&path);
-    let index = Index::open(&path)?;
+    let index = Index::forge(&path)?;
     index.absorb(&[
         post(1, 10, Rating::General, &["solo"])?,
         post(2, 20, Rating::General, &["solo"])?,
@@ -48,7 +48,7 @@ fn boolean_query_evaluator_matches_its_truth_algebra() -> Result<()> {
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     ));
     remove_index(&path);
-    let index = Index::open(&path)?;
+    let index = Index::forge(&path)?;
     let records = (0_u8..8)
         .map(|mask| {
             let tags = [("a", 1), ("b", 2), ("c", 4)]
@@ -92,7 +92,7 @@ fn absorption_is_query_visible_across_merge_replacement_and_retraction() -> Resu
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     ));
     remove_index(&path);
-    let index = Index::open(&path)?;
+    let index = Index::forge(&path)?;
     index.absorb(&[
         post(1, 10, Rating::General, &["solo", "bikini"])?,
         post(2, 20, Rating::General, &["solo"])?,
@@ -173,7 +173,7 @@ fn tag_kind_hints_are_durable() -> Result<()> {
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     ));
     remove_index(&path);
-    let index = Index::open(&path)?;
+    let index = Index::forge(&path)?;
     let idol = Tag::forge("idol").context("idol tag")?;
     let mut post = post(7, 10, Rating::General, &["idol"])?;
     post.tag_hints = vec![TagHint::new(idol.clone(), TagKind::Character)];
@@ -187,7 +187,7 @@ fn tag_kind_hints_are_durable() -> Result<()> {
         Some(TagKind::Character)
     );
     drop(index);
-    let index = Index::open(&path)?;
+    let index = Index::forge(&path)?;
     assert_eq!(index.tag_kind(&idol)?, TagKind::Character);
     assert_eq!(
         index
@@ -208,7 +208,7 @@ fn date_range_compiles_to_chronological_id_window() -> Result<()> {
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     ));
     remove_index(&path);
-    let index = Index::open(&path)?;
+    let index = Index::forge(&path)?;
     index.absorb(&[
         dated_post(10, 10, "2024-01-01", &["solo"])?,
         dated_post(20, 40, "2024-06-01", &["solo"])?,
@@ -234,7 +234,7 @@ fn family_projection_keeps_the_strongest_matching_member() -> Result<()> {
         "adequate-booru-families-{}.redb",
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     ));
-    let index = Index::open(&path)?;
+    let index = Index::forge(&path)?;
     index.absorb_harvest(&[
         harvest(post(1, 10, Rating::General, &["solo"])?, None, true),
         harvest(post(2, 100, Rating::General, &["solo"])?, Some(1), false),
@@ -343,7 +343,7 @@ fn family_projection_keeps_the_strongest_matching_member() -> Result<()> {
     assert_eq!(hidden_tree.badge().map(|badge| badge.posts), Some(2));
 
     drop(index);
-    let reopened = Index::open(&path)?;
+    let reopened = Index::forge(&path)?;
     assert_eq!(reopened.family_tree(PostId(2))?.root, PostId(1));
     assert!(reopened.family_hydrated(PostId(3))?);
     assert_eq!(reopened.family_tree(PostId(12))?.root, PostId(10));
@@ -358,7 +358,7 @@ fn reparenting_amends_both_reverse_edges_and_the_atlas() -> Result<()> {
         "adequate-booru-reparent-{}.redb",
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     ));
-    let index = Index::open(&path)?;
+    let index = Index::forge(&path)?;
     index.absorb_harvest(&[
         harvest(post(20, 10, Rating::General, &["solo"])?, None, true),
         harvest(post(21, 30, Rating::General, &["solo"])?, Some(20), false),
@@ -397,7 +397,7 @@ fn local_favorites_prefix_every_sort_without_escaping_the_query() -> Result<()> 
         "adequate-booru-local-favorites-{}.redb",
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     ));
-    let index = Index::open(&path)?;
+    let index = Index::forge(&path)?;
     let mut root = post(1, 1, Rating::General, &["solo"])?;
     root.favs = 1;
     let mut child = post(2, 100, Rating::General, &["solo"])?;
@@ -498,6 +498,50 @@ fn atom(raw: &str) -> Result<QueryAtom> {
     Tag::forge(raw)
         .map(QueryAtom::Tag)
         .context("forge test tag")
+}
+
+/// abv never drops its database at exit, so the index it leaves claims to need
+/// a repair that redb's read-only open refuses. Sealing must still open such an
+/// index and answer from it while every byte on disk stays as it was.
+#[test]
+fn sealing_reads_an_abandoned_index_without_writing() -> Result<()> {
+    let stem = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let path = std::env::temp_dir().join(format!("adequate-booru-forged-{stem}.redb"));
+    let abandoned = std::env::temp_dir().join(format!("adequate-booru-abandoned-{stem}.redb"));
+    remove_index(&path);
+    remove_index(&abandoned);
+    let scribe = Index::forge(&path)?;
+    scribe.absorb(&[
+        post(1, 10, Rating::General, &["solo"])?,
+        post(2, 20, Rating::General, &["solo"])?,
+    ])?;
+    drop(scribe);
+    let live = Index::forge(&path)?;
+    let _copied = std::fs::copy(&path, &abandoned)?;
+    drop(live);
+    assert!(
+        redb::ReadOnlyDatabase::open(&abandoned).is_err(),
+        "the abandoned copy must demand the repair redb refuses read-only"
+    );
+    let before = std::fs::read(&abandoned)?;
+    let sealed = Index::seal(&abandoned)?;
+    let hit = sealed.search(&Query::parse("solo"), Sort::Score, DateRange::default(), 10)?;
+    assert_eq!(
+        hit.posts.iter().map(|post| post.id).collect::<Vec<_>>(),
+        [PostId(2), PostId(1)]
+    );
+    drop(sealed);
+    assert!(
+        std::fs::read(&abandoned)? == before,
+        "sealing wrote the index"
+    );
+    assert!(
+        !abandoned.with_extension("kin.u32").exists(),
+        "sealing wrote an atlas"
+    );
+    remove_index(&path);
+    remove_index(&abandoned);
+    Ok(())
 }
 
 fn post(id: u32, score: i32, rating: Rating, tags: &[&str]) -> Result<PostRecord> {

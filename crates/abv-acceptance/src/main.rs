@@ -4,16 +4,20 @@ use std::{
     time::Duration,
 };
 
+use abv_contract::{Completion, TagPush, Target};
 use adequate_booru_viewer::{
     index::Index,
     model::{Harvest, Kin, PostId, PostRecord, Rating, Tag, TagHint, TagKind},
 };
+use egui_demo::Showcase;
 use egui_tester::{
     AppCommand, Application, Backend, Button, Condition, Error, Frame, Graphics, Key, Modifiers,
     Motion, Network, PixelRegion, Probe, ReactionBudget, Result, Story, Testbed, TestbedBuilder,
     WaylandConfig, WindowQuery, X11Config, demand,
 };
 use serde::Deserialize;
+
+mod showcase;
 
 const TITLE: &str = "adequate booru viewer";
 fn session_state() -> String {
@@ -32,14 +36,13 @@ const FIXTURE_POSTS: [(u32, i32, u32); 7] = [
     (8_999_996, 37, 2),
     (TAIL_POST, 36, 1),
 ];
-const VIEWER_TOOLBAR: &str = "viewer:toolbar";
-const VIEWER_TAG_DRAWER: &str = "viewer:tag-drawer";
 const WAIT: Duration = Duration::from_secs(5);
+const FILM: &str = "abv-showcase";
 const ACCEPTANCE_CONFIG: &[u8] = b"prefetch_on_hover = true\n\n\
     [mirror]\npolicy = \"paused\"\n\n\
     [danbooru.account]\nlogin = \"acceptance\"\napi_key_file = \"danbooru.token\"\n";
-const DEMO_FILTERS: &[u8] = include_bytes!("../../../demo/wet/filters.toml");
-const DEMO_SESSION_STATE: &[u8] = include_bytes!("../../../demo/wet/slate.toml");
+const FILTER_LIBRARY: &[u8] = include_bytes!("../fixtures/filters.toml");
+const SESSION_STATE: &[u8] = include_bytes!("../fixtures/slate.toml");
 
 fn main() -> Result<()> {
     match env::args().nth(1).as_deref() {
@@ -60,29 +63,41 @@ fn main() -> Result<()> {
         builder = builder.failure_artifacts(artifacts);
     }
     builder.run(|testbed| {
-        seed(testbed)?;
         let harness = Harness {
             testbed,
             binary: &binary,
             helper: &helper,
             artifacts: artifacts.as_deref(),
         };
-        if cli.smoke {
-            smoke(&harness, cli.backend)
-        } else {
-            query_completion(&harness)?;
-            reset_durable_state(testbed)?;
-            keyboard_contract(&harness)?;
-            reset_durable_state(testbed)?;
-            water_persists(&harness)?;
-            reset_durable_state(testbed)?;
-            viewer_persists(&harness)?;
-            reset_durable_state(testbed)?;
-            native_effects(&harness)?;
-            println!("abv acceptance passed under {}", harness.testbed.id());
-            Ok(())
+        match cli.rail {
+            Rail::Suite => suite(&harness),
+            Rail::Smoke => {
+                seed(testbed)?;
+                smoke(&harness, cli.backend)
+            }
+            Rail::Stills(directory) => {
+                showcase::perform(testbed, &binary, Showcase::stills(directory)?)
+            }
+            Rail::Film(directory) => {
+                showcase::perform(testbed, &binary, Showcase::film(directory, FILM)?)
+            }
         }
     })
+}
+
+fn suite(harness: &Harness<'_>) -> Result<()> {
+    seed(harness.testbed)?;
+    query_completion(harness)?;
+    reset_durable_state(harness.testbed)?;
+    keyboard_contract(harness)?;
+    reset_durable_state(harness.testbed)?;
+    water_persists(harness)?;
+    reset_durable_state(harness.testbed)?;
+    viewer_persists(harness)?;
+    reset_durable_state(harness.testbed)?;
+    native_effects(harness)?;
+    println!("abv acceptance passed under {}", harness.testbed.id());
+    Ok(())
 }
 
 fn query_completion(harness: &Harness<'_>) -> Result<()> {
@@ -100,16 +115,18 @@ fn query_completion(harness: &Harness<'_>) -> Result<()> {
         ))?;
     let _typed = story.type_text("so")?.next_frame()?;
     let mut focus: Probe<Observation> = app.witness()?.typed();
-    let _first = focus.wait_anchor(&app, "query-completion:soft_focus", WAIT)?;
-    let _candidate = focus.wait_anchor(&app, "query-completion:solo", WAIT)?;
+    let _first = focus.wait_anchor(&app, &completion(Completion::Query, "soft_focus"), WAIT)?;
+    let _candidate = focus.wait_anchor(&app, &completion(Completion::Query, "solo"), WAIT)?;
     let _cycled = story.key(Key::Tab)?.next_frame()?;
     let _chosen = story.key(Key::Return)?.next_frame()?;
-    let _atom = focus.wait_anchor(&app, "atom:solo", WAIT)?;
-    let _focused = story.click("field:tag-entry")?.next_frame()?;
+    let _atom = focus.wait_anchor(&app, &Target::Atom("solo".into()).to_string(), WAIT)?;
+    let _focused = story.click(Target::TagEntry)?.next_frame()?;
     let _typed = story.type_text("soft")?.next_frame()?;
-    let _candidate = focus.wait_anchor(&app, "query-completion:soft_focus", WAIT)?;
-    let _chosen = story.click("query-completion:soft_focus")?.next_frame()?;
-    let _atom = focus.wait_anchor(&app, "atom:soft_focus", WAIT)?;
+    let _candidate = focus.wait_anchor(&app, &completion(Completion::Query, "soft_focus"), WAIT)?;
+    let _chosen = story
+        .click(completion(Completion::Query, "soft_focus"))?
+        .next_frame()?;
+    let _atom = focus.wait_anchor(&app, &Target::Atom("soft_focus".into()).to_string(), WAIT)?;
     app.terminate()
 }
 
@@ -135,6 +152,13 @@ struct Observation {
     viewer_tags_open: bool,
     tag_push_ready: bool,
     viewer_post: Option<u32>,
+    tiles: TilesObservation,
+}
+
+#[derive(Debug, Deserialize)]
+struct TilesObservation {
+    visible: u32,
+    painted: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -252,9 +276,9 @@ fn water_persists(harness: &Harness<'_>) -> Result<()> {
         "full fixture row ready",
         |state: &Observation| state.result_posts == FIXTURE_POSTS.len(),
     ))?;
-    let content = story.anchor("gallery:content")?;
-    let gutter = story.anchor("gallery:screw-gutter")?;
-    let tail = story.anchor(format!("tile:{TAIL_POST}"))?;
+    let content = story.anchor(Target::GalleryContent)?;
+    let gutter = story.anchor(Target::GalleryGutter)?;
+    let tail = story.anchor(Target::Tile(TAIL_POST))?;
     // ScrewScroll's gutter is outside `inner_rect`; virtualized tile geometry
     // must be calculated from that content span before the row is allocated.
     demand(
@@ -277,7 +301,7 @@ fn water_persists(harness: &Harness<'_>) -> Result<()> {
         "cold ABV witness began in an incoherent state",
     )?;
 
-    let panel = story.anchor(abv_contract::Target::Panel("ui-controls"))?;
+    let panel = story.anchor(Target::Panel("ui-controls"))?;
     let (x, y) = panel.center();
     let opened = story.session().click(x, y, Button::Primary)?;
     let _open = story
@@ -287,7 +311,7 @@ fn water_persists(harness: &Harness<'_>) -> Result<()> {
         }))?;
     let dry_frame = story.capture()?;
 
-    let wet = story.anchor(abv_contract::Target::Water(abv_contract::Water::Wet))?;
+    let wet = story.anchor(Target::Water(abv_contract::Water::Wet))?;
     let (x, y) = wet.center();
     let selected = story.session().click(x, y, Button::Primary)?;
     let _wet = story.reaction(selected).until(water_is("wet"))?;
@@ -319,7 +343,7 @@ fn water_persists(harness: &Harness<'_>) -> Result<()> {
     let restarted = harness.launch(true)?;
     let mut story = harness.story(&restarted)?;
     let _restored = story.wait(water_is("wet"))?;
-    let dry = story.anchor(abv_contract::Target::Water(abv_contract::Water::Dry))?;
+    let dry = story.anchor(Target::Water(abv_contract::Water::Dry))?;
     let (x, y) = dry.center();
     let selected = story.session().click(x, y, Button::Primary)?;
     let _dry = story.reaction(selected).until(water_is("dry"))?;
@@ -334,7 +358,7 @@ fn viewer_persists(harness: &Harness<'_>) -> Result<()> {
         "seeded posts ready for viewer restoration",
         |state: &Observation| state.result_posts == FIXTURE_POSTS.len(),
     ))?;
-    let tile = story.anchor(format!("tile:{EFFECT_POST}"))?;
+    let tile = story.anchor(Target::Tile(EFFECT_POST))?;
     let (x, y) = tile.center();
     let opened = story.session().click(x, y, Button::Primary)?;
     let _viewer = story.reaction(opened).until(Condition::new(
@@ -383,9 +407,7 @@ fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
     let name = story.anchor("eternalist.application.name")?.rect;
     let help = story.anchor("eternalist.application.help")?.rect;
     let settings = story.anchor("eternalist.settings.open")?.rect;
-    let first_panel = story
-        .anchor(abv_contract::Target::Panel("filter-library"))?
-        .rect;
+    let first_panel = story.anchor(Target::Panel("filter-library"))?.rect;
     demand(
         name[0] < help[0]
             && help[0] < settings[0]
@@ -490,7 +512,7 @@ fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
             "reference query opened",
             |state: &Observation| state.query_open,
         ))?;
-    let _tag_entry = focus.wait_focus(&app, &abv_contract::Target::TagEntry.to_string(), WAIT)?;
+    let _tag_entry = focus.wait_focus(&app, &Target::TagEntry.to_string(), WAIT)?;
     let deferred = story
         .chord(Modifiers::ALT, Key::Character('g'))?
         .next_frame()?
@@ -501,13 +523,13 @@ fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
     )?;
 
     let _previous_control = story.chord(Modifiers::SHIFT, Key::Tab)?.next_frame()?;
-    let query_panel = abv_contract::Target::Panel("reference-query").to_string();
+    let query_panel = Target::Panel("reference-query").to_string();
     let _query_header = focus.wait_focus(&app, &query_panel, WAIT)?;
     let _next_control = story.key(Key::Tab)?.next_frame()?;
-    let _tag_entry = focus.wait_focus(&app, &abv_contract::Target::TagEntry.to_string(), WAIT)?;
+    let _tag_entry = focus.wait_focus(&app, &Target::TagEntry.to_string(), WAIT)?;
 
     let _next_panel = story.chord(Modifiers::CTRL, Key::Tab)?.next_frame()?;
-    let gallery_panel = abv_contract::Target::Panel("gallery-controls").to_string();
+    let gallery_panel = Target::Panel("gallery-controls").to_string();
     let _gallery_header = focus.wait_focus(&app, &gallery_panel, WAIT)?;
     let _previous_panel = story
         .chord(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab)?
@@ -538,7 +560,7 @@ fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
     let _next_panel = story.chord(Modifiers::CTRL, Key::Tab)?.next_frame()?;
     let _gallery_header = focus.wait_focus(&app, &gallery_panel, WAIT)?;
     let _opened_gallery = story.key(Key::Return)?.next_frame()?;
-    let rail_target = abv_contract::Target::ImagesPerRow.to_string();
+    let rail_target = Target::ImagesPerRow.to_string();
     let wheel_point = story.anchor(&gallery_panel)?.center();
     let screen_bottom =
         i16::try_from(story.capture()?.height().saturating_sub(20)).map_err(|_| {
@@ -585,12 +607,11 @@ fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
         "gallery adjustment disturbed the selected query group",
     )?;
 
-    let tile = story.anchor(format!("tile:{EFFECT_POST}"))?;
+    let tile = story.anchor(Target::Tile(EFFECT_POST))?;
     let (x, y) = tile.center();
     let opened = story.session().click(x, y, Button::Primary)?;
     let _opened = story.reaction(opened).next_frame()?;
-    let _viewer =
-        focus.wait_anchor(&app, &abv_contract::Target::ViewerSurface.to_string(), WAIT)?;
+    let _viewer = focus.wait_anchor(&app, &Target::ViewerSurface.to_string(), WAIT)?;
     let controls = [
         abv_contract::ViewerControl::Danbooru,
         abv_contract::ViewerControl::Close,
@@ -602,12 +623,12 @@ fn keyboard_contract(harness: &Harness<'_>) -> Result<()> {
         abv_contract::ViewerControl::Next,
         abv_contract::ViewerControl::Danbooru,
     ];
-    let first = abv_contract::Target::ViewerControl(controls[0]).to_string();
+    let first = Target::ViewerControl(controls[0]).to_string();
     let _entered = story.key(Key::Tab)?.next_frame()?;
     let _entry = focus.wait_focus(&app, &first, WAIT)?;
     for control in &controls[1..] {
         let _next = story.key(Key::Tab)?.next_frame()?;
-        let target = abv_contract::Target::ViewerControl(*control).to_string();
+        let target = Target::ViewerControl(*control).to_string();
         let _focused = focus.wait_focus(&app, &target, WAIT)?;
     }
 
@@ -641,11 +662,11 @@ fn native_effects(harness: &Harness<'_>) -> Result<()> {
         format!("Ctrl+C copied `{clipboard}` instead of the tag entry"),
     )?;
 
-    let tile = story.anchor(format!("tile:{EFFECT_POST}"))?;
+    let tile = story.anchor(Target::Tile(EFFECT_POST))?;
     let (x, y) = tile.center();
     let _opened = story.session().click(x, y, Button::Primary)?;
-    let link_target = format!("danbooru:{EFFECT_POST}");
-    let geometry_target = abv_contract::Target::ViewerSurface.to_string();
+    let link_target = Target::DanbooruLink(EFFECT_POST).to_string();
+    let geometry_target = Target::ViewerSurface.to_string();
     let geometry_quiet = Duration::from_millis(500);
     let settled = story.wait_stable(
         Duration::from_secs(5),
@@ -664,19 +685,17 @@ fn native_effects(harness: &Harness<'_>) -> Result<()> {
             detail: "initial viewer frame omitted its image surface".to_owned(),
         })?;
     let mut focus: Probe<Observation> = app.witness()?.typed();
-    let tree_control =
-        abv_contract::Target::ViewerControl(abv_contract::ViewerControl::Tree).to_string();
+    let tree_control = Target::ViewerControl(abv_contract::ViewerControl::Tree).to_string();
     let _tree_ready = focus.wait_anchor(&app, &tree_control, Duration::from_secs(5))?;
     let _tree = story.click(&tree_control)?.next_frame()?;
-    let family_node = format!("family-node:{EFFECT_POST}");
+    let family_node = Target::FamilyNode(EFFECT_POST).to_string();
     let _tree_open = focus.wait_anchor(&app, &family_node, Duration::from_secs(5))?;
     let _tree_right = story.key(Key::Right)?.next_frame()?;
     let _tree_retained = focus.wait_anchor(&app, &family_node, Duration::from_secs(5))?;
     let _tree_home = story.key(Key::Home)?.next_frame()?;
     let _tree_retained = focus.wait_anchor(&app, &family_node, Duration::from_secs(5))?;
     let _image = story.key(Key::Escape)?.next_frame()?;
-    let tag_control =
-        abv_contract::Target::ViewerControl(abv_contract::ViewerControl::Tags).to_string();
+    let tag_control = Target::ViewerControl(abv_contract::ViewerControl::Tags).to_string();
     let _image_open = focus.wait_anchor(&app, &tag_control, Duration::from_secs(5))?;
     let _tree = story.key(Key::Character('r'))?.next_frame()?;
     let _tree_open = focus.wait_anchor(&app, &family_node, Duration::from_secs(5))?;
@@ -685,7 +704,7 @@ fn native_effects(harness: &Harness<'_>) -> Result<()> {
     let _tree = story.key(Key::Character('r'))?.next_frame()?;
     let _tree_open = focus.wait_anchor(&app, &family_node, Duration::from_secs(5))?;
     let _next = story.chord(Modifiers::ALT, Key::Right)?.next_frame()?;
-    let next_link = format!("danbooru:{NEXT_POST}");
+    let next_link = Target::DanbooruLink(NEXT_POST).to_string();
     let _next_open = focus.wait_anchor(&app, &next_link, Duration::from_secs(5))?;
     let _returned = story.key(Key::Left)?.next_frame()?;
     let _effect_open = focus.wait_anchor(&app, &link_target, Duration::from_secs(5))?;
@@ -713,12 +732,12 @@ fn native_effects(harness: &Harness<'_>) -> Result<()> {
             detail: "open tag drawer frame omitted its image surface".to_owned(),
         })?;
     let toolbar = opened
-        .anchor(VIEWER_TOOLBAR)
+        .anchor(&Target::ViewerToolbar.wire())
         .ok_or_else(|| Error::Verdict {
             detail: "open viewer omitted its toolbar geometry".to_owned(),
         })?;
     let tag_drawer = opened
-        .anchor(VIEWER_TAG_DRAWER)
+        .anchor(&Target::TagDrawer.wire())
         .ok_or_else(|| Error::Verdict {
             detail: "open viewer omitted its tag-drawer geometry".to_owned(),
         })?;
@@ -729,22 +748,32 @@ fn native_effects(harness: &Harness<'_>) -> Result<()> {
             toolbar.rect, tag_drawer.rect
         ),
     )?;
-    let _entry_ready = focus.wait_anchor(&app, "field:tag-push", WAIT)?;
-    let _focused = story.click("field:tag-push")?.next_frame()?;
+    let _entry_ready =
+        focus.wait_anchor(&app, &Target::TagPush(TagPush::Field).to_string(), WAIT)?;
+    let _focused = story.click(Target::TagPush(TagPush::Field))?.next_frame()?;
     let _typed = story.type_text("so")?.next_frame()?;
-    let _first = focus.wait_anchor(&app, "push-completion:soft_focus", WAIT)?;
-    let _completion = focus.wait_anchor(&app, "push-completion:solo", WAIT)?;
+    let _first = focus.wait_anchor(&app, &completion(Completion::TagPush, "soft_focus"), WAIT)?;
+    let _completion = focus.wait_anchor(&app, &completion(Completion::TagPush, "solo"), WAIT)?;
     let _cycled = story.key(Key::Tab)?.next_frame()?;
     let _staged = story.key(Key::Return)?.next_frame()?;
-    let _pending = focus.wait_anchor(&app, "tag-push:pending:solo", WAIT)?;
-    let _focused = story.click("field:tag-push")?.next_frame()?;
+    let _pending = focus.wait_anchor(&app, &Target::PendingTag("solo".into()).to_string(), WAIT)?;
+    let _focused = story.click(Target::TagPush(TagPush::Field))?.next_frame()?;
     let _typed = story.type_text("soft")?.next_frame()?;
-    let _completion = focus.wait_anchor(&app, "push-completion:soft_focus", WAIT)?;
-    let _staged = story.click("push-completion:soft_focus")?.next_frame()?;
-    let _pending = focus.wait_anchor(&app, "tag-push:pending:soft_focus", WAIT)?;
-    let _pushed = story.click("tag-push:export")?.next_frame()?;
-    let _fault = focus.wait_anchor(&app, "tag-push:fault", WAIT)?;
-    let _pending = focus.wait_anchor(&app, "tag-push:pending:solo", WAIT)?;
+    let _completion =
+        focus.wait_anchor(&app, &completion(Completion::TagPush, "soft_focus"), WAIT)?;
+    let _staged = story
+        .click(completion(Completion::TagPush, "soft_focus"))?
+        .next_frame()?;
+    let _pending = focus.wait_anchor(
+        &app,
+        &Target::PendingTag("soft_focus".into()).to_string(),
+        WAIT,
+    )?;
+    let _pushed = story
+        .click(Target::TagPush(TagPush::Export))?
+        .next_frame()?;
+    let _fault = focus.wait_anchor(&app, &Target::TagPush(TagPush::Fault).to_string(), WAIT)?;
+    let _pending = focus.wait_anchor(&app, &Target::PendingTag("solo".into()).to_string(), WAIT)?;
     if let Some(artifacts) = harness.artifacts {
         story
             .capture()?
@@ -806,6 +835,10 @@ fn clipboard_text(harness: &Harness<'_>) -> Result<String> {
     Ok(exit.stdout.trim_end().to_owned())
 }
 
+fn completion(entry: Completion, tag: &'static str) -> String {
+    Target::Completion(entry, tag.into()).to_string()
+}
+
 fn water_is(expected: &'static str) -> Condition<Observation> {
     Condition::new(
         format!("water mode {expected}"),
@@ -824,7 +857,7 @@ fn seed(testbed: &Testbed) -> Result<()> {
     reset_durable_state(testbed)?;
     let data =
         testbed.create_private_dir(format!("xdg/data/{}", abv_contract::product_directory()))?;
-    let index = Index::open(&data.join("index.redb")).map_err(|error| Error::Verdict {
+    let index = Index::forge(&data.join("index.redb")).map_err(|error| Error::Verdict {
         detail: format!("create acceptance index: {error:#}"),
     })?;
     let tags = ["blue_hair", "red_eyes", "1girl", "looking_at_viewer"]
@@ -915,9 +948,9 @@ fn reset_durable_state(testbed: &Testbed) -> Result<()> {
             "xdg/data/{}/filters.toml",
             abv_contract::product_directory()
         ),
-        DEMO_FILTERS,
+        FILTER_LIBRARY,
     )?;
-    let _session_state = testbed.write_private(session_state().as_str(), DEMO_SESSION_STATE)?;
+    let _session_state = testbed.write_private(session_state().as_str(), SESSION_STATE)?;
     Ok(())
 }
 
@@ -963,15 +996,25 @@ fn sibling_binary(executable: &Path) -> Result<PathBuf> {
 
 struct Cli {
     artifacts: Option<PathBuf>,
-    smoke: bool,
+    rail: Rail,
     backend: Backend,
+}
+
+/// Which take one invocation performs.
+enum Rail {
+    Suite,
+    Smoke,
+    /// `--stills DIR`: the showcase, developing its stills.
+    Stills(PathBuf),
+    /// `--film DIR`: the showcase, also recording its film.
+    Film(PathBuf),
 }
 
 impl Cli {
     fn parse() -> Result<Self> {
         let mut args = env::args_os().skip(1);
         let mut artifacts = None;
-        let mut smoke = false;
+        let mut rail = Rail::Suite;
         let mut backend = Backend::X11(X11Config::default());
         while let Some(argument) = args.next() {
             match argument.to_str() {
@@ -982,7 +1025,17 @@ impl Cli {
                         }
                     })?));
                 }
-                Some("--smoke") => smoke = true,
+                Some("--smoke") => rail = Rail::Smoke,
+                Some(flag @ ("--stills" | "--film")) => {
+                    let directory = PathBuf::from(args.next().ok_or_else(|| Error::Verdict {
+                        detail: format!("{flag} requires a directory"),
+                    })?);
+                    rail = if flag == "--stills" {
+                        Rail::Stills(directory)
+                    } else {
+                        Rail::Film(directory)
+                    };
+                }
                 Some("--backend") => {
                     let value = args.next().ok_or_else(|| Error::Verdict {
                         detail: "--backend requires x11 or wayland".to_owned(),
@@ -1016,7 +1069,7 @@ impl Cli {
                 }
             }
         }
-        if matches!(backend, Backend::Wayland(_)) && !smoke {
+        if matches!(backend, Backend::Wayland(_)) && !matches!(rail, Rail::Smoke) {
             return Err(Error::Verdict {
                 detail: "Wayland admits launch-and-capture smoke only; native stories require X11"
                     .to_owned(),
@@ -1024,7 +1077,7 @@ impl Cli {
         }
         Ok(Self {
             artifacts,
-            smoke,
+            rail,
             backend,
         })
     }

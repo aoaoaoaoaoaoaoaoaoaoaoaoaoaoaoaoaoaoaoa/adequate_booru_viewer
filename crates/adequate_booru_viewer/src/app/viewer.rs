@@ -195,7 +195,11 @@ fn viewer_title_bar(
                     chrome::TypeRole::Label.text(viewer_id_date(post)).strong(),
                     crate::booru::post_url(post.id),
                 );
-                crate::probe_anchor!(ui, format!("danbooru:{}", post.id.0), link.interact_rect);
+                crate::witness_anchor!(
+                    ui,
+                    abv_contract::Target::DanbooruLink(post.id.0),
+                    link.interact_rect
+                );
                 record_control(ui, abv_contract::ViewerControl::Danbooru, &link);
                 let _link = link.on_hover_text("open on Danbooru");
                 let _meta = ui.label(
@@ -320,7 +324,7 @@ fn viewer_title_bar(
                     });
             });
         });
-    crate::probe_anchor!(ui, "viewer:toolbar", _bar.response.rect);
+    crate::witness_anchor!(ui, abv_contract::Target::ViewerToolbar, _bar.response.rect);
     actions
 }
 
@@ -947,7 +951,7 @@ impl Bayonet {
                             egui::Layout::left_to_right(egui::Align::Min),
                             |ui| {
                                 ui.spacing_mut().item_spacing.x = gutter;
-                                crate::probe_anchor!(
+                                crate::witness_anchor!(
                                     ui,
                                     abv_contract::Target::ViewerSurface,
                                     egui::Rect::from_min_size(ui.cursor().left_top(), image_box)
@@ -978,9 +982,9 @@ impl Bayonet {
                                         ),
                                     );
                                     self.water.pond_surface(response.rect);
-                                    crate::probe_anchor!(
+                                    crate::witness_anchor!(
                                         ui,
-                                        "viewer:image",
+                                        abv_contract::Target::ViewerImage,
                                         response.interact_rect
                                     );
                                     if response.clicked_by(egui::PointerButton::Primary)
@@ -1159,7 +1163,7 @@ impl Bayonet {
             if response.dragged() {
                 drag = response.drag_delta();
             }
-            crate::probe_anchor!(ui, format!("family-node:{}", node.id.0), rect);
+            crate::witness_anchor!(ui, abv_contract::Target::FamilyNode(node.id.0), rect);
             let plate = Plate::flat(rect);
             plate.paint(ui, response.hovered());
             if let Some(post) = &node.post {

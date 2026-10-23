@@ -33,7 +33,7 @@ fn main() -> Result<()> {
     let args = Args::parse()?;
     let paths = application_paths::claim()?;
     let index_path = args.index.unwrap_or_else(|| paths.index_path());
-    let index = Index::open(&index_path)?;
+    let index = Index::seal(&index_path)?;
     let stats = index.stats()?;
     let snapshot = Snapshot {
         index_path,

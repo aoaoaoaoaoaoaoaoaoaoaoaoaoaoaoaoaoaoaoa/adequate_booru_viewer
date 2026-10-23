@@ -62,7 +62,7 @@ impl TagCompletion {
         ui: &mut egui::Ui,
         cycle: Option<GroupCycle>,
         accept: bool,
-        _anchor: &'static str,
+        _entry: abv_contract::Completion,
         admit: impl Fn(&TagSuggestion) -> bool,
     ) -> Option<TagSuggestion> {
         let (_, suggestions) = self.memo.as_ref()?;
@@ -106,9 +106,9 @@ impl TagCompletion {
                     ),
                     selected,
                 );
-                crate::probe_anchor!(
+                crate::witness_anchor!(
                     ui,
-                    format!("{_anchor}:{}", suggestion.tag),
+                    abv_contract::Target::Completion(_entry, suggestion.tag.clone().into()),
                     chip.interact_rect
                 );
                 if chip.clicked() {

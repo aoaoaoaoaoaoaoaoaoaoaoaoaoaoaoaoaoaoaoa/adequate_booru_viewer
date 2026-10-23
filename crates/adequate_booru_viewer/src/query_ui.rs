@@ -157,9 +157,9 @@ fn render_group(
         let _header = ui.horizontal_wrapped(|ui| {
             let group_btn = controls::plate(ui, group_label(path, active_here), active_here)
                 .on_hover_text("click to select this group for new tags");
-            crate::probe_anchor!(
+            crate::witness_anchor!(
                 ui,
-                format!("group:{}", probe_path(path)),
+                abv_contract::Target::Group(path.clone()),
                 group_btn.interact_rect
             );
             if group_btn.clicked() {
@@ -189,9 +189,9 @@ fn render_group(
             for op in BoolOp::ALL {
                 let op_btn =
                     controls::plate(ui, op.label(), group.op == op).on_hover_text(op_blurb(op));
-                crate::probe_anchor!(
+                crate::witness_anchor!(
                     ui,
-                    format!("group-op:{}:{}", probe_path(path), op.label()),
+                    abv_contract::Target::GroupOperator(path.clone(), witness_operator(op)),
                     op_btn.interact_rect
                 );
                 if op_btn.clicked() {
@@ -317,9 +317,9 @@ fn render_atom(
             });
         }
         atom_label(ui, atom, negated, pattern_memo, tag_kind);
-        crate::probe_anchor!(
+        crate::witness_anchor!(
             ui,
-            format!("atom:{}", atom.term()),
+            abv_contract::Target::Atom(atom.term().into()),
             assembly.left.interact_rect
         );
     });
@@ -432,11 +432,11 @@ fn group_stroke(depth: usize, active: bool) -> egui::Stroke {
     egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(r, g, b, 96))
 }
 
-/// Dotted group path for probe anchor names (`[0,1]` -> `"0.1"`).
-#[cfg(any(feature = "devtools", feature = "egui-test"))]
-fn probe_path(path: &[usize]) -> String {
-    path.iter()
-        .map(|step| step.to_string())
-        .collect::<Vec<_>>()
-        .join(".")
+#[cfg(feature = "egui-test")]
+const fn witness_operator(op: BoolOp) -> abv_contract::Operator {
+    match op {
+        BoolOp::And => abv_contract::Operator::And,
+        BoolOp::Or => abv_contract::Operator::Or,
+        BoolOp::Xor => abv_contract::Operator::Xor,
+    }
 }

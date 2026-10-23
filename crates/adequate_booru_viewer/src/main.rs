@@ -4,36 +4,18 @@
 )]
 
 #[macro_export]
-macro_rules! probe_anchor {
+macro_rules! witness_anchor {
     ($ui:expr, $name:expr, $rect:expr) => {{
-        #[cfg(any(feature = "devtools", feature = "egui-test"))]
+        #[cfg(feature = "egui-test")]
         {
             let rect = $rect;
             if rect.is_positive() {
                 let name = $name;
-                #[cfg(feature = "egui-test")]
                 $crate::witness::anchor($ui, &name, rect);
-                #[cfg(feature = "devtools")]
-                if $crate::probe::probing() {
-                    $crate::probe::record($ui, name.to_string(), rect);
-                }
             }
         }
     }};
 }
-
-#[macro_export]
-macro_rules! probe_reset {
-    ($ctx:expr) => {{
-        #[cfg(feature = "devtools")]
-        if $crate::probe::probing() {
-            $crate::probe::reset($ctx);
-        }
-    }};
-}
-
-#[cfg(feature = "devtools")]
-mod probe;
 
 mod app;
 mod booru;
@@ -58,25 +40,41 @@ pub(crate) use adequate_booru_viewer::{
 
 pub(crate) use brass_poolrooms::{chrome, water};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
+use app::Launch;
+use std::path::PathBuf;
 
 fn main() -> Result<()> {
-    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
-    if arguments
-        .first()
-        .is_some_and(|argument| argument == "--version" || argument == "-V")
-    {
-        println!("abv {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+    let mut arguments = std::env::args_os().skip(1);
+    let mut paused = false;
+    let mut sealed = None;
+    while let Some(argument) = arguments.next() {
+        match argument.to_str() {
+            Some("--version" | "-V") => {
+                println!("abv {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            Some("--pause-mirror") => paused = true,
+            Some("--sealed-index") => {
+                sealed = Some(PathBuf::from(
+                    arguments
+                        .next()
+                        .context("--sealed-index requires an index path")?,
+                ));
+            }
+            _ => {}
+        }
     }
-    let pause_mirror = arguments
-        .iter()
-        .any(|argument| argument == "--pause-mirror");
+    let launch = match (sealed, paused) {
+        (Some(path), _) => Launch::Sealed(path),
+        (None, true) => Launch::Paused,
+        (None, false) => Launch::Configured,
+    };
     trace::startup("main.enter");
     let ctx = egui::Context::default();
     chrome::install(&ctx);
     let trace = eternalist_apps::TraceGuard::arm()?;
-    let result = host::run(eternalist_apps::Ingress::Desktop, ctx, pause_mirror);
+    let result = host::run(eternalist_apps::Ingress::Desktop, ctx, launch);
     trace.flush();
     result
 }

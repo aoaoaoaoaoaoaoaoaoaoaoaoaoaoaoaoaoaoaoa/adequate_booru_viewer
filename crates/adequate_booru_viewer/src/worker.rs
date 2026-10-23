@@ -7,7 +7,7 @@ use roaring::RoaringBitmap;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     fmt::Write as _,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, PoisonError},
     thread,
     time::{Duration, Instant},
@@ -17,7 +17,7 @@ use crate::{
     booru::{Booru as _, Danbooru, DanbooruAccount, TagDefinition},
     configuration::{DanbooruAccountConfig, MirrorPolicy},
     date::DateRange,
-    index::{CacheStats, FactMergeBudget, Index, TagSuggestion},
+    index::{CacheStats, FactMergeBudget, Index, Scribe, TagSuggestion, Tenure},
     kin::Backfill,
     media::{MediaCache, RgbaBlade, required_url},
     model::{
@@ -267,14 +267,91 @@ impl Klaxon {
 
 pub struct Worker {
     refresh_tx: Sender<RefreshCommand>,
-    warm_tx: Sender<WarmCommand>,
     family_tx: Sender<FamilyCommand>,
     definition_tx: Option<Sender<DefinitionCommand>>,
-    account_tx: Option<Sender<AccountCommand>>,
     media_tx: Sender<MediaCommand>,
-    mirror: MirrorValve,
+    /// The lanes that absorb into the index; a sealed session spawns none.
+    absorption: Option<Absorption>,
     crier: Klaxon,
     rx: Receiver<Event>,
+}
+
+struct Absorption {
+    warm_tx: Sender<WarmCommand>,
+    account_tx: Option<Sender<AccountCommand>>,
+    mirror: MirrorValve,
+}
+
+const SEALED: &str = "the index is sealed read-only for this session";
+
+impl Absorption {
+    fn spawn(
+        scribe: Scribe,
+        booru: &Danbooru,
+        read_gate: &RateGate,
+        events: &Klaxon,
+        mirror_policy: MirrorPolicy,
+        account_config: Option<DanbooruAccountConfig>,
+        config_dir: &Path,
+    ) -> (Self, AccountReadiness) {
+        let (warm_tx, warm_rx) = bounded(WARM_COMMAND_CAPACITY);
+        let _warm = thread::spawn({
+            let (booru, scribe, gate, events) = (
+                booru.clone(),
+                scribe.clone(),
+                read_gate.clone(),
+                events.clone(),
+            );
+            move || warm_loop(booru, scribe, gate, warm_rx, events)
+        });
+        let (account_tx, readiness) = match account_config {
+            None => (None, AccountReadiness::Unconfigured),
+            Some(config) => match DanbooruAccount::open(&config, config_dir) {
+                Ok(account) => {
+                    let (account_tx, account_rx) = bounded(ACCOUNT_COMMAND_CAPACITY);
+                    let _account = thread::spawn({
+                        let (scribe, events) = (scribe.clone(), events.clone());
+                        move || account_loop(account, scribe, account_rx, events)
+                    });
+                    (Some(account_tx), AccountReadiness::Ready)
+                }
+                Err(error) => (None, AccountReadiness::Unavailable(format!("{error:#}"))),
+            },
+        };
+        let mirror = MirrorValve::new(mirror_policy);
+        let _kin = thread::spawn({
+            let (booru, scribe, gate, mirror, events) = (
+                booru.clone(),
+                scribe.clone(),
+                read_gate.clone(),
+                mirror.clone(),
+                events.clone(),
+            );
+            move || kin_loop(booru, scribe, gate, mirror, events)
+        });
+        let _crawl = thread::spawn({
+            let (booru, scribe, gate, mirror, events) = (
+                booru.clone(),
+                scribe.clone(),
+                read_gate.clone(),
+                mirror.clone(),
+                events.clone(),
+            );
+            move || crawl_loop(booru, scribe, gate, mirror, events)
+        });
+        let _merge = thread::spawn({
+            let events = events.clone();
+            move || merge_loop(scribe, events)
+        });
+        (
+            Self {
+                warm_tx,
+                account_tx,
+                mirror,
+            },
+            readiness,
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -305,7 +382,7 @@ impl AccountReadiness {
 
 impl Worker {
     pub fn spawn(
-        index: Index,
+        tenure: Tenure,
         media: MediaCache,
         ctx: egui::Context,
         mirror_policy: MirrorPolicy,
@@ -313,7 +390,6 @@ impl Worker {
         config_dir: PathBuf,
     ) -> (Self, AccountReadiness) {
         let (refresh_tx, refresh_rx) = bounded(REFRESH_COMMAND_CAPACITY);
-        let (warm_tx, warm_rx) = bounded(WARM_COMMAND_CAPACITY);
         let (family_tx, family_rx) = bounded(FAMILY_COMMAND_CAPACITY);
         let (media_tx, media_rx) = bounded(MEDIA_COMMAND_CAPACITY);
         let (event_tx, event_rx) = bounded(EVENT_CAPACITY);
@@ -323,26 +399,19 @@ impl Worker {
         };
         let crier = event_tx.clone();
         let refresh_events = event_tx.clone();
-        let refresh_index = index.clone();
+        let refresh_index = Index::clone(&tenure);
         let _refresh =
             thread::spawn(move || refresh_loop(refresh_index, refresh_rx, refresh_events));
         let read_gate = RateGate::new(DANBOORU_READ_GAP);
         let booru = Danbooru::new();
-        let warm_booru = booru.clone();
-        let warm_events = event_tx.clone();
-        let warm_index = index.clone();
-        let warm_gate = read_gate.clone();
-        let _warm = thread::spawn(move || {
-            warm_loop(warm_booru, warm_index, warm_gate, warm_rx, warm_events);
-        });
         let family_booru = booru.clone();
-        let family_index = index.clone();
+        let family_tenure = tenure.clone();
         let family_gate = read_gate.clone();
         let family_events = event_tx.clone();
         let _family = thread::spawn(move || {
             family_loop(
                 family_booru,
-                family_index,
+                family_tenure,
                 family_gate,
                 family_rx,
                 family_events,
@@ -363,21 +432,6 @@ impl Worker {
             });
             definition_tx
         });
-        let (account_tx, account_readiness) = match account_config {
-            None => (None, AccountReadiness::Unconfigured),
-            Some(config) => match DanbooruAccount::open(&config, &config_dir) {
-                Ok(account) => {
-                    let (account_tx, account_rx) = bounded(ACCOUNT_COMMAND_CAPACITY);
-                    let account_index = index.clone();
-                    let account_events = event_tx.clone();
-                    let _account = thread::spawn(move || {
-                        account_loop(account, account_index, account_rx, account_events);
-                    });
-                    (Some(account_tx), AccountReadiness::Ready)
-                }
-                Err(error) => (None, AccountReadiness::Unavailable(format!("{error:#}"))),
-            },
-        };
         // One dispatcher keeps epoch culling and full-blade priority coherent;
         // a small fetcher pool overlaps network latency so thumbnails land in
         // parallel instead of one per round trip.
@@ -390,33 +444,33 @@ impl Worker {
             let _fetcher =
                 thread::spawn(move || media_fetch_loop(fetch_cache, fetch_work, fetch_events));
         }
-        let crawl_index = index.clone();
-        let crawl_events = event_tx.clone();
-        let crawl_gate = read_gate.clone();
-        let mirror = MirrorValve::new(mirror_policy);
-        let kin_booru = booru.clone();
-        let kin_index = index.clone();
-        let kin_gate = read_gate.clone();
-        let kin_events = event_tx.clone();
-        let kin_mirror = mirror.clone();
-        let _kin = thread::spawn(move || {
-            kin_loop(kin_booru, kin_index, kin_gate, kin_mirror, kin_events);
-        });
-        let crawl_mirror = mirror.clone();
-        let _crawl = thread::spawn(move || {
-            crawl_loop(booru, crawl_index, crawl_gate, crawl_mirror, crawl_events);
-        });
-        let merge_events = event_tx.clone();
-        let _merge = thread::spawn(move || merge_loop(index, merge_events));
+        let (absorption, account_readiness) = match tenure {
+            Tenure::Forged(scribe) => {
+                let (absorption, readiness) = Absorption::spawn(
+                    scribe,
+                    &booru,
+                    &read_gate,
+                    &event_tx,
+                    mirror_policy,
+                    account_config,
+                    &config_dir,
+                );
+                (Some(absorption), readiness)
+            }
+            Tenure::Sealed(_) => (
+                None,
+                account_config.map_or(AccountReadiness::Unconfigured, |_| {
+                    AccountReadiness::Unavailable(SEALED.to_owned())
+                }),
+            ),
+        };
         (
             Self {
                 refresh_tx,
-                warm_tx,
                 family_tx,
                 definition_tx,
-                account_tx,
                 media_tx,
-                mirror,
+                absorption,
                 crier,
                 rx: event_rx,
             },
@@ -476,6 +530,9 @@ impl Worker {
                 .try_send(DefinitionCommand { serial, tag })
                 .context("send tag-definition worker command"),
             Command::AddPostTags { id, tags } => self
+                .absorption
+                .as_ref()
+                .context(SEALED)?
                 .account_tx
                 .as_ref()
                 .context("Danbooru account is not configured")?
@@ -487,6 +544,9 @@ impl Worker {
                 first_page,
                 pages,
             } => self
+                .absorption
+                .as_ref()
+                .context(SEALED)?
                 .warm_tx
                 .try_send(WarmCommand::Warm {
                     query,
@@ -530,6 +590,9 @@ impl Worker {
                 .try_send(MediaCommand::Save { id, url, path })
                 .context("send media worker command"),
             Command::Refetch { id } => self
+                .absorption
+                .as_ref()
+                .context(SEALED)?
                 .warm_tx
                 .try_send(WarmCommand::Refetch(id))
                 .context("send refetch worker command"),
@@ -553,7 +616,9 @@ impl Worker {
     }
 
     pub fn set_mirror_policy(&self, policy: MirrorPolicy) {
-        self.mirror.set(policy);
+        if let Some(absorption) = &self.absorption {
+            absorption.mirror.set(policy);
+        }
     }
 }
 
@@ -773,7 +838,7 @@ fn collect_refresh(
 
 fn family_loop(
     booru: Danbooru,
-    index: Index,
+    tenure: Tenure,
     gate: RateGate,
     commands: Receiver<FamilyCommand>,
     events: Klaxon,
@@ -782,7 +847,7 @@ fn family_loop(
         for newer in commands.try_iter() {
             command = newer;
         }
-        match index.family_tree(command.id) {
+        match tenure.family_tree(command.id) {
             Ok(tree) => events.send(Event::Family {
                 serial: command.serial,
                 tree,
@@ -795,8 +860,11 @@ fn family_loop(
                 continue;
             }
         }
-        match hydrate_family(&booru, &index, &gate, command.id) {
-            Ok(true) => match index.family_tree(command.id) {
+        let Some(scribe) = tenure.scribe() else {
+            continue;
+        };
+        match hydrate_family(&booru, scribe, &gate, command.id) {
+            Ok(true) => match scribe.family_tree(command.id) {
                 Ok(tree) => events.send(Event::Family {
                     serial: command.serial,
                     tree,
@@ -853,7 +921,7 @@ fn definition_loop(
 
 fn account_loop(
     account: DanbooruAccount,
-    index: Index,
+    scribe: Scribe,
     commands: Receiver<AccountCommand>,
     events: Klaxon,
 ) {
@@ -864,7 +932,7 @@ fn account_loop(
                 write_gate.wait();
                 let (post, result) = match account.add_post_tags(id, &tags) {
                     Ok(harvest) => {
-                        let (post, stored) = absorb_account_harvest(&index, &harvest);
+                        let (post, stored) = absorb_account_harvest(&scribe, &harvest);
                         let result =
                             stored.map_err(|err| format!("store edited post {id}: {err:#}"));
                         (Some(post), result)
@@ -872,7 +940,7 @@ fn account_loop(
                     Err(fault) => {
                         let mut message = fault.message;
                         let post = fault.harvest.as_deref().map(|harvest| {
-                            let (post, stored) = absorb_account_harvest(&index, harvest);
+                            let (post, stored) = absorb_account_harvest(&scribe, harvest);
                             if let Err(err) = stored {
                                 let _written = write!(message, "; store reconciled post: {err:#}");
                             }
@@ -888,15 +956,20 @@ fn account_loop(
 }
 
 fn absorb_account_harvest(
-    index: &Index,
+    scribe: &Scribe,
     harvest: &crate::model::Harvest,
 ) -> (Box<PostRecord>, Result<()>) {
     let post = Box::new(harvest.post.clone());
-    let stored = index.absorb_harvest(std::slice::from_ref(harvest));
+    let stored = scribe.absorb_harvest(std::slice::from_ref(harvest));
     (post, stored)
 }
 
-fn hydrate_family(booru: &Danbooru, index: &Index, gate: &RateGate, focus: PostId) -> Result<bool> {
+fn hydrate_family(
+    booru: &Danbooru,
+    index: &Scribe,
+    gate: &RateGate,
+    focus: PostId,
+) -> Result<bool> {
     if index.family_hydrated(focus)? {
         return Ok(false);
     }
@@ -956,7 +1029,7 @@ fn hydrate_family(booru: &Danbooru, index: &Index, gate: &RateGate, focus: PostI
 
 fn warm_loop(
     booru: Danbooru,
-    index: Index,
+    index: Scribe,
     gate: RateGate,
     commands: Receiver<WarmCommand>,
     events: Klaxon,
@@ -1114,7 +1187,7 @@ impl MediaCommand {
     }
 }
 
-fn crawl_loop(booru: Danbooru, index: Index, gate: RateGate, mirror: MirrorValve, events: Klaxon) {
+fn crawl_loop(booru: Danbooru, index: Scribe, gate: RateGate, mirror: MirrorValve, events: Klaxon) {
     loop {
         mirror.await_flow();
         let gap = match crawl_once(&booru, &index, &gate) {
@@ -1141,7 +1214,7 @@ fn crawl_loop(booru: Danbooru, index: Index, gate: RateGate, mirror: MirrorValve
     }
 }
 
-fn merge_loop(index: Index, events: Klaxon) {
+fn merge_loop(index: Scribe, events: Klaxon) {
     loop {
         let gap = match index.merge_pending_facts(FactMergeBudget::STEADY) {
             Ok(merge) if merge.batches == 0 => MERGE_IDLE_GAP,
@@ -1164,7 +1237,7 @@ fn merge_loop(index: Index, events: Klaxon) {
 
 fn warm(
     booru: &Danbooru,
-    index: &Index,
+    index: &Scribe,
     gate: &RateGate,
     query: Query,
     sort: Sort,
@@ -1197,7 +1270,7 @@ fn warm(
     })
 }
 
-fn refetch(booru: &Danbooru, index: &Index, gate: &RateGate, id: PostId) -> Result<Event> {
+fn refetch(booru: &Danbooru, index: &Scribe, gate: &RateGate, id: PostId) -> Result<Event> {
     gate.wait();
     let posts = booru.single(id)?;
     index.absorb_harvest(&posts)?;
@@ -1209,7 +1282,7 @@ fn refetch(booru: &Danbooru, index: &Index, gate: &RateGate, id: PostId) -> Resu
     })
 }
 
-fn crawl_once(booru: &Danbooru, index: &Index, gate: &RateGate) -> Result<Event> {
+fn crawl_once(booru: &Danbooru, index: &Scribe, gate: &RateGate) -> Result<Event> {
     let before = index.crawl_before()?;
     gate.wait();
     let posts = booru.crawl_page(before)?;
@@ -1223,7 +1296,7 @@ fn crawl_once(booru: &Danbooru, index: &Index, gate: &RateGate) -> Result<Event>
     })
 }
 
-fn kin_loop(booru: Danbooru, index: Index, gate: RateGate, mirror: MirrorValve, events: Klaxon) {
+fn kin_loop(booru: Danbooru, index: Scribe, gate: RateGate, mirror: MirrorValve, events: Klaxon) {
     loop {
         mirror.await_flow();
         let gap = match kin_once(&booru, &index, &gate) {
@@ -1249,7 +1322,7 @@ fn kin_loop(booru: Danbooru, index: Index, gate: RateGate, mirror: MirrorValve, 
     }
 }
 
-fn kin_once(booru: &Danbooru, index: &Index, gate: &RateGate) -> Result<Event> {
+fn kin_once(booru: &Danbooru, index: &Scribe, gate: &RateGate) -> Result<Event> {
     let Backfill::Running(before) = index.kin_backfill()? else {
         return Ok(Event::KinCrawled {
             posts: 0,

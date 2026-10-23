@@ -1,12 +1,13 @@
 use anyhow::{Context as _, Result, bail};
 use redb::{
-    Database, ReadableDatabase as _, ReadableTable as _, ReadableTableMetadata as _,
-    TableDefinition, TableError,
+    Database, ReadTransaction, ReadableDatabase as _, ReadableTable as _,
+    ReadableTableMetadata as _, TableDefinition, TableError,
 };
 use roaring::RoaringBitmap;
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
+    ops::Deref,
     path::Path,
     sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
     time::{Duration, Instant},
@@ -328,12 +329,13 @@ impl FavoriteRankVault {
     }
 }
 
+/// Read access to one durable index, forged or sealed.
 #[derive(Clone)]
 pub struct Index {
     db: Arc<Database>,
+    path: Arc<Path>,
     kin: Arc<RwLock<kin::Atlas>>,
     tag_bank: Arc<RwLock<Option<BTreeMap<Tag, TagKind>>>>,
-    anchor: Arc<Mutex<Instant>>,
     vault: Arc<Mutex<Vault>>,
     records: Arc<Mutex<RecordVault>>,
     sort_heads: Arc<Mutex<SortHeadVault>>,
@@ -341,84 +343,108 @@ pub struct Index {
     favorite_ranks: Arc<Mutex<FavoriteRankVault>>,
 }
 
+/// Write authority over a forged index. A sealed index has none, so no lane
+/// that absorbs can exist for it.
+#[derive(Clone)]
+pub struct Scribe {
+    index: Index,
+    anchor: Arc<Mutex<Instant>>,
+}
+
+impl Deref for Scribe {
+    type Target = Index;
+
+    fn deref(&self) -> &Index {
+        &self.index
+    }
+}
+
+/// One session's hold on its index.
+#[derive(Clone)]
+pub enum Tenure {
+    /// Crawl, warm, family hydration, and account edits absorb into it.
+    Forged(Scribe),
+    /// Read-only for the whole session: nothing absorbs.
+    Sealed(Index),
+}
+
+impl Tenure {
+    pub const fn scribe(&self) -> Option<&Scribe> {
+        match self {
+            Self::Forged(scribe) => Some(scribe),
+            Self::Sealed(_) => None,
+        }
+    }
+
+    pub const fn sealed(&self) -> bool {
+        matches!(self, Self::Sealed(_))
+    }
+}
+
+impl Deref for Tenure {
+    type Target = Index;
+
+    fn deref(&self) -> &Index {
+        match self {
+            Self::Forged(scribe) => scribe,
+            Self::Sealed(index) => index,
+        }
+    }
+}
+
 impl Index {
-    pub fn open(path: &Path) -> Result<Self> {
+    /// Open the index writable, creating and priming it as needed.
+    pub fn forge(path: &Path) -> Result<Scribe> {
         startup("index.open.enter");
         let db = Database::create(path).with_context(|| format!("open redb {}", path.display()))?;
         startup("index.redb.create.done");
         Self::prime_database(&db)?;
-        let minimum_slots = newest_slot(&db)?;
-        let atlas = kin::Atlas::open(&db, path.with_extension("kin.u32"), minimum_slots)?;
-        let index = Self {
+        let tx = db.begin_read().context("begin index prime read")?;
+        let atlas = kin::Atlas::forge(&tx, path.with_extension("kin.u32"), newest_slot(&tx)?)?;
+        drop(tx);
+        let index = Self::assemble(db, path, atlas);
+        startup("index.prime.done");
+        Ok(Scribe {
+            index,
+            anchor: Arc::new(Mutex::new(Instant::now())),
+        })
+    }
+
+    /// Open an existing index read-only. Its file is shared-locked against a
+    /// live writer; neither it nor its atlas is ever written, and the repair
+    /// an uncleanly closed index demands stays in memory.
+    pub fn seal(path: &Path) -> Result<Self> {
+        let db = Database::builder()
+            .create_with_backend(sealed::SealedFile::open(path)?)
+            .with_context(|| format!("open sealed redb {}", path.display()))?;
+        let tx = db.begin_read().context("begin sealed index read")?;
+        if !Self::schema_ready(&tx)? {
+            bail!(
+                "sealed index {} predates this schema; open it writable once to migrate it",
+                path.display()
+            );
+        }
+        let atlas = kin::Atlas::seal(&tx, &path.with_extension("kin.u32"), newest_slot(&tx)?)?;
+        drop(tx);
+        Ok(Self::assemble(db, path, atlas))
+    }
+
+    fn assemble(db: Database, path: &Path, atlas: kin::Atlas) -> Self {
+        Self {
             db: Arc::new(db),
+            path: Arc::from(path),
             kin: Arc::new(RwLock::new(atlas)),
             tag_bank: Arc::new(RwLock::new(None)),
-            anchor: Arc::new(Mutex::new(Instant::now())),
             vault: Arc::new(Mutex::new(Vault::new())),
             records: Arc::new(Mutex::new(RecordVault::new())),
             sort_heads: Arc::new(Mutex::new(SortHeadVault::default())),
             sort_keys: Arc::new(Mutex::new(SortKeyVault::default())),
             favorite_ranks: Arc::new(Mutex::new(FavoriteRankVault::default())),
-        };
-        startup("index.prime.done");
-        Ok(index)
+        }
     }
 
-    #[allow(
-        dead_code,
-        reason = "the duplicated binary module does not see the benchmark/test consumers of the library API"
-    )]
-    pub fn absorb(&self, posts: &[PostRecord]) -> Result<()> {
-        let posts = posts.iter().collect::<Vec<_>>();
-        let tx = self.begin_quick_write("begin index write")?;
-        Self::absorb_into(&tx, &posts)?;
-        tx.commit().context("commit index write")?;
-        self.patch_tag_bank(&posts);
-        self.evict_records(&posts);
-        self.clear_sort_heads();
-        self.refresh_sort_keys(&posts);
-        self.invalidate_favorite_ranks(&posts);
-        Ok(())
-    }
-
-    pub fn absorb_harvest(&self, harvest: &[Harvest]) -> Result<()> {
-        self.absorb_harvest_with(harvest, None)
-    }
-
-    pub fn absorb_crawl_harvest(&self, harvest: &[Harvest], before: Option<PostId>) -> Result<()> {
-        self.absorb_harvest_with(harvest, Some((before, false)))
-    }
-
-    pub fn absorb_kin_crawl(
-        &self,
-        facts: &[Kin],
-        before: Option<PostId>,
-        complete: bool,
-    ) -> Result<()> {
-        let mut atlas = write(&self.kin);
-        let tx = self.begin_quick_write("begin kin crawl write")?;
-        let mutation = kin::absorb(&tx, facts)?;
-        kin::advance_backfill(&tx, before, complete)?;
-        tx.commit().context("commit kin crawl write")?;
-        atlas.apply(&mutation)
-    }
-
-    pub fn kin_backfill(&self) -> Result<kin::Backfill> {
-        kin::backfill(&self.db)
-    }
-
-    pub fn family_hydrated(&self, id: PostId) -> Result<bool> {
-        let root = read(&self.kin).root(id);
-        kin::hydrated(&self.db, root)
-    }
-
-    pub fn absorb_family(&self, facts: &[Kin], root: PostId) -> Result<()> {
-        let mut atlas = write(&self.kin);
-        let tx = self.begin_quick_write("begin family hydration write")?;
-        let mutation = kin::absorb(&tx, facts)?;
-        kin::seal_hydrated(&tx, root)?;
-        tx.commit().context("commit family hydration")?;
-        atlas.apply(&mutation)
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn missing_posts(&self, ids: impl IntoIterator<Item = PostId>) -> Result<Vec<PostId>> {
@@ -463,119 +489,6 @@ impl Index {
             .open_table(kin::CHILD_HINTS)
             .context("open family hints")?;
         kin::family_tree(&posts, &children, &hints, &atlas, focus)
-    }
-
-    fn absorb_harvest_with(
-        &self,
-        harvest: &[Harvest],
-        crawl: Option<(Option<PostId>, bool)>,
-    ) -> Result<()> {
-        let posts = harvest.iter().map(|item| &item.post).collect::<Vec<_>>();
-        let facts = harvest.iter().map(|item| item.kin).collect::<Vec<_>>();
-        let mut atlas = write(&self.kin);
-        let tx = self.begin_quick_write("begin harvested index write")?;
-        Self::absorb_into(&tx, &posts)?;
-        let mutation = kin::absorb(&tx, &facts)?;
-        if let Some((before, complete)) = crawl {
-            let mut table = tx.open_table(META).context("open meta")?;
-            if let Some(before) = before {
-                let _old = table
-                    .insert(DANBOORU_CRAWL_BEFORE, u64::from(before.0))
-                    .context("write Danbooru crawl cursor")?;
-            }
-            drop(table);
-            if complete {
-                kin::advance_backfill(&tx, before, true)?;
-            }
-        }
-        tx.commit().context("commit harvested index write")?;
-        atlas.apply(&mutation)?;
-        self.patch_tag_bank(&posts);
-        self.evict_records(&posts);
-        self.clear_sort_heads();
-        self.refresh_sort_keys(&posts);
-        self.invalidate_favorite_ranks(&posts);
-        Ok(())
-    }
-
-    fn evict_records(&self, posts: &[&PostRecord]) {
-        let mut records = lock(&self.records);
-        for post in posts {
-            records.evict(post.id);
-        }
-    }
-
-    fn clear_sort_heads(&self) {
-        lock(&self.sort_heads).clear();
-    }
-
-    fn refresh_sort_keys(&self, posts: &[&PostRecord]) {
-        lock(&self.sort_keys).refresh(posts);
-    }
-
-    fn invalidate_favorite_ranks(&self, posts: &[&PostRecord]) {
-        lock(&self.favorite_ranks).invalidate(posts);
-    }
-
-    fn patch_tag_bank(&self, posts: &[&PostRecord]) {
-        let mut slot = write(&self.tag_bank);
-        let Some(bank) = slot.as_mut() else {
-            return;
-        };
-        for post in posts.iter().filter(|post| post.indexable()) {
-            for hint in &post.tag_hints {
-                let _old = bank.insert(hint.tag.clone(), hint.kind);
-            }
-        }
-    }
-
-    fn absorb_into(tx: &redb::WriteTransaction, posts: &[&PostRecord]) -> Result<()> {
-        {
-            let mut post_table = tx.open_table(POSTS).context("open posts")?;
-            let mut score_table = tx.open_table(SCORE_POSTS).context("open score_posts")?;
-            let mut fav_table = tx.open_table(FAV_POSTS).context("open fav_posts")?;
-            let mut tag_kinds = tx.open_table(TAG_KINDS).context("open tag kind table")?;
-            let mut facts = FactBatch::default();
-
-            for post in posts {
-                let indexable = post.indexable();
-                let old = {
-                    post_table
-                        .get(u64::from(post.id.0))
-                        .context("read old post")?
-                        .map(|guard| decode_record(guard.value()))
-                        .transpose()?
-                };
-                if let Some(old) = old.as_ref() {
-                    stage_record_delta(&mut facts, Some(old), indexable.then_some(post));
-                    remove_record_core(&mut post_table, &mut score_table, &mut fav_table, old)?;
-                }
-
-                if old.is_none() {
-                    stage_record_delta(&mut facts, None, indexable.then_some(post));
-                }
-
-                if !indexable {
-                    continue;
-                }
-
-                let encoded = encode_record(post);
-                write_tag_kinds(&mut tag_kinds, post)?;
-                let _old_post = post_table
-                    .insert(u64::from(post.id.0), encoded.as_slice())
-                    .context("upsert post")?;
-                let _old_score = score_table
-                    .insert(sort_key_i32(post.score, post.id), post.id.0)
-                    .context("upsert score lane")?;
-                let _old_fav = fav_table
-                    .insert(sort_key_u32(post.favs, post.id), post.id.0)
-                    .context("upsert favorite lane")?;
-            }
-            if !facts.is_empty() {
-                append_facts(tx, &facts)?;
-            }
-        }
-        Ok(())
     }
 
     pub fn crawl_before(&self) -> Result<Option<PostId>> {
@@ -737,53 +650,6 @@ impl Index {
             newest,
             crawl_before,
             ratings,
-        })
-    }
-
-    pub fn merge_pending_facts(&self, budget: FactMergeBudget) -> Result<FactMerge> {
-        let tx = self.begin_quick_write("begin posting fact merge")?;
-        let pending = {
-            let facts = tx.open_table(POSTING_FACTS).context("open posting facts")?;
-            collect_pending_fact_rows(&facts, budget)?
-        };
-        if pending.is_empty() {
-            return Ok(FactMerge::default());
-        }
-        let mut batch = FactBatch::default();
-        let mut bytes = 0_usize;
-        for (_, encoded) in &pending {
-            bytes = bytes.saturating_add(encoded.len());
-            batch.assimilate(FactBatch::decode(encoded)?);
-        }
-        let groups = batch.groups().count();
-        {
-            let mut tag_chunks = tx.open_table(TAG_CHUNKS).context("open tag chunks")?;
-            let mut rating_chunks = tx.open_table(RATING_CHUNKS).context("open rating chunks")?;
-            for (key, delta) in batch.groups() {
-                match key.lane {
-                    PostingLane::Tag => {
-                        apply_delta_chunks(&mut tag_chunks, &key.key, delta)?;
-                    }
-                    PostingLane::Rating => {
-                        apply_delta_chunks(&mut rating_chunks, &key.key, delta)?;
-                    }
-                }
-                lock(&self.vault).evict(key.lane, &key.key);
-            }
-        }
-        {
-            let mut facts = tx.open_table(POSTING_FACTS).context("open posting facts")?;
-            for (seq, _) in &pending {
-                let _old = facts
-                    .remove(*seq)
-                    .with_context(|| format!("remove merged posting fact batch {seq}"))?;
-            }
-        }
-        tx.commit().context("commit posting fact merge")?;
-        Ok(FactMerge {
-            batches: pending.len(),
-            bytes,
-            groups,
         })
     }
 
@@ -1017,7 +883,7 @@ impl Index {
 
     fn favorite_ordered_ids(
         &self,
-        tx: &redb::ReadTransaction,
+        tx: &ReadTransaction,
         posts: &impl redb::ReadableTable<u64, &'static [u8]>,
         candidate: &Option<Candidate>,
         favorite_ranks: Option<&FavoriteRanks>,
@@ -1045,7 +911,7 @@ impl Index {
 
     fn post_ids(
         &self,
-        tx: &redb::ReadTransaction,
+        tx: &ReadTransaction,
         posts: &impl redb::ReadableTable<u64, &'static [u8]>,
         candidate: &Option<Candidate>,
         sort: Sort,
@@ -1085,7 +951,7 @@ impl Index {
 
     fn ranked_ids(
         &self,
-        tx: &redb::ReadTransaction,
+        tx: &ReadTransaction,
         sort: Sort,
         candidate: Option<&Candidate>,
         window: Option<DateWindow>,
@@ -1112,7 +978,7 @@ impl Index {
         }
     }
 
-    fn sort_head(&self, tx: &redb::ReadTransaction, sort: Sort) -> Result<Arc<Vec<u32>>> {
+    fn sort_head(&self, tx: &ReadTransaction, sort: Sort) -> Result<Arc<Vec<u32>>> {
         if let Some(ids) = lock(&self.sort_heads).get(sort) {
             return Ok(ids);
         }
@@ -1137,7 +1003,7 @@ impl Index {
 
     fn local_sorted_ids(
         &self,
-        tx: &redb::ReadTransaction,
+        tx: &ReadTransaction,
         bitmap: &RoaringBitmap,
         sort: Sort,
         window: Option<DateWindow>,
@@ -1154,7 +1020,7 @@ impl Index {
 
     fn favorite_ordered_family_ids(
         &self,
-        tx: &redb::ReadTransaction,
+        tx: &ReadTransaction,
         posts: &impl redb::ReadableTable<u64, &'static [u8]>,
         atlas: &kin::Atlas,
         candidate: &Option<Candidate>,
@@ -1191,7 +1057,7 @@ impl Index {
 
     fn extend_family_page(
         &self,
-        tx: &redb::ReadTransaction,
+        tx: &ReadTransaction,
         posts: &impl redb::ReadableTable<u64, &'static [u8]>,
         candidate: &Option<Candidate>,
         sort: Sort,
@@ -1232,7 +1098,7 @@ impl Index {
 
     fn extend_ranked_family_page(
         &self,
-        tx: &redb::ReadTransaction,
+        tx: &ReadTransaction,
         sort: Sort,
         candidate: Option<&Candidate>,
         window: Option<DateWindow>,
@@ -1262,7 +1128,7 @@ impl Index {
 
     fn local_sorted_family_ids(
         &self,
-        tx: &redb::ReadTransaction,
+        tx: &ReadTransaction,
         bitmap: &RoaringBitmap,
         atlas: &kin::Atlas,
         sort: Sort,
@@ -1302,7 +1168,7 @@ impl Index {
         Ok(finish_sorted_heap(heap))
     }
 
-    fn sort_keys(&self, tx: &redb::ReadTransaction, sort: Sort) -> Result<Arc<Vec<u64>>> {
+    fn sort_keys(&self, tx: &ReadTransaction, sort: Sort) -> Result<Arc<Vec<u64>>> {
         if let Some(keys) = lock(&self.sort_keys).get(sort) {
             return Ok(keys);
         }
@@ -1322,7 +1188,7 @@ impl Index {
     }
 
     fn prime_database(db: &Database) -> Result<()> {
-        if Self::schema_ready(db)? {
+        if Self::schema_ready(&db.begin_read().context("begin schema read")?)? {
             startup("index.prime.schema.ready");
             return Ok(());
         }
@@ -1354,8 +1220,7 @@ impl Index {
         tx.commit().context("commit schema prime")
     }
 
-    fn schema_ready(db: &Database) -> Result<bool> {
-        let tx = db.begin_read().context("begin schema read")?;
+    fn schema_ready(tx: &ReadTransaction) -> Result<bool> {
         macro_rules! open {
             ($table:expr) => {
                 match tx.open_table($table) {
@@ -1383,7 +1248,7 @@ impl Index {
 
     fn candidate_set(
         &self,
-        tx: &redb::ReadTransaction,
+        tx: &ReadTransaction,
         query: &Query,
         posts: &impl redb::ReadableTable<u64, &'static [u8]>,
         local_favorites: &Arc<RoaringBitmap>,
@@ -1432,6 +1297,225 @@ impl Index {
             )
         };
         Ok(remote)
+    }
+}
+
+impl Scribe {
+    #[allow(
+        dead_code,
+        reason = "the duplicated binary module does not see the benchmark/test consumers of the library API"
+    )]
+    pub fn absorb(&self, posts: &[PostRecord]) -> Result<()> {
+        let posts = posts.iter().collect::<Vec<_>>();
+        let tx = self.begin_quick_write("begin index write")?;
+        Self::absorb_into(&tx, &posts)?;
+        tx.commit().context("commit index write")?;
+        self.patch_tag_bank(&posts);
+        self.evict_records(&posts);
+        self.clear_sort_heads();
+        self.refresh_sort_keys(&posts);
+        self.invalidate_favorite_ranks(&posts);
+        Ok(())
+    }
+
+    pub fn absorb_harvest(&self, harvest: &[Harvest]) -> Result<()> {
+        self.absorb_harvest_with(harvest, None)
+    }
+
+    pub fn absorb_crawl_harvest(&self, harvest: &[Harvest], before: Option<PostId>) -> Result<()> {
+        self.absorb_harvest_with(harvest, Some((before, false)))
+    }
+
+    pub fn absorb_kin_crawl(
+        &self,
+        facts: &[Kin],
+        before: Option<PostId>,
+        complete: bool,
+    ) -> Result<()> {
+        let mut atlas = write(&self.kin);
+        let tx = self.begin_quick_write("begin kin crawl write")?;
+        let mutation = kin::absorb(&tx, facts)?;
+        kin::advance_backfill(&tx, before, complete)?;
+        tx.commit().context("commit kin crawl write")?;
+        atlas.apply(&mutation)
+    }
+
+    pub fn kin_backfill(&self) -> Result<kin::Backfill> {
+        kin::backfill(&self.db)
+    }
+
+    pub fn family_hydrated(&self, id: PostId) -> Result<bool> {
+        let root = read(&self.kin).root(id);
+        kin::hydrated(&self.db, root)
+    }
+
+    pub fn absorb_family(&self, facts: &[Kin], root: PostId) -> Result<()> {
+        let mut atlas = write(&self.kin);
+        let tx = self.begin_quick_write("begin family hydration write")?;
+        let mutation = kin::absorb(&tx, facts)?;
+        kin::seal_hydrated(&tx, root)?;
+        tx.commit().context("commit family hydration")?;
+        atlas.apply(&mutation)
+    }
+
+    fn absorb_harvest_with(
+        &self,
+        harvest: &[Harvest],
+        crawl: Option<(Option<PostId>, bool)>,
+    ) -> Result<()> {
+        let posts = harvest.iter().map(|item| &item.post).collect::<Vec<_>>();
+        let facts = harvest.iter().map(|item| item.kin).collect::<Vec<_>>();
+        let mut atlas = write(&self.kin);
+        let tx = self.begin_quick_write("begin harvested index write")?;
+        Self::absorb_into(&tx, &posts)?;
+        let mutation = kin::absorb(&tx, &facts)?;
+        if let Some((before, complete)) = crawl {
+            let mut table = tx.open_table(META).context("open meta")?;
+            if let Some(before) = before {
+                let _old = table
+                    .insert(DANBOORU_CRAWL_BEFORE, u64::from(before.0))
+                    .context("write Danbooru crawl cursor")?;
+            }
+            drop(table);
+            if complete {
+                kin::advance_backfill(&tx, before, true)?;
+            }
+        }
+        tx.commit().context("commit harvested index write")?;
+        atlas.apply(&mutation)?;
+        self.patch_tag_bank(&posts);
+        self.evict_records(&posts);
+        self.clear_sort_heads();
+        self.refresh_sort_keys(&posts);
+        self.invalidate_favorite_ranks(&posts);
+        Ok(())
+    }
+
+    fn evict_records(&self, posts: &[&PostRecord]) {
+        let mut records = lock(&self.records);
+        for post in posts {
+            records.evict(post.id);
+        }
+    }
+
+    fn clear_sort_heads(&self) {
+        lock(&self.sort_heads).clear();
+    }
+
+    fn refresh_sort_keys(&self, posts: &[&PostRecord]) {
+        lock(&self.sort_keys).refresh(posts);
+    }
+
+    fn invalidate_favorite_ranks(&self, posts: &[&PostRecord]) {
+        lock(&self.favorite_ranks).invalidate(posts);
+    }
+
+    fn patch_tag_bank(&self, posts: &[&PostRecord]) {
+        let mut slot = write(&self.tag_bank);
+        let Some(bank) = slot.as_mut() else {
+            return;
+        };
+        for post in posts.iter().filter(|post| post.indexable()) {
+            for hint in &post.tag_hints {
+                let _old = bank.insert(hint.tag.clone(), hint.kind);
+            }
+        }
+    }
+
+    fn absorb_into(tx: &redb::WriteTransaction, posts: &[&PostRecord]) -> Result<()> {
+        {
+            let mut post_table = tx.open_table(POSTS).context("open posts")?;
+            let mut score_table = tx.open_table(SCORE_POSTS).context("open score_posts")?;
+            let mut fav_table = tx.open_table(FAV_POSTS).context("open fav_posts")?;
+            let mut tag_kinds = tx.open_table(TAG_KINDS).context("open tag kind table")?;
+            let mut facts = FactBatch::default();
+
+            for post in posts {
+                let indexable = post.indexable();
+                let old = {
+                    post_table
+                        .get(u64::from(post.id.0))
+                        .context("read old post")?
+                        .map(|guard| decode_record(guard.value()))
+                        .transpose()?
+                };
+                if let Some(old) = old.as_ref() {
+                    stage_record_delta(&mut facts, Some(old), indexable.then_some(post));
+                    remove_record_core(&mut post_table, &mut score_table, &mut fav_table, old)?;
+                }
+
+                if old.is_none() {
+                    stage_record_delta(&mut facts, None, indexable.then_some(post));
+                }
+
+                if !indexable {
+                    continue;
+                }
+
+                let encoded = encode_record(post);
+                write_tag_kinds(&mut tag_kinds, post)?;
+                let _old_post = post_table
+                    .insert(u64::from(post.id.0), encoded.as_slice())
+                    .context("upsert post")?;
+                let _old_score = score_table
+                    .insert(sort_key_i32(post.score, post.id), post.id.0)
+                    .context("upsert score lane")?;
+                let _old_fav = fav_table
+                    .insert(sort_key_u32(post.favs, post.id), post.id.0)
+                    .context("upsert favorite lane")?;
+            }
+            if !facts.is_empty() {
+                append_facts(tx, &facts)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn merge_pending_facts(&self, budget: FactMergeBudget) -> Result<FactMerge> {
+        let tx = self.begin_quick_write("begin posting fact merge")?;
+        let pending = {
+            let facts = tx.open_table(POSTING_FACTS).context("open posting facts")?;
+            collect_pending_fact_rows(&facts, budget)?
+        };
+        if pending.is_empty() {
+            return Ok(FactMerge::default());
+        }
+        let mut batch = FactBatch::default();
+        let mut bytes = 0_usize;
+        for (_, encoded) in &pending {
+            bytes = bytes.saturating_add(encoded.len());
+            batch.assimilate(FactBatch::decode(encoded)?);
+        }
+        let groups = batch.groups().count();
+        {
+            let mut tag_chunks = tx.open_table(TAG_CHUNKS).context("open tag chunks")?;
+            let mut rating_chunks = tx.open_table(RATING_CHUNKS).context("open rating chunks")?;
+            for (key, delta) in batch.groups() {
+                match key.lane {
+                    PostingLane::Tag => {
+                        apply_delta_chunks(&mut tag_chunks, &key.key, delta)?;
+                    }
+                    PostingLane::Rating => {
+                        apply_delta_chunks(&mut rating_chunks, &key.key, delta)?;
+                    }
+                }
+                lock(&self.vault).evict(key.lane, &key.key);
+            }
+        }
+        {
+            let mut facts = tx.open_table(POSTING_FACTS).context("open posting facts")?;
+            for (seq, _) in &pending {
+                let _old = facts
+                    .remove(*seq)
+                    .with_context(|| format!("remove merged posting fact batch {seq}"))?;
+            }
+        }
+        tx.commit().context("commit posting fact merge")?;
+        Ok(FactMerge {
+            batches: pending.len(),
+            bytes,
+            groups,
+        })
     }
 
     /// Write transactions default to non-durable commits — the index is a
@@ -2525,8 +2609,7 @@ fn normalize_prefix(prefix: &str) -> Option<String> {
     (!prefix.is_empty()).then_some(prefix)
 }
 
-fn newest_slot(db: &Database) -> Result<usize> {
-    let tx = db.begin_read().context("begin newest-slot read")?;
+fn newest_slot(tx: &ReadTransaction) -> Result<usize> {
     let posts = tx.open_table(POSTS).context("open newest-slot posts")?;
     posts
         .last()
@@ -2549,5 +2632,6 @@ fn write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+mod sealed;
 #[cfg(test)]
 mod tests;

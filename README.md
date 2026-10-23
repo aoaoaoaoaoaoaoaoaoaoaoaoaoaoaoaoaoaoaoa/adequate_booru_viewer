@@ -74,6 +74,8 @@ Older generated filter trees migrate atomically on load.
 the release-tested native coordinates are Linux/X11, Linux/Wayland, macOS on
 Apple and Intel silicon, and 64-bit Windows. `abv --pause-mirror` starts with
 the mirror valve closed for deterministic or disconnected work.
+`abv --sealed-index PATH` browses the index at `PATH` read-only: nothing
+crawls, warms, hydrates, or edits it, and a writer elsewhere locks it out.
 
 ### keyboard
 
@@ -128,6 +130,12 @@ independent Filter Library and Session State recovery, water and open-viewer
 restoration across restart, explicit viewer dismissal, native clipboard copy,
 and browser dispatch. `scripts/test-wayland` owns the narrower native launch,
 first-present, typed-witness, and nonblack compositor-capture gate.
+
+The showcase is a separate rail, never a verdict: `abv-acceptance --stills DIR`
+performs the presentation score against your own mirror, sealed and borrowed
+read-only, with a private copy of the media cache and general-rated filters,
+and develops its stills (`frontispiece.png`, `viewer.png`); `--film DIR` also
+records `abv-showcase.mp4`. Both need the witnessed build.
 
 For local release-candidate work:
 

@@ -22,7 +22,7 @@ impl Bayonet {
         }
         if let Some(suggestion) =
             self.query_completion
-                .choose(ui, cycle, accept, "query-completion", |_| true)
+                .choose(ui, cycle, accept, abv_contract::Completion::Query, |_| true)
         {
             self.complete_active(&suggestion, prefix.negative);
             return true;
@@ -183,7 +183,6 @@ impl Bayonet {
         });
         let entry = output.inner.response.clone();
         crate::witness::response(ui, abv_contract::Target::TagEntry, &entry);
-        crate::probe_anchor!(ui, "field:tag-entry", entry.interact_rect);
         if seeded_entry {
             let tail = egui::text::CCursor::new(self.tag_entry.chars().count());
             output
@@ -277,7 +276,11 @@ impl Bayonet {
             let _label = ui.label(chrome::eyebrow("SORT"));
             for sort in Sort::ALL {
                 let button = controls::plate(ui, sort.label(), self.sort == sort);
-                crate::probe_anchor!(ui, format!("sort:{}", sort.label()), button.interact_rect);
+                crate::witness_anchor!(
+                    ui,
+                    abv_contract::Target::Sort(sort.label()),
+                    button.interact_rect
+                );
                 if button.clicked() && self.sort != sort {
                     self.remember_hit();
                     self.sort = sort;
@@ -356,9 +359,9 @@ impl Bayonet {
                 (chrome::Symbol::Add, "arm date bound at today")
             };
             let lever = controls::symbol(ui, &mut self.water, symbol).on_hover_text(hint);
-            crate::probe_anchor!(
+            crate::witness_anchor!(
                 ui,
-                format!("date:{}:lever", id.trim_start_matches("date-")),
+                abv_contract::Target::DateLever(id.trim_start_matches("date-")),
                 lever.interact_rect
             );
             if lever.clicked() {
@@ -385,11 +388,15 @@ impl Bayonet {
     }
 
     fn index_status_panel(&mut self, ui: &mut egui::Ui) {
-        let mut active = self.mirror_policy.active();
-        let mirror = chrome::Checkbox::new(&mut active, MIRROR_SETTING.name()).show(ui);
+        let mut active = self.valve().active();
+        let mirror = ui
+            .add_enabled_ui(!self.index.sealed(), |ui| {
+                chrome::Checkbox::new(&mut active, MIRROR_SETTING.name()).show(ui)
+            })
+            .inner;
         self.water.checkbox(&mirror);
         if mirror.changed() {
-            self.install_mirror_policy(if active {
+            self.command_mirror_policy(if active {
                 MirrorPolicy::Active
             } else {
                 MirrorPolicy::Paused
@@ -403,11 +410,7 @@ impl Bayonet {
         for line in [
             format!(
                 "mirror: {}",
-                if self.mirror_policy.active() {
-                    "active"
-                } else {
-                    "paused"
-                }
+                valve_status(&self.index, self.valve(), "active")
             ),
             format!("status: {}", self.status),
             format!("cache: {}", self.cache_status),
@@ -416,7 +419,7 @@ impl Bayonet {
             format!("families: {}", self.kin_status),
             format!("build: {}", env!("CARGO_PKG_VERSION")),
             format!("data: {}", self.paths.local_data.display()),
-            format!("index: {}", self.paths.index_path().display()),
+            format!("index: {}", self.index.path().display()),
         ] {
             let _line = chrome::note(ui, line);
         }
@@ -430,7 +433,7 @@ impl Bayonet {
         let _wet = ui.horizontal_wrapped(|ui| {
             let dry_btn =
                 controls::plate(ui, "DRY", dry).on_hover_text("disable the water shader entirely");
-            crate::probe_anchor!(
+            crate::witness_anchor!(
                 ui,
                 abv_contract::Target::Water(abv_contract::Water::Dry),
                 dry_btn.interact_rect
@@ -441,7 +444,7 @@ impl Bayonet {
             }
             let wet_btn = controls::plate(ui, "WET", wet)
                 .on_hover_text("enable water, refraction, and veil shaders");
-            crate::probe_anchor!(
+            crate::witness_anchor!(
                 ui,
                 abv_contract::Target::Water(abv_contract::Water::Wet),
                 wet_btn.interact_rect
@@ -452,7 +455,7 @@ impl Bayonet {
             }
             let really_btn = controls::plate(ui, "REALLY WET", really)
                 .on_hover_text("stronger, slower, wetter water");
-            crate::probe_anchor!(
+            crate::witness_anchor!(
                 ui,
                 abv_contract::Target::Water(abv_contract::Water::ReallyWet),
                 really_btn.interact_rect

@@ -4,6 +4,7 @@ use egui::{ColorImage, TextureHandle, TextureOptions};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -21,7 +22,7 @@ use crate::{
     date::{CreatedDay, DateRange},
     favorites::LocalFavorites,
     filter_bank::{self, Bank},
-    index::{CacheStats, Index, TagSuggestion},
+    index::{CacheStats, Index, TagSuggestion, Tenure},
     media::{MediaCache, RgbaBlade, extension},
     model::{
         BoolOp, Corpus, FamilyBadge, FamilyTree, GalleryTopology, GroupCycle, PostId, PostRecord,
@@ -253,7 +254,7 @@ impl TagPushDraft {
 )]
 pub struct Bayonet {
     paths: ApplicationPaths,
-    index: Index,
+    index: Tenure,
     worker: Worker,
     query: Query,
     local_favorites: LocalFavorites,
@@ -362,7 +363,10 @@ pub struct Bayonet {
     tag_push_inflight: Option<PostId>,
     font_scale: chrome::FontScale,
     prefetch_on_hover: bool,
+    /// The configured policy; `valve` derives what the session runs.
     mirror_policy: MirrorPolicy,
+    /// `--pause-mirror` holds the valve shut until the user sets a policy.
+    launch_paused: bool,
     prefetched: HashSet<PostId>,
     hover_arm: Option<(PostId, Instant)>,
     empty_since: Option<Instant>,
@@ -376,12 +380,38 @@ pub struct Bayonet {
     kin_status: String,
     status: String,
     living_wait: eternalist_apps::LivingWait,
-    #[cfg(feature = "devtools")]
-    probe_grid_rows: usize,
-    #[cfg(feature = "devtools")]
-    probe_grid_visible_end: usize,
-    #[cfg(feature = "devtools")]
-    probe_grid_scroll_offset: f32,
+    #[cfg(feature = "egui-test")]
+    tiles: crate::witness::Tiles,
+}
+
+/// How one launch holds the mirror, chosen on the command line.
+pub enum Launch {
+    /// The configured mirror policy governs.
+    Configured,
+    /// `--pause-mirror`: the valve starts closed.
+    Paused,
+    /// `--sealed-index PATH`: browse that index read-only; nothing absorbs.
+    Sealed(PathBuf),
+}
+
+/// The policy the session's valve runs.
+fn valve(index: &Tenure, launch_paused: bool, policy: MirrorPolicy) -> MirrorPolicy {
+    if index.sealed() || launch_paused {
+        MirrorPolicy::Paused
+    } else {
+        policy
+    }
+}
+
+fn valve_status(index: &Tenure, policy: MirrorPolicy, waking: &str) -> String {
+    if index.sealed() {
+        "sealed"
+    } else if policy.active() {
+        waking
+    } else {
+        "paused"
+    }
+    .to_owned()
 }
 
 impl Bayonet {
@@ -422,14 +452,15 @@ impl Bayonet {
                 settled: self.configuration.settled(),
             },
             prefetch_on_hover: self.prefetch_on_hover,
-            mirror_active: self.mirror_policy.active(),
+            mirror_active: self.valve().active(),
             viewer_tags_open: self.viewer_tags_open,
             tag_push_ready: self.danbooru_account.is_ready(),
             viewer_post: self.viewer_post.as_ref().map(|post| post.id.0),
+            tiles: self.tiles,
         }
     }
 
-    pub fn open(ctx: &egui::Context, pause_mirror: bool) -> Result<Self> {
+    pub fn open(ctx: &egui::Context, launch: Launch) -> Result<Self> {
         startup("app.open.enter");
         let paths = application_paths::claim()?;
         startup("app.paths.claimed");
@@ -452,24 +483,27 @@ impl Bayonet {
         if configuration.fault().is_some() {
             settings.require_attention(ctx);
         }
-        let mirror_policy = if pause_mirror {
-            MirrorPolicy::Paused
-        } else {
-            configuration_snapshot.mirror.policy
-        };
+        let mirror_policy = configuration_snapshot.mirror.policy;
+        let launch_paused = matches!(launch, Launch::Paused);
         startup("app.config.loaded");
         let local_favorites = LocalFavorites::load(paths.favorites_path())?;
         startup("app.favorites.loaded");
-        let index = Index::open(&paths.index_path())?;
+        let index = match launch {
+            Launch::Sealed(path) => Tenure::Sealed(Index::seal(&path)?),
+            Launch::Configured | Launch::Paused => {
+                Tenure::Forged(Index::forge(&paths.index_path())?)
+            }
+        };
         startup("app.index.opened");
         let media = MediaCache::new(paths.media_dir())?;
         startup("app.media.opened");
         let account_config = configuration_snapshot.danbooru.account.clone();
+        let valve = valve(&index, launch_paused, mirror_policy);
         let (worker, danbooru_account) = Worker::spawn(
             index.clone(),
             media,
             ctx.clone(),
-            mirror_policy,
+            valve,
             account_config,
             paths.config.clone(),
         );
@@ -551,19 +585,9 @@ impl Bayonet {
             filter_library_scribe.mark();
         }
         let mut app = Self {
-            status: format!("index {}", paths.index_path().display()),
-            crawl_status: if mirror_policy.active() {
-                "crawl waking"
-            } else {
-                "paused"
-            }
-            .to_owned(),
-            kin_status: if mirror_policy.active() {
-                "family index waking"
-            } else {
-                "paused"
-            }
-            .to_owned(),
+            status: format!("index {}", index.path().display()),
+            crawl_status: valve_status(&index, valve, "crawl waking"),
+            kin_status: valve_status(&index, valve, "family index waking"),
             paths,
             index,
             worker,
@@ -668,6 +692,7 @@ impl Bayonet {
             font_scale: configuration_snapshot.font_scale,
             prefetch_on_hover: configuration_snapshot.prefetch_on_hover,
             mirror_policy,
+            launch_paused,
             prefetched: HashSet::new(),
             hover_arm: None,
             empty_since: None,
@@ -678,16 +703,10 @@ impl Bayonet {
             cache_status: "cache measuring".to_owned(),
             warm_status: "query warm idle".to_owned(),
             living_wait: eternalist_apps::LivingWait::default(),
-            #[cfg(feature = "devtools")]
-            probe_grid_rows: 0,
-            #[cfg(feature = "devtools")]
-            probe_grid_visible_end: 0,
-            #[cfg(feature = "devtools")]
-            probe_grid_scroll_offset: 0.0,
+            #[cfg(feature = "egui-test")]
+            tiles: crate::witness::Tiles::default(),
         };
         startup("app.state.built");
-        #[cfg(feature = "devtools")]
-        crate::probe::arm();
         // Persist the first-run seed and its initial selection.
         if first_run {
             app.inscribe_durable_state();
@@ -701,45 +720,12 @@ impl Bayonet {
         Ok(app)
     }
 
-    /// Snapshot the frame's anchors + live state for the `devtools` probe. Built
-    /// only with the feature and skipped entirely unless `ABV_ANCHOR_PROBE` armed
-    /// it, so no state is cloned in the common case.
-    #[cfg(feature = "devtools")]
-    pub fn probe_dump(&self, ctx: &egui::Context, pixels_per_point: f32) {
-        if !crate::probe::probing() {
-            return;
-        }
-        crate::probe::dump(
-            ctx,
-            pixels_per_point,
-            crate::probe::State {
-                active_group: self.active_group.clone(),
-                text_edit_focused: ctx.text_edit_focused(),
-                water: self.water_mode,
-                sort: self.sort,
-                dates: self.date_range,
-                images_per_row: self.images_per_row,
-                result_posts: self.hit.posts.len(),
-                result_candidates: self.hit.candidates,
-                result_horizon: self.hit.horizon,
-                result_tail_open: self.hit.tail == SearchTail::Open,
-                requested_horizon: self.retrieval_horizon,
-                horizon_pending: self.horizon_pending,
-                grid_rows: self.probe_grid_rows,
-                grid_visible_end: self.probe_grid_visible_end,
-                grid_scroll_offset: self.probe_grid_scroll_offset,
-                refresh_in_flight: self.refresh_pulse.inflight_serial().is_some(),
-                status: self.status.clone(),
-                warm_status: self.warm_status.clone(),
-                viewer_post: self.viewer_post.as_ref().map(|post| post.id.0),
-                tag_menu_post: self.tag_menu.post_id().map(|id| id.0),
-            },
-        );
-    }
-
     /// One full application frame: drain workers, settle gates, paint.
     pub fn pulse(&mut self, ui: &mut egui::Ui) {
-        crate::probe_reset!(ui.ctx());
+        #[cfg(feature = "egui-test")]
+        {
+            self.tiles = crate::witness::Tiles::default();
+        }
         let ctx = ui.ctx().clone();
         chrome::set_font_scale(&ctx, self.configuration.live().font_scale);
         if self.configuration.absorb() && self.configuration.fault().is_none() {
@@ -1334,6 +1320,10 @@ impl Bayonet {
     }
 
     fn dispatch_warm(&mut self, query: Query, pages: u32) -> Result<()> {
+        if self.index.sealed() {
+            "index sealed; upstream warm suspended".clone_into(&mut self.warm_status);
+            return Ok(());
+        }
         if self.filter_selection.corpus() == Corpus::LocalFavorites {
             "local favorites; upstream warm suspended".clone_into(&mut self.warm_status);
             return Ok(());
@@ -1824,10 +1814,10 @@ impl Bayonet {
                 });
             }
         });
-        crate::probe_anchor!(ui, "gallery:content", scroll.inner_rect);
-        crate::probe_anchor!(
+        crate::witness_anchor!(ui, abv_contract::Target::GalleryContent, scroll.inner_rect);
+        crate::witness_anchor!(
             ui,
-            "gallery:screw-gutter",
+            abv_contract::Target::GalleryGutter,
             egui::Rect::from_min_max(
                 scroll.inner_rect.right_top(),
                 scroll.inner_rect.right_bottom() + egui::vec2(surface_width - width, 0.0),
@@ -1845,12 +1835,6 @@ impl Bayonet {
         let visible_posts = visible_rows.end.saturating_mul(cols).min(posts.len());
         let tail_reached =
             rows > 0 && posts.len().saturating_sub(visible_posts) <= RESULT_TAIL_MARGIN;
-        #[cfg(feature = "devtools")]
-        {
-            self.probe_grid_rows = rows;
-            self.probe_grid_visible_end = visible_rows.end;
-            self.probe_grid_scroll_offset = scroll.state.offset.y;
-        }
         self.prefetch_scroll_thumbs(
             ui.ctx(),
             &posts,
@@ -1880,11 +1864,21 @@ impl Bayonet {
     ) -> bool {
         let mut menu_opened = false;
         let (rect, response) = ui.allocate_exact_size(egui::vec2(tile, tile), egui::Sense::click());
-        crate::probe_anchor!(ui, format!("tile:{}", post.id.0), rect);
+        crate::witness_anchor!(ui, abv_contract::Target::Tile(post.id.0), rect);
         let plate = Plate::flat(rect);
         plate.paint(ui, response.hovered());
+        #[cfg(feature = "egui-test")]
+        {
+            self.tiles.visible += 1;
+        }
         match self.thumb(post, tile) {
-            Some(ThumbLoad::Ready(texture)) => plate.paint_image(ui, post, &texture),
+            Some(ThumbLoad::Ready(texture)) => {
+                plate.paint_image(ui, post, &texture);
+                #[cfg(feature = "egui-test")]
+                {
+                    self.tiles.painted += 1;
+                }
+            }
             Some(ThumbLoad::Loading) => paint_tile_text(ui, rect, "loading"),
             Some(ThumbLoad::Fault) => paint_tile_text(ui, rect, "fault"),
             None => paint_tile_text(ui, rect, "no image"),
@@ -1893,7 +1887,7 @@ impl Bayonet {
             paint_favorite_badge(ui, rect);
         }
         if let Some(family) = family {
-            crate::probe_anchor!(ui, format!("family-tile:{}", post.id.0), rect);
+            crate::witness_anchor!(ui, abv_contract::Target::FamilyBadge(post.id.0), rect);
             paint_family_badge(ui, rect, family);
         }
         if response.hovered() {
@@ -2002,6 +1996,7 @@ impl Bayonet {
         // Records absorbed before tag hints existed carry no kinds; one
         // rate-gated refetch heals them, and the open menu updates live.
         if post.tag_hints.is_empty()
+            && !self.index.sealed()
             && self.refetch_inflight.insert(post.id)
             && let Err(err) = self.worker.send(Command::Refetch { id: post.id })
         {
@@ -2239,19 +2234,34 @@ impl Bayonet {
         }
     }
 
+    fn valve(&self) -> MirrorPolicy {
+        valve(&self.index, self.launch_paused, self.mirror_policy)
+    }
+
+    /// Adopt a configured policy; a launch hold or a sealed index keeps the
+    /// valve shut regardless.
     fn install_mirror_policy(&mut self, policy: MirrorPolicy) {
-        if self.mirror_policy == policy {
+        let running = self.valve();
+        self.mirror_policy = policy;
+        self.turn_valve(running);
+    }
+
+    /// The user set the policy, which lifts a `--pause-mirror` hold.
+    fn command_mirror_policy(&mut self, policy: MirrorPolicy) {
+        let running = self.valve();
+        self.launch_paused = false;
+        self.mirror_policy = policy;
+        self.turn_valve(running);
+    }
+
+    fn turn_valve(&mut self, running: MirrorPolicy) {
+        let valve = self.valve();
+        if valve == running {
             return;
         }
-        self.mirror_policy = policy;
-        self.worker.set_mirror_policy(policy);
-        if policy.active() {
-            "crawl waking".clone_into(&mut self.crawl_status);
-            "family index waking".clone_into(&mut self.kin_status);
-        } else {
-            "paused".clone_into(&mut self.crawl_status);
-            "paused".clone_into(&mut self.kin_status);
-        }
+        self.worker.set_mirror_policy(valve);
+        self.crawl_status = valve_status(&self.index, valve, "crawl waking");
+        self.kin_status = valve_status(&self.index, valve, "family index waking");
     }
 
     fn adopt_configuration(&mut self, ctx: &egui::Context) {
@@ -2266,7 +2276,7 @@ impl Bayonet {
         let path = self.configuration.path().to_owned();
         let fault = self.configuration.fault().map(ToString::to_string);
         let mut prefetch = self.prefetch_on_hover;
-        let mut mirror = self.mirror_policy.active();
+        let mut mirror = self.valve().active();
         let mut font_scale = self.font_scale;
         let file = fault.as_deref().map_or_else(
             || SettingsFile::ready(&path),
@@ -2277,6 +2287,7 @@ impl Bayonet {
             .reloadable(self.configuration.fault().is_some() || self.configuration.settled());
         let mut changed = false;
         let mut font_scale_changed = false;
+        let mut mirror_changed = false;
         let response = self
             .settings
             .show(ctx, &mut self.water, Some(file), |settings| {
@@ -2285,19 +2296,21 @@ impl Bayonet {
                 settings.group("BROWSING");
                 changed |= settings.boolean(PREFETCH_SETTING, &mut prefetch);
                 settings.group("INDEX");
-                changed |= settings.boolean(MIRROR_SETTING, &mut mirror);
+                mirror_changed |= settings.boolean(MIRROR_SETTING, &mut mirror);
             });
-        if changed || font_scale_changed {
+        if changed || font_scale_changed || mirror_changed {
             self.font_scale = font_scale;
             if font_scale_changed {
                 chrome::set_font_scale(ctx, font_scale);
             }
             self.prefetch_on_hover = prefetch;
-            self.install_mirror_policy(if mirror {
-                MirrorPolicy::Active
-            } else {
-                MirrorPolicy::Paused
-            });
+            if mirror_changed {
+                self.command_mirror_policy(if mirror {
+                    MirrorPolicy::Active
+                } else {
+                    MirrorPolicy::Paused
+                });
+            }
             self.inscribe_durable_state();
         }
         if response.reload_requested() {

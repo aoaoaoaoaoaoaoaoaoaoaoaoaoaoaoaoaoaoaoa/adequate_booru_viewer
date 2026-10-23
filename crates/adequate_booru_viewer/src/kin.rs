@@ -8,7 +8,7 @@
 
 use anyhow::{Context as _, Result, bail};
 use memmap2::{MmapMut, MmapOptions};
-use redb::{Database, ReadableDatabase as _, ReadableTable as _, TableDefinition};
+use redb::{Database, ReadTransaction, ReadableDatabase as _, ReadableTable as _, TableDefinition};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     fs::{File, OpenOptions},
@@ -54,23 +54,17 @@ pub struct Mutation {
 /// Runtime family-key accelerator. The redb edge tables are authoritative;
 /// this file is a generation-sealed projection and may always be rebuilt.
 pub struct Atlas {
-    file: File,
     map: MmapMut,
     slots: usize,
     generation: u64,
-    path: PathBuf,
+    /// The durable file a forged atlas writes through. A sealed atlas maps its
+    /// file privately or lives in anonymous memory, and never mutates.
+    file: Option<(File, PathBuf)>,
 }
 
 impl Atlas {
-    pub fn open(db: &Database, path: impl Into<PathBuf>, minimum_slots: usize) -> Result<Self> {
-        let path = path.into();
-        let tx = db.begin_read().context("begin kin atlas read")?;
-        let parents = tx.open_table(PARENTS).context("open kin parents")?;
-        let meta = tx.open_table(META).context("open kin meta")?;
-        let generation = meta
-            .get(GENERATION)
-            .context("read kin generation")?
-            .map_or(0, |value| value.value());
+    pub fn forge(tx: &ReadTransaction, path: PathBuf, minimum_slots: usize) -> Result<Self> {
+        let generation = generation(tx)?;
         let minimum_slots = rounded_slots(minimum_slots);
         if let Some(mut atlas) = Self::open_valid(&path, generation)? {
             if atlas.slots < minimum_slots {
@@ -78,7 +72,44 @@ impl Atlas {
             }
             return Ok(atlas);
         }
-        Self::rebuild(&path, generation, minimum_slots, &parents)
+        Self::rebuild(tx, path, generation, minimum_slots)
+    }
+
+    /// Map a current atlas file privately, or rebuild a stale one in anonymous
+    /// memory; the file is never written.
+    pub fn seal(tx: &ReadTransaction, path: &Path, minimum_slots: usize) -> Result<Self> {
+        let generation = generation(tx)?;
+        let minimum_slots = rounded_slots(minimum_slots);
+        if let Ok(file) = File::open(path)
+            && file.metadata().context("stat sealed kin atlas")?.len() >= HEADER as u64
+        {
+            // SAFETY: the redb shared lock the sealed index holds excludes
+            // every writer of this file, and the private mapping never writes
+            // through.
+            let map =
+                unsafe { MmapOptions::new().map_copy(&file) }.context("mmap sealed kin atlas")?;
+            if let Some(slots) = valid_slots(&map, generation)?
+                && slots >= minimum_slots
+            {
+                return Ok(Self {
+                    map,
+                    slots,
+                    generation,
+                    file: None,
+                });
+            }
+        }
+        let mut map = MmapOptions::new()
+            .len(atlas_len(minimum_slots)?)
+            .map_anon()
+            .context("allocate sealed kin atlas")?;
+        inscribe(tx, &mut map, generation, minimum_slots)?;
+        Ok(Self {
+            map,
+            slots: minimum_slots,
+            generation,
+            file: None,
+        })
     }
 
     pub fn parent(&self, id: PostId) -> Option<PostId> {
@@ -125,6 +156,9 @@ impl Atlas {
         if required > self.slots {
             self.grow(rounded_slots(required))?;
         }
+        let Some((_, path)) = &self.file else {
+            bail!("sealed kin atlas cannot absorb a mutation");
+        };
         let mut pages = BTreeSet::new();
         for &(child, parent) in &mutation.patches {
             let offset = slot_offset(child.0 as usize);
@@ -135,13 +169,13 @@ impl Atlas {
             let len = PAGE.min(self.map.len().saturating_sub(page));
             self.map
                 .flush_range(page, len)
-                .with_context(|| format!("flush kin atlas page in {}", self.path.display()))?;
+                .with_context(|| format!("flush kin atlas page in {}", path.display()))?;
         }
         self.generation = mutation.generation;
         write_u64(&mut self.map, GENERATION_AT, self.generation);
         self.map
             .flush_range(0, HEADER)
-            .with_context(|| format!("flush kin atlas header in {}", self.path.display()))
+            .with_context(|| format!("flush kin atlas header in {}", path.display()))
     }
 
     fn open_valid(path: &Path, generation: u64) -> Result<Option<Self>> {
@@ -158,59 +192,41 @@ impl Atlas {
         // SAFETY: the file remains owned by the atlas for at least as long as
         // the mapping, and all access is serialized by Index's RwLock.
         let map = unsafe { MmapOptions::new().map_mut(&file) }.context("mmap kin atlas")?;
-        if map.get(..MAGIC.len()) != Some(MAGIC) || read_u64(&map, GENERATION_AT) != generation {
+        let Some(slots) = valid_slots(&map, generation)? else {
             return Ok(None);
-        }
-        let slots = usize::try_from(read_u64(&map, SLOTS_AT)).context("kin slot count")?;
-        if map.len() != atlas_len(slots)? {
-            return Ok(None);
-        }
+        };
         Ok(Some(Self {
-            file,
             map,
             slots,
             generation,
-            path: path.to_path_buf(),
+            file: Some((file, path.to_path_buf())),
         }))
     }
 
     fn rebuild(
-        path: &Path,
+        tx: &ReadTransaction,
+        path: PathBuf,
         generation: u64,
         minimum_slots: usize,
-        parents: &impl redb::ReadableTable<u64, u32>,
     ) -> Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(true)
-            .open(path)
+            .open(&path)
             .with_context(|| format!("rebuild kin atlas {}", path.display()))?;
         file.set_len(atlas_len(minimum_slots)? as u64)
             .context("size kin atlas")?;
         // SAFETY: see `open_valid`; the newly-sized file is exclusively owned.
         let mut map = unsafe { MmapOptions::new().map_mut(&file) }.context("mmap new kin atlas")?;
-        map[..MAGIC.len()].copy_from_slice(MAGIC);
-        write_u64(&mut map, GENERATION_AT, generation);
-        write_u64(&mut map, SLOTS_AT, minimum_slots as u64);
-        for row in parents
-            .range(0_u64..=u64::MAX)
-            .context("range kin parents")?
-        {
-            let (child, parent) = row.context("read kin parent")?;
-            let child = usize::try_from(child.value()).context("kin child id")?;
-            if child < minimum_slots {
-                write_u32(&mut map, slot_offset(child), parent.value());
-            }
-        }
+        inscribe(tx, &mut map, generation, minimum_slots)?;
         map.flush().context("flush rebuilt kin atlas")?;
         Ok(Self {
-            file,
             map,
             slots: minimum_slots,
             generation,
-            path: path.to_path_buf(),
+            file: Some((file, path)),
         })
     }
 
@@ -218,6 +234,9 @@ impl Atlas {
         if slots <= self.slots {
             return Ok(());
         }
+        let Some((file, _)) = &self.file else {
+            bail!("sealed kin atlas cannot grow");
+        };
         self.map.flush().context("flush kin atlas before growth")?;
         let spare = MmapOptions::new()
             .len(HEADER)
@@ -225,13 +244,11 @@ impl Atlas {
             .context("allocate kin atlas remap sentinel")?;
         let old = std::mem::replace(&mut self.map, spare);
         drop(old);
-        self.file
-            .set_len(atlas_len(slots)? as u64)
+        file.set_len(atlas_len(slots)? as u64)
             .context("grow kin atlas")?;
         // SAFETY: the old mapping has been dropped and the resized file stays
         // alive in `self.file`.
-        self.map =
-            unsafe { MmapOptions::new().map_mut(&self.file) }.context("remap grown kin atlas")?;
+        self.map = unsafe { MmapOptions::new().map_mut(file) }.context("remap grown kin atlas")?;
         self.slots = slots;
         self.map[..MAGIC.len()].copy_from_slice(MAGIC);
         write_u64(&mut self.map, GENERATION_AT, self.generation);
@@ -520,6 +537,44 @@ fn decode_children(bytes: &[u8]) -> Result<Vec<PostId>> {
         .iter()
         .map(|word| PostId(u32::from_le_bytes(*word)))
         .collect())
+}
+
+fn generation(tx: &ReadTransaction) -> Result<u64> {
+    Ok(tx
+        .open_table(META)
+        .context("open kin meta")?
+        .get(GENERATION)
+        .context("read kin generation")?
+        .map_or(0, |value| value.value()))
+}
+
+/// The slot count of a mapped atlas current at `generation`, if it is one.
+fn valid_slots(map: &[u8], generation: u64) -> Result<Option<usize>> {
+    if map.get(..MAGIC.len()) != Some(MAGIC) || read_u64(map, GENERATION_AT) != generation {
+        return Ok(None);
+    }
+    let slots = usize::try_from(read_u64(map, SLOTS_AT)).context("kin slot count")?;
+    Ok((map.len() == atlas_len(slots)?).then_some(slots))
+}
+
+/// Write a fresh atlas header and every durable parent edge into `map`.
+fn inscribe(tx: &ReadTransaction, map: &mut [u8], generation: u64, slots: usize) -> Result<()> {
+    map[..MAGIC.len()].copy_from_slice(MAGIC);
+    write_u64(map, GENERATION_AT, generation);
+    write_u64(map, SLOTS_AT, slots as u64);
+    for row in tx
+        .open_table(PARENTS)
+        .context("open kin parents")?
+        .range(0_u64..=u64::MAX)
+        .context("range kin parents")?
+    {
+        let (child, parent) = row.context("read kin parent")?;
+        let child = usize::try_from(child.value()).context("kin child id")?;
+        if child < slots {
+            write_u32(map, slot_offset(child), parent.value());
+        }
+    }
+    Ok(())
 }
 
 fn rounded_slots(slots: usize) -> usize {

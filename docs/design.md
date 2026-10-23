@@ -28,6 +28,11 @@ The durable database persists both directions:
 
 Posts tagged `animated` are outside the reference-workbench contract, as are posts the API serves with every media URL stripped (gold-walled or banned). The ingestion path refuses to insert either, re-absorption purges already-cached offenders from the forward table and tag/rating/sort lanes, and search hydration skips any media-less stragglers in the meantime.
 
+A sealed launch (`--sealed-index PATH`) opens an existing index read-only
+under a shared lock: no lane that absorbs is spawned, the kin atlas is mapped
+privately or rebuilt in memory, and the repair an uncleanly closed index
+demands stays in memory.
+
 Startup restores all three domains before the first local search. The split is
 a contract: losing Session State must never lose user intent, so its loader
 decays silently to defaults; invalid configuration and a damaged Filter Library

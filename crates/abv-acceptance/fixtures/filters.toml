@@ -1,5 +1,5 @@
-# Pinned demo library. Two folders make the filmed "open work → harmless
-# screenshot → copy" sequence literal and reproducible.
+# Pinned Filter Library for acceptance and the showcase: a Boolean reference
+# filter and a peopleless one, each general-rated.
 
 [[folder]]
 name = "work"
@@ -12,5 +12,5 @@ query = "((blue_eyes AND red_hair) OR (blue_hair AND red_eyes)) AND 1girl AND ~c
 name = "play"
 
 [[folder.filter]]
-name = "scratch"
-query = "rating:g"
+name = "scenery"
+query = "no_humans AND scenery AND ~comic AND ~text_focus AND rating:g"

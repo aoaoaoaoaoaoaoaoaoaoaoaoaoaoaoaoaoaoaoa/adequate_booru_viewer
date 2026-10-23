@@ -3,7 +3,7 @@ pub use eternalist_apps::witness::anchor;
 pub use eternalist_apps::witness::response;
 
 #[cfg(feature = "egui-test")]
-pub use active::{Settings, State};
+pub use active::{Settings, State, Tiles};
 
 #[cfg(feature = "egui-test")]
 mod active {
@@ -31,6 +31,15 @@ mod active {
         pub viewer_tags_open: bool,
         pub tag_push_ready: bool,
         pub viewer_post: Option<u32>,
+        pub tiles: Tiles,
+    }
+
+    /// Gallery tiles the submitted pass laid out, and those drawing a ready
+    /// thumbnail.
+    #[derive(Clone, Copy, Default, Serialize)]
+    pub struct Tiles {
+        pub visible: u32,
+        pub painted: u32,
     }
 
     #[derive(Default, Serialize)]

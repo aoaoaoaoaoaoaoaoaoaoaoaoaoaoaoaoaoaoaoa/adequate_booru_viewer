@@ -2,6 +2,8 @@
 
 use std::{borrow::Cow, fmt};
 
+use egui_tester_witness::encode_identity as identity;
+
 /// Reverse-DNS product identifier; the sole source of the viewer's platform and crash identity.
 pub const PRODUCT_IDENTIFIER: &str = "moe.eternalist.adequate-booru-viewer";
 /// Product display name.
@@ -15,7 +17,9 @@ pub fn product_directory() -> &'static str {
         .next()
         .unwrap_or(PRODUCT_IDENTIFIER)
 }
-pub const UI_FINGERPRINT: &str = "abv.ui/4";
+pub const UI_FINGERPRINT: &str = "abv.ui/5";
+/// Witness scope of the Filter Library's cabinet.
+pub const FILTER_CABINET: &str = "filters";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Water {
@@ -69,51 +73,186 @@ impl Water {
     }
 }
 
+/// A tag-drawer row's control.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum TagRowAction {
+    Require,
+    Exclude,
+    Remove,
+    Definition,
+}
+
+impl TagRowAction {
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::Require => "require",
+            Self::Exclude => "exclude",
+            Self::Remove => "remove",
+            Self::Definition => "definition",
+        }
+    }
+}
+
+/// The entry whose completion list offers a candidate.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Completion {
+    Query,
+    TagPush,
+}
+
+impl Completion {
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::Query => "query",
+            Self::TagPush => "tag-push",
+        }
+    }
+}
+
+/// A query group's Boolean operator.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Operator {
+    And,
+    Or,
+    Xor,
+}
+
+impl Operator {
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::And => "and",
+            Self::Or => "or",
+            Self::Xor => "xor",
+        }
+    }
+}
+
+/// The viewer's Danbooru tag-push controls.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum TagPush {
+    Field,
+    Stage,
+    Updated,
+    Fault,
+    Export,
+}
+
+impl TagPush {
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::Field => "field",
+            Self::Stage => "stage",
+            Self::Updated => "updated",
+            Self::Fault => "fault",
+            Self::Export => "export",
+        }
+    }
+}
+
+/// Every semantic address ABV publishes. The wire follows
+/// `owner.semantic.path[/identity...]`: runtime identities are encoded.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Target {
     ImagesPerRow,
+    GalleryContent,
+    /// The screw-scroll gutter beside the gallery content.
+    GalleryGutter,
+    Tile(u32),
+    FamilyBadge(u32),
+    /// A sort plate, by its label.
+    Sort(&'static str),
+    /// A date bound's lever, by bound.
+    DateLever(&'static str),
     Panel(&'static str),
     TagEntry,
+    Completion(Completion, Cow<'static, str>),
+    /// A query group, by its child-index path.
+    Group(Vec<usize>),
+    GroupOperator(Vec<usize>, Operator),
+    Atom(Cow<'static, str>),
     ViewerControl(ViewerControl),
     ViewerSurface,
+    ViewerImage,
+    ViewerToolbar,
+    TagDrawer,
+    TagRow(TagRowAction, Cow<'static, str>),
+    TagPush(TagPush),
+    PendingTag(Cow<'static, str>),
+    DanbooruLink(u32),
+    FamilyNode(u32),
     Water(Water),
+    /// A saved filter's row in the Filter Library.
     Filter(Cow<'static, str>),
+    /// A saved filter's clone control.
+    FilterClone(Cow<'static, str>),
+    /// A Filter Library folder.
+    Shelf(Cow<'static, str>),
     LocalFavorites,
 }
 
 impl Target {
     #[must_use]
     pub fn wire(&self) -> Cow<'static, str> {
-        match self {
-            Self::ImagesPerRow => Cow::Borrowed("abv.gallery.images-per-row"),
-            Self::Panel(name) => Cow::Owned(format!("abv.inspector.panel/{name}")),
-            Self::TagEntry => Cow::Borrowed("abv.query.tag-entry"),
-            Self::ViewerControl(control) => {
-                Cow::Owned(format!("abv.viewer.control.{}", control.wire()))
+        let wire = match self {
+            Self::ImagesPerRow => return Cow::Borrowed("abv.gallery.images-per-row"),
+            Self::GalleryContent => return Cow::Borrowed("abv.gallery.content"),
+            Self::GalleryGutter => return Cow::Borrowed("abv.gallery.gutter"),
+            Self::TagEntry => return Cow::Borrowed("abv.query.tag-entry"),
+            Self::ViewerSurface => return Cow::Borrowed("abv.viewer.surface"),
+            Self::ViewerImage => return Cow::Borrowed("abv.viewer.image"),
+            Self::ViewerToolbar => return Cow::Borrowed("abv.viewer.toolbar"),
+            Self::TagDrawer => return Cow::Borrowed("abv.viewer.tag-drawer"),
+            Self::LocalFavorites => return Cow::Borrowed("abv.filter.local-favorites"),
+            Self::Tile(id) => format!("abv.gallery.tile/{id}"),
+            Self::FamilyBadge(id) => format!("abv.gallery.family-badge/{id}"),
+            Self::Sort(label) => format!("abv.gallery.sort/{}", identity(label)),
+            Self::DateLever(bound) => format!("abv.gallery.date-lever/{}", identity(bound)),
+            Self::Panel(name) => format!("abv.inspector.panel/{}", identity(name)),
+            Self::Completion(entry, tag) => {
+                format!("abv.{}.completion/{}", entry.wire(), identity(tag))
             }
-            Self::ViewerSurface => Cow::Borrowed("abv.viewer.surface"),
-            Self::Water(mode) => Cow::Owned(format!("abv.water.mode.{}", mode.wire())),
-            Self::Filter(name) => Cow::Owned(format!(
-                "abv.cabinet.filter.entry/{}",
-                encode_identity(name)
-            )),
-            Self::LocalFavorites => Cow::Borrowed("abv.filter.local-favorites"),
-        }
+            Self::Group(path) => format!("abv.query.group{}", group(path)),
+            Self::GroupOperator(path, operator) => {
+                format!(
+                    "abv.query.group-operator.{}{}",
+                    operator.wire(),
+                    group(path)
+                )
+            }
+            Self::Atom(term) => format!("abv.query.atom/{}", identity(term)),
+            Self::ViewerControl(control) => format!("abv.viewer.control.{}", control.wire()),
+            Self::TagRow(action, tag) => {
+                format!("abv.tag-drawer.{}/{}", action.wire(), identity(tag))
+            }
+            Self::TagPush(part) => format!("abv.tag-push.{}", part.wire()),
+            Self::PendingTag(tag) => format!("abv.tag-push.pending/{}", identity(tag)),
+            Self::DanbooruLink(id) => format!("abv.viewer.danbooru-link/{id}"),
+            Self::FamilyNode(id) => format!("abv.family.node/{id}"),
+            Self::Water(mode) => format!("abv.water.mode.{}", mode.wire()),
+            Self::Filter(name) => format!("cabinet.{FILTER_CABINET}.entry/{}", identity(name)),
+            Self::FilterClone(name) => {
+                format!("cabinet.{FILTER_CABINET}.clone/{}", identity(name))
+            }
+            Self::Shelf(name) => format!("cabinet.{FILTER_CABINET}.shelf/{}", identity(name)),
+        };
+        Cow::Owned(wire)
     }
 }
 
-fn encode_identity(identity: &str) -> String {
+/// A group's identity: none for the root, else its dotted child-index path.
+fn group(path: &[usize]) -> String {
     use fmt::Write as _;
 
-    let mut encoded = String::with_capacity(identity.len());
-    for byte in identity.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            encoded.push(char::from(byte));
-        } else {
-            let _escape = write!(encoded, "%{byte:02X}");
-        }
+    let mut identity = String::new();
+    for (depth, index) in path.iter().enumerate() {
+        let separator = if depth == 0 { '/' } else { '.' };
+        let _step = write!(identity, "{separator}{index}");
     }
-    encoded
+    identity
 }
 
 impl fmt::Display for Target {

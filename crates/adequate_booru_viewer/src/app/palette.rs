@@ -77,7 +77,7 @@ impl Bayonet {
                         &mut hovered_definition,
                     );
                 });
-                crate::probe_anchor!(ui, "viewer:tag-drawer", _frame.response.rect);
+                crate::witness_anchor!(ui, abv_contract::Target::TagDrawer, _frame.response.rect);
             },
         );
         if let Some(tag) = hovered_definition {
@@ -141,7 +141,11 @@ impl Bayonet {
                             .hint_text("stage a tag…")
                             .desired_width(entry_width),
                     );
-                    crate::probe_anchor!(ui, "field:tag-push", response.interact_rect);
+                    crate::witness_anchor!(
+                        ui,
+                        abv_contract::Target::TagPush(abv_contract::TagPush::Field),
+                        response.interact_rect
+                    );
                     if let Some(wake) =
                         chrome::text_wake(ui, &response, &before, &self.tag_push_draft.entry)
                     {
@@ -157,7 +161,11 @@ impl Bayonet {
                             )
                         })
                         .inner;
-                    crate::probe_anchor!(ui, "tag-push:stage", button.interact_rect);
+                    crate::witness_anchor!(
+                        ui,
+                        abv_contract::Target::TagPush(abv_contract::TagPush::Stage),
+                        button.interact_rect
+                    );
                     let clicked = button.clicked();
                     if let Some(reason) = &denial {
                         let _entry_reason = response.on_hover_text(reason);
@@ -179,7 +187,7 @@ impl Bayonet {
                     ui,
                     completion_cycle,
                     enter,
-                    "push-completion",
+                    abv_contract::Completion::TagPush,
                     actionable,
                 );
                 let staged_now = if let Some(suggestion) = chosen {
@@ -263,7 +271,11 @@ impl Bayonet {
                         .strong()
                         .color(chrome::TEXT),
                 );
-                crate::probe_anchor!(ui, "tag-push:updated", _acknowledgment.interact_rect);
+                crate::witness_anchor!(
+                    ui,
+                    abv_contract::Target::TagPush(abv_contract::TagPush::Updated),
+                    _acknowledgment.interact_rect
+                );
             }
             Some(TagPushNotice::Fault(message)) => {
                 let _fault = ui.add(
@@ -274,7 +286,11 @@ impl Bayonet {
                     )
                     .wrap(),
                 );
-                crate::probe_anchor!(ui, "tag-push:fault", _fault.interact_rect);
+                crate::witness_anchor!(
+                    ui,
+                    abv_contract::Target::TagPush(abv_contract::TagPush::Fault),
+                    _fault.interact_rect
+                );
             }
             None => {}
         }
@@ -303,9 +319,9 @@ impl Bayonet {
                         definitions.get(&addition.tag),
                     );
                 });
-                crate::probe_anchor!(
+                crate::witness_anchor!(
                     ui,
-                    format!("tag-push:pending:{}", addition.tag),
+                    abv_contract::Target::PendingTag(addition.tag.to_string().into()),
                     chip.interact_rect
                 );
                 if chip.clicked() {
@@ -335,7 +351,11 @@ impl Bayonet {
                 })
                 .inner
                 .on_hover_text("push pending tags to Danbooru");
-            crate::probe_anchor!(ui, "tag-push:export", export.interact_rect);
+            crate::witness_anchor!(
+                ui,
+                abv_contract::Target::TagPush(abv_contract::TagPush::Export),
+                export.interact_rect
+            );
             if export.clicked() {
                 self.submit_tag_push(post);
             }
@@ -480,9 +500,12 @@ fn palette_body(
                             active.is_some().then_some(chrome::Symbol::Remove),
                             "remove from query",
                         ) {
-                            crate::probe_anchor!(
+                            crate::witness_anchor!(
                                 ui,
-                                format!("tagrow:{}:remove", tag.as_str()),
+                                abv_contract::Target::TagRow(
+                                    abv_contract::TagRowAction::Remove,
+                                    tag.to_string().into()
+                                ),
                                 remove.interact_rect
                             );
                             if remove.clicked() {
@@ -492,9 +515,12 @@ fn palette_body(
                         let require =
                             tag_action(ui, water, Some(chrome::Symbol::Add), "require tag");
                         if require.as_ref().is_some_and(|response| {
-                            crate::probe_anchor!(
+                            crate::witness_anchor!(
                                 ui,
-                                format!("tagrow:{}:require", tag.as_str()),
+                                abv_contract::Target::TagRow(
+                                    abv_contract::TagRowAction::Require,
+                                    tag.to_string().into()
+                                ),
                                 response.interact_rect
                             );
                             response.clicked()
@@ -504,9 +530,12 @@ fn palette_body(
                         let exclude =
                             tag_action(ui, water, Some(chrome::Symbol::Decrement), "exclude tag");
                         if exclude.as_ref().is_some_and(|response| {
-                            crate::probe_anchor!(
+                            crate::witness_anchor!(
                                 ui,
-                                format!("tagrow:{}:exclude", tag.as_str()),
+                                abv_contract::Target::TagRow(
+                                    abv_contract::TagRowAction::Exclude,
+                                    tag.to_string().into()
+                                ),
                                 response.interact_rect
                             );
                             response.clicked()
@@ -517,9 +546,12 @@ fn palette_body(
                         let response = ui.add(
                             egui::Label::new(tag_chroma::text(tag.as_str(), *kind)).truncate(),
                         );
-                        crate::probe_anchor!(
+                        crate::witness_anchor!(
                             ui,
-                            format!("tagrow:{}:definition", tag.as_str()),
+                            abv_contract::Target::TagRow(
+                                abv_contract::TagRowAction::Definition,
+                                tag.to_string().into()
+                            ),
                             response.interact_rect
                         );
                         let _tag = if let Some(definitions) = definitions {

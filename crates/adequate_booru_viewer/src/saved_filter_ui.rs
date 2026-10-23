@@ -157,7 +157,7 @@ pub fn library(
         bank.show_renamable(
             ui,
             water,
-            "filters",
+            abv_contract::FILTER_CABINET,
             "filter",
             selection.saved(),
             shelf_edit,
@@ -183,7 +183,7 @@ fn local_favorites_row(
     let response = ui
         .selectable_label(selected, text)
         .on_hover_text("built-in: show every locally favorited image");
-    crate::probe_anchor!(
+    crate::witness_anchor!(
         ui,
         abv_contract::Target::LocalFavorites,
         response.interact_rect
