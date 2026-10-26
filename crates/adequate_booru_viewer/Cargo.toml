@@ -31,7 +31,7 @@ base64 = "0.23.1"
 crossbeam-channel = "0.5.16"
 directories = "6.0.0"
 brass_poolrooms = "0.16.0"
-abv-contract = { path = "../abv-contract", version = "0.2.5" }
+abv-contract = { path = "../abv-contract", version = "0.3.0" }
 egui = { version = "=0.36.1", default-features = false }
 eternalist-apps = "0.13.0"
 image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
