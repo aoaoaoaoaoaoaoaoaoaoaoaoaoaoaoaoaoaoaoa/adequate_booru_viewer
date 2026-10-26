@@ -6,7 +6,6 @@ use std::{
     collections::HashMap,
     fs::{File, TryLockError},
     io, iter,
-    os::unix::fs::FileExt as _,
     path::Path,
     sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
@@ -79,7 +78,7 @@ impl Ink {
             .unwrap_or(usize::MAX)
             .min(out.len());
         let (from_file, beyond) = out.split_at_mut(visible);
-        file.read_exact_at(from_file, offset)?;
+        read_exact_at(file, from_file, offset)?;
         beyond.fill(0);
         Ok(())
     }
@@ -162,4 +161,29 @@ fn spans(offset: u64, len: usize) -> impl Iterator<Item = (u64, usize, usize)> {
             (block, within, take)
         })
     })
+}
+
+/// Fill `out` from `file` at `offset` without touching a shared cursor.
+#[cfg(unix)]
+fn read_exact_at(file: &File, out: &mut [u8], offset: u64) -> io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(file, out, offset)
+}
+
+/// Fill `out` from `file` at `offset`; each positioned read names its own
+/// offset, so concurrent readers never race on the handle's cursor.
+#[cfg(windows)]
+fn read_exact_at(file: &File, mut out: &mut [u8], mut offset: u64) -> io::Result<()> {
+    use std::os::windows::fs::FileExt as _;
+    while !out.is_empty() {
+        match file.seek_read(out, offset) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(read) => {
+                out = &mut out[read..];
+                offset += read as u64;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
