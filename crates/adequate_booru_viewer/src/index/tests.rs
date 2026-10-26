@@ -472,7 +472,11 @@ fn atom(raw: &str) -> Result<QueryAtom> {
 /// abv never drops its database at exit, so the index it leaves claims to need
 /// a repair that redb's read-only open refuses. Sealing must still open such an
 /// index and answer from it while every byte on disk stays as it was.
+///
+/// The abandoned index is forged by copying a database that is still open,
+/// which only advisory locks permit; Windows locks are mandatory.
 #[test]
+#[cfg(unix)]
 fn sealing_reads_an_abandoned_index_without_writing() -> Result<()> {
     let scratch = tempfile::tempdir()?;
     let path = scratch.path().join("forged.redb");
