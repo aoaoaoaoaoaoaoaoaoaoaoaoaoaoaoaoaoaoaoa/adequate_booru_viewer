@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "adequate_booru_viewer"
-version = "1.4.1"
+version = "1.4.2"
 dependencies = [
  "abv-contract",
  "anyhow",
@@ -4266,7 +4266,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "1.4.1"
+version = "1.4.2"
 dependencies = [
  "anyhow",
 ]
